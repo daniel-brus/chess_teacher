@@ -1,0 +1,8 @@
+chess
+stockfish
+anthropic
+requests
+sqlite-utils
+apscheduler
+python-dotenv
+streamlit

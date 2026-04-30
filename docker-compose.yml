@@ -1,0 +1,7 @@
+services:
+  chess_teacher:
+    build: .
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
