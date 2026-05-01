@@ -34,7 +34,7 @@ jobs:
       - name: Run type check
         run: mypy src config
 
-  security:
+  vulnerability-scan:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
