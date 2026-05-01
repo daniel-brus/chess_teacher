@@ -1,5 +1,9 @@
 -r requirements.txt
 pytest
 pytest-mock
+pytest-cov
 ruff
 pre-commit
+mypy
+pip-audit
+bandit
