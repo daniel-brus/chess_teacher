@@ -10,8 +10,10 @@ from typing import Any, ClassVar
 
 def _get_log_dir() -> Path:
     """Get the log directory path from env or default."""
-    base = os.getenv("LOG_DIR")
-    return Path(base)
+    base = os.getenv("RAW_DIR", None)
+    if not base:
+        raise ValueError("Missing env var to configure log_dir: RAW_DIR")
+    return Path(base + "/logs")
 
 
 class _JsonLinesFormatter(logging.Formatter):
