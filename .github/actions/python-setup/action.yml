@@ -1,0 +1,22 @@
+name: Python Setup
+description: Checkout, setup Python, install dependencies
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/checkout@v4
+
+    - name: Read Python version
+      id: python-version
+      run: echo "version=$(cat .python-version)" >> $GITHUB_OUTPUT
+      shell: bash
+
+    - uses: actions/setup-python@v5
+      with:
+        python-version: ${{ steps.python-version.outputs.version }}
+        cache: "pip"
+        cache-dependency-path: "requirements-dev.txt"
+
+    - name: Install dependencies
+      run: pip install -r requirements-dev.txt
+      shell: bash

@@ -2,56 +2,38 @@ name: CI
 
 on:
   push:
-    branches: [main, develop, "feature/*"]
+    branches: [develop, "feature/*"]
   pull_request:
     branches: [main, develop]
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/python-setup
+      - name: Run linter
+        run: ruff check src config tests
+
   test:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      actions: read
-      checks: write
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Read Python version
-        id: python-version
-        run: |
-          VERSION=$(cat .python-version)
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ steps.python-version.outputs.version }}
-          cache: "pip"
-          cache-dependency-path: "requirements-dev.txt"
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements-dev.txt
-
-      - name: Run linter
-        run: ruff check src config tests app.py
-
+      - uses: ./.github/actions/python-setup
       - name: Run tests with coverage
-        run: pytest -v --tb=short --cov=src --cov-report=xml --cov-report=term
+        run: pytest -v --tb=short --cov=src --cov-report=term
 
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v4
-        if: success()
-        with:
-          files: ./coverage.xml
-          fail_ci_if_error: false
-        continue-on-error: true
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/python-setup
+      - name: Run type check
+        run: mypy src config
+
+  security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/python-setup
+      - name: Run security audit
+        run: pip-audit
