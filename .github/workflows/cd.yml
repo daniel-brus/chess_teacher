@@ -4,19 +4,52 @@ on:
   push:
     branches: [main]
 
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
-
 permissions:
   contents: read
+  packages: write
 
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
     environment: production
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Read Python version
+        id: python-version
+        run: |
+          VERSION=$(cat .python-version)
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ steps.python-version.outputs.version }}
+          cache: "pip"
+          cache-dependency-path: "requirements-dev.txt"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Run linter
+        run: ruff check src config tests app.py
+
+      - name: Run tests
+        run: pytest -v --tb=short
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
       - name: Validate DockerHub secrets
         shell: bash
         env:
@@ -27,22 +60,28 @@ jobs:
             echo "Missing secrets: set DOCKERHUB_USERNAME and DOCKERHUB_TOKEN in GitHub Actions secrets."
             exit 1
           fi
-      - uses: docker/login-action@v3
-        env:
-          NODE_OPTIONS: --no-deprecation
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
         with:
           username: ${{ vars.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
-      - id: meta
+
+      - name: Extract metadata
+        id: meta
         uses: docker/metadata-action@v5
         with:
           images: ${{ vars.DOCKERHUB_USERNAME }}/chess_teacher
           tags: |
             type=raw,value=latest
             type=sha,format=long
-      - uses: docker/build-push-action@v5
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
         with:
           context: .
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
