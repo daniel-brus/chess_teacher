@@ -1,6 +1,34 @@
 services:
-  chess_teacher:
-    build: .
-    env_file: .env
+  db:
+    image: postgres:16
+    container_name: chess_teacher_postgres
+    restart: unless-stopped
+
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_PORT: ${POSTGRES_PORT}
+
     volumes:
-      - ./data:/app/data
+      - ./storage/postgres:/var/lib/postgresql/data
+
+    ports:
+      - "${POSTGRES_PORT}:5432"
+
+  app:
+    build: .
+    container_name: chess_teacher_app
+    #restart: unless-stopped
+
+    depends_on:
+      - db
+
+    env_file:
+      - .env
+
+    volumes:
+      - ./storage/raw:/app/storage/raw
+
+    ports:
+      - "${APP_PORT}:8501"

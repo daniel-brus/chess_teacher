@@ -16,6 +16,6 @@ COPY src/ ./src/
 COPY scripts/ ./scripts/
 
 # Data map aanmaken
-RUN mkdir -p data
+RUN mkdir -p storage
 
-CMD ["python", "scripts/main.py"]
+CMD ["python", "-m", "scripts.main"]

@@ -10,7 +10,7 @@ from typing import Any, ClassVar
 
 def _get_log_dir() -> Path:
     """Get the log directory path from env or default."""
-    base = os.getenv("LOG_DIR", "data/raw_logs")
+    base = os.getenv("LOG_DIR")
     return Path(base)
 
 
@@ -64,7 +64,7 @@ def configure_logging(
 
     Env vars:
     - LOG_LEVEL (default INFO)
-    - LOG_DIR (default data/raw_logs)
+    - LOG_DIR (default storage/logs)
     - ENVIRONMENT (default development)
     """
 
@@ -72,7 +72,7 @@ def configure_logging(
     if getattr(root, "_chess_teacher_logging_configured", False) and not force:
         return
 
-    resolved_level = (level or os.getenv("LOG_LEVEL") or "INFO").upper()
+    resolved_level = (level or "INFO").upper()
     resolved_log_dir = log_dir or _get_log_dir()
 
     root.handlers.clear()
