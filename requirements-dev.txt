@@ -4,5 +4,5 @@ pytest-mock
 pytest-cov
 ruff
 pre-commit
-mymp
+mypy
 pip-audit
