@@ -2,60 +2,70 @@ import inspect
 import json
 import logging
 import os
-import time
-from logging.handlers import RotatingFileHandler
+from datetime import UTC, datetime
+from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 
-def _env_bool(name: str, default: bool = False) -> bool:
-    raw = os.getenv(name)
-    if raw is None:
-        return default
-    return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
+def _get_log_dir() -> Path:
+    """Get the log directory path from env or default."""
+    base = os.getenv("LOG_DIR", "data/raw_logs")
+    return Path(base)
 
 
-def _env_int(name: str, default: int) -> int:
-    raw = os.getenv(name)
-    if raw is None or not raw.strip():
-        return default
-    try:
-        return int(raw)
-    except ValueError:
-        return default
+class _JsonLinesFormatter(logging.Formatter):
+    """Minimal JSON lines formatter."""
 
-
-class _JsonFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         payload: dict[str, Any] = {
-            "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(record.created)),
+            "ts": datetime.now(UTC).isoformat(),
             "level": record.levelname,
             "logger": record.name,
             "msg": record.getMessage(),
         }
+
+        # Exception info
         if record.exc_info:
             payload["exc_info"] = self.formatException(record.exc_info)
+
         return json.dumps(payload, ensure_ascii=False)
+
+
+class _ConsoleFormatter(logging.Formatter):
+    """Simple colored console formatter."""
+
+    COLORS: ClassVar[dict[str, str]] = {
+        "DEBUG": "\033[36m",  # Cyan
+        "INFO": "\033[32m",  # Green
+        "WARNING": "\033[33m",  # Yellow
+        "ERROR": "\033[31m",  # Red
+        "CRITICAL": "\033[35m",  # Magenta
+    }
+    RESET: ClassVar[str] = "\033[0m"
+
+    def format(self, record: logging.LogRecord) -> str:
+        color = self.COLORS.get(record.levelname, "")
+        timestamp = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
+        return (
+            f"{timestamp} {color}{record.levelname:<8}{self.RESET} "
+            f"{record.name}: {record.getMessage()}"
+        )
 
 
 def configure_logging(
     *,
     level: str | None = None,
-    json_logs: bool | None = None,
-    log_file: str | None = None,
-    max_bytes: int | None = None,
-    backup_count: int | None = None,
+    log_dir: Path | None = None,
     force: bool = False,
 ) -> None:
     """
-    Basic logging for local + Docker.
+    Configure logging with JSON lines file + console output.
 
     Env vars:
     - LOG_LEVEL (default INFO)
-    - LOG_JSON=1 for JSON lines
-    - LOG_FILE=/path/to/app.log for rotating file logs
-    - LOG_MAX_BYTES (default 5_000_000)
-    - LOG_BACKUP_COUNT (default 3)
+    - LOG_DIR (default data/raw_logs)
+    - ENVIRONMENT (default development)
     """
 
     root = logging.getLogger()
@@ -63,43 +73,32 @@ def configure_logging(
         return
 
     resolved_level = (level or os.getenv("LOG_LEVEL") or "INFO").upper()
-    resolved_json = json_logs if json_logs is not None else _env_bool("LOG_JSON", False)
-    resolved_log_file = log_file if log_file is not None else os.getenv("LOG_FILE")
-    resolved_max_bytes = (
-        max_bytes if max_bytes is not None else _env_int("LOG_MAX_BYTES", 5_000_000)
-    )
-    resolved_backup_count = (
-        backup_count if backup_count is not None else _env_int("LOG_BACKUP_COUNT", 3)
-    )
+    resolved_log_dir = log_dir or _get_log_dir()
 
     root.handlers.clear()
     root.setLevel(resolved_level)
 
-    if resolved_json:
-        formatter: logging.Formatter = _JsonFormatter()
-    else:
-        formatter = logging.Formatter(
-            fmt="%(asctime)s %(levelname)s %(name)s: %(message)s",
-            datefmt="%Y-%m-%d %H:%M:%S",
-        )
-
+    # Console handler with colored output
     console = logging.StreamHandler()
-    console.setFormatter(formatter)
+    console.setFormatter(_ConsoleFormatter())
     console.setLevel(resolved_level)
     root.addHandler(console)
 
-    if resolved_log_file:
-        log_path = Path(resolved_log_file)
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        file_handler = RotatingFileHandler(
-            log_path,
-            maxBytes=resolved_max_bytes,
-            backupCount=resolved_backup_count,
-            encoding="utf-8",
-        )
-        file_handler.setFormatter(formatter)
-        file_handler.setLevel(resolved_level)
-        root.addHandler(file_handler)
+    # File handler with daily JSON lines
+    resolved_log_dir.mkdir(parents=True, exist_ok=True)
+    log_file = resolved_log_dir / "app.log"
+
+    file_handler = TimedRotatingFileHandler(
+        log_file,
+        when="midnight",
+        interval=1,
+        backupCount=30,  # Keep 30 days of logs
+        encoding="utf-8",
+    )
+    file_handler.suffix = "%Y/%m/%d"  # Directory structure: YYYY/MM/DD/app.log
+    file_handler.setFormatter(_JsonLinesFormatter())
+    file_handler.setLevel(resolved_level)
+    root.addHandler(file_handler)
 
     root._chess_teacher_logging_configured = True
 
@@ -110,6 +109,7 @@ def get_logger(name: str | None = None) -> logging.Logger:
 
     Usage:
         logger = get_logger()
+        logger.info("Hello world")
     """
 
     configure_logging()
