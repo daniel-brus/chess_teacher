@@ -4,5 +4,6 @@ anthropic
 requests
 sqlite-utils
 apscheduler
-python-dotenv
+sqlalchemy
 streamlit
+pyyaml
