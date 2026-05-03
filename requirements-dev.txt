@@ -7,3 +7,5 @@ pre-commit
 mypy
 pip-audit
 bandit
+types-requests
+types-PyYAML

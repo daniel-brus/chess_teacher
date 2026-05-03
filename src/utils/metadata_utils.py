@@ -48,8 +48,8 @@ class ColumnMetadata:
 
     @staticmethod
     def from_dict(raw: dict[str, Any]) -> ColumnMetadata:
-        name = _require_ident(raw.get("name"), what="column name")
-        data_type = raw.get("type") or raw.get("data_type")
+        name = _require_ident(raw.get("name", ""), what="column name")
+        data_type = raw.get("data_type")
         if not isinstance(data_type, str) or not data_type.strip():
             raise ValueError(f"Column '{name}' missing 'type'")
         comment = raw.get("comment")
@@ -88,11 +88,11 @@ class TableMetadata:
             raw = {**raw, **table_raw}
 
         schema_name = _require_ident(
-            raw.get("schema") or raw.get("schema_name") or raw.get("schemaName"),
+            raw.get("schema", ""),
             what="schema name",
         )
         table_name = _require_ident(
-            raw.get("name") or raw.get("table") or raw.get("table_name") or raw.get("tableName"),
+            raw.get("table", ""),
             what="table name",
         )
 

@@ -11,10 +11,8 @@ services:
       retries: 10
 
 
-    environment: # only provide neccesary vars from .env
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      POSTGRES_DB: ${POSTGRES_DB}
+    env_file: # TODO: only provide necessary vars
+      - ../.env
 
     volumes:
       - ../storage/postgres:/var/lib/postgresql/data

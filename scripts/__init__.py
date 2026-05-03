@@ -1,1 +1,1 @@
-"""Scripts package for chess_teacher."""
+"""Scripts package for chess_teacher, containing job scripts."""

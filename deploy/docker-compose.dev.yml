@@ -1,12 +1,14 @@
 services:
   app:
     image: ${DOCKERHUB_USERNAME}/chess-teacher:develop
+    build: {}
     pull_policy: always
     environment:
       ENVIRONMENT: DEV
 
   nightly-job:
     image: ${DOCKERHUB_USERNAME}/chess-teacher:develop
+    build: {}
     pull_policy: always
 
     depends_on:

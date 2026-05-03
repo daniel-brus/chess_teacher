@@ -9,6 +9,9 @@ from typing import Any, ClassVar
 
 from src.utils.env_utils import get_env_variable
 
+# Module-level flag to track logging configuration
+_logging_configured = False
+
 
 def _get_log_dir() -> Path:
     """Get the log directory path from env or default."""
@@ -75,7 +78,8 @@ def configure_logging(
     """
 
     root = logging.getLogger()
-    if getattr(root, "_chess_teacher_logging_configured", False) and not force:
+    global _logging_configured
+    if _logging_configured and not force:
         return
 
     resolved_level = (level or "INFO").upper()
@@ -106,7 +110,7 @@ def configure_logging(
     file_handler.setLevel(resolved_level)
     root.addHandler(file_handler)
 
-    root._chess_teacher_logging_configured = True
+    _logging_configured = True
 
 
 def get_logger(name: str | None = None) -> logging.Logger:

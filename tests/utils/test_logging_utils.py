@@ -18,10 +18,9 @@ class TestConfigureLogging:
         """Test that configure_logging adds console and file handlers."""
         root = logging.getLogger()
 
-        # Clear any existing handlers
+        # Clear any existing handlers and reset the configured flag
         root.handlers.clear()
-        if hasattr(root, "_chess_teacher_logging_configured"):
-            delattr(root, "_chess_teacher_logging_configured")
+        logging_utils._logging_configured = False
 
         # Mock _get_log_dir to use temp directory
         mock_dir = mocker.patch.object(
@@ -37,8 +36,7 @@ class TestConfigureLogging:
         """Test that configure_logging doesn't run twice."""
         root = logging.getLogger()
         root.handlers.clear()
-        if hasattr(root, "_chess_teacher_logging_configured"):
-            delattr(root, "_chess_teacher_logging_configured")
+        logging_utils._logging_configured = False
 
         # First call
         mock_dir = mocker.patch.object(
@@ -58,8 +56,7 @@ class TestConfigureLogging:
         """Test configure_logging accepts custom level parameter."""
         root = logging.getLogger()
         root.handlers.clear()
-        if hasattr(root, "_chess_teacher_logging_configured"):
-            delattr(root, "_chess_teacher_logging_configured")
+        logging_utils._logging_configured = False
 
         mocker.patch.object(
             logging_utils, "_get_log_dir", return_value=Path(tempfile.gettempdir()) / "test_logs"
@@ -72,8 +69,7 @@ class TestConfigureLogging:
         """Test configure_logging defaults to INFO level."""
         root = logging.getLogger()
         root.handlers.clear()
-        if hasattr(root, "_chess_teacher_logging_configured"):
-            delattr(root, "_chess_teacher_logging_configured")
+        logging_utils._logging_configured = False
 
         mocker.patch.object(
             logging_utils, "_get_log_dir", return_value=Path(tempfile.gettempdir()) / "test_logs"
@@ -88,6 +84,7 @@ class TestGetLogger:
 
     def test_get_logger_returns_logger(self, mocker):
         """Test that get_logger returns a Logger instance."""
+        logging_utils._logging_configured = False
         mocker.patch.object(
             logging_utils, "_get_log_dir", return_value=Path(tempfile.gettempdir()) / "test_logs"
         )
@@ -98,8 +95,7 @@ class TestGetLogger:
         """Test that get_logger triggers configuration."""
         root = logging.getLogger()
         root.handlers.clear()
-        if hasattr(root, "_chess_teacher_logging_configured"):
-            delattr(root, "_chess_teacher_logging_configured")
+        logging_utils._logging_configured = False
 
         mocker.patch.object(
             logging_utils, "_get_log_dir", return_value=Path(tempfile.gettempdir()) / "test_logs"
@@ -107,14 +103,13 @@ class TestGetLogger:
         logging_utils.get_logger("test_module")
 
         # Should have configured logging
-        assert getattr(root, "_chess_teacher_logging_configured", False)
+        assert logging_utils._logging_configured
 
     def test_get_logger_without_name_uses_caller_module(self, mocker):
         """Test that get_logger without name uses caller module name."""
         root = logging.getLogger()
         root.handlers.clear()
-        if hasattr(root, "_chess_teacher_logging_configured"):
-            delattr(root, "_chess_teacher_logging_configured")
+        logging_utils._logging_configured = False
 
         mocker.patch.object(
             logging_utils, "_get_log_dir", return_value=Path(tempfile.gettempdir()) / "test_logs"
