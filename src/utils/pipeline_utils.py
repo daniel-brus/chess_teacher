@@ -6,7 +6,7 @@ from pathlib import Path
 from sqlalchemy import create_engine, text
 from sqlalchemy import inspect as sa_inspect
 
-from config.config import secrets
+from src.utils.env_utils import get_env_variable
 from src.utils.logging_utils import get_logger
 from src.utils.metadata_utils import TableMetadata
 
@@ -17,13 +17,13 @@ class Pipeline:
         Args:
             metadata_path: Optional explicit path to a `metadata.yml` file.
         """
-        if not getattr(secrets, "DATABASE_URL", None):
+        database_url = get_env_variable("DATABASE_URL")
+        if not database_url:
             raise ValueError(
                 "DATABASE_URL is not set. Provide it via env/.env so SQLAlchemy can connect."
             )
-
+        self.engine = create_engine(database_url)
         self.logger = get_logger(self.__class__.__name__)
-        self.engine = create_engine(secrets.DATABASE_URL)
         self.metadata_path = Path(metadata_path) if metadata_path else None
         self.metadata = self._get_metadata_from_yml()
         self.schema_name = self.metadata.schema_name

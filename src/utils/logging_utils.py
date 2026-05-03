@@ -1,16 +1,18 @@
 import inspect
 import json
 import logging
-import os
+import uuid
 from datetime import UTC, datetime
 from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 from typing import Any, ClassVar
 
+from src.utils.env_utils import get_env_variable
+
 
 def _get_log_dir() -> Path:
     """Get the log directory path from env or default."""
-    base = os.getenv("RAW_DIR", None)
+    base = get_env_variable("RAW_DIR")
     if not base:
         raise ValueError("Missing env var to configure log_dir: RAW_DIR")
     return Path(base + "/logs")
@@ -25,6 +27,8 @@ class _JsonLinesFormatter(logging.Formatter):
             "level": record.levelname,
             "logger": record.name,
             "msg": record.getMessage(),
+            "log_id": str(uuid.uuid4()),
+            "environment": get_env_variable("ENVIRONMENT"),
         }
 
         # Exception info

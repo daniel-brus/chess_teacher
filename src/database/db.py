@@ -1,15 +1,26 @@
 from pathlib import Path
 
+from src.utils.env_utils import get_env_variable
 from src.utils.pipeline_utils import Pipeline
 
 
 class DatabaseLoader(Pipeline):
+    # HAAL DEZE MISSCHIEN NAAR utils! en splits dan op in
+    # logging pipeline + ingested->db pipeline child classes
     def __init__(self):
         super().__init__()
-        self.raw_dir = Path("/app/storage/raw/input")  # TODO: make configurabel based on .env
+        try:
+            raw_dir = get_env_variable("RAW_DIR")
+        except ValueError as e:
+            self.logger.error("RAW_DIR environment variable is not set.")
+            raise e
+        self.raw_dir = Path(raw_dir)
 
     def _run(self) -> None:
         NotImplementedError("IF YOU READ THIS, DO NOT REPLACE YET")
+        self.logger.warning(
+            "This pipeline is not implemented yet. It will be added in a future PR."
+        )
 
 
 # for file in self.raw_dir.glob("*.json"):

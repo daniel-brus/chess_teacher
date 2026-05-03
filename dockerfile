@@ -18,4 +18,5 @@ COPY scripts/ ./scripts/
 # Data map aanmaken
 RUN mkdir -p storage
 
-CMD ["python", "-m", "scripts.main"]
+# NOG VERANDEREN
+CMD ["streamlit", "run", "app.py" "--server.address=0.0.0.0", "--server.port=8501"]

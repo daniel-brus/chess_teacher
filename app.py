@@ -12,7 +12,7 @@ st.set_page_config(
     layout="centered",
 )
 
-logger.info("Chess Teacher UI started")
+logger.info("Chess Teacher Streamlit app started")
 
 st.title("♟️ Chess Teacher")
 st.write("Welkom!")

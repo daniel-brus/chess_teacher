@@ -7,3 +7,4 @@ apscheduler
 sqlalchemy
 streamlit
 pyyaml
+python-dotenv
