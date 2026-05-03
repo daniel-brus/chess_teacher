@@ -6,6 +6,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+import pytest
+
 from src.utils import logging_utils
 
 
@@ -66,20 +68,19 @@ class TestConfigureLogging:
 
         assert root.level == logging.DEBUG
 
-    def test_configure_logging_respects_env_level(self, mocker, monkeypatch):
-        """Test configure_logging reads LOG_LEVEL from environment."""
+    def test_configure_logging_defaults_to_info(self, mocker):
+        """Test configure_logging defaults to INFO level."""
         root = logging.getLogger()
         root.handlers.clear()
         if hasattr(root, "_chess_teacher_logging_configured"):
             delattr(root, "_chess_teacher_logging_configured")
 
-        monkeypatch.setenv("LOG_LEVEL", "WARNING")
         mocker.patch.object(
             logging_utils, "_get_log_dir", return_value=Path(tempfile.gettempdir()) / "test_logs"
         )
         logging_utils.configure_logging()
 
-        assert root.level == logging.WARNING
+        assert root.level == logging.INFO
 
 
 class TestGetLogger:
@@ -218,6 +219,94 @@ class TestJsonLinesFormatter:
         parsed = json.loads(result)
 
         assert "exc_info" in parsed
+
+    def test_format_includes_unique_log_id(self):
+        """Test that each log record gets a unique log_id."""
+        formatter = logging_utils._JsonLinesFormatter()
+
+        record1 = logging.LogRecord(
+            name="test",
+            level=logging.INFO,
+            pathname="test.py",
+            lineno=1,
+            msg="Message 1",
+            args=(),
+            exc_info=None,
+        )
+
+        record2 = logging.LogRecord(
+            name="test",
+            level=logging.INFO,
+            pathname="test.py",
+            lineno=1,
+            msg="Message 2",
+            args=(),
+            exc_info=None,
+        )
+
+        result1 = formatter.format(record1)
+        result2 = formatter.format(record2)
+
+        parsed1 = json.loads(result1)
+        parsed2 = json.loads(result2)
+
+        # Both should have log_id
+        assert "log_id" in parsed1
+        assert "log_id" in parsed2
+        # Each should be unique
+        assert parsed1["log_id"] != parsed2["log_id"]
+        # Should be valid UUID format
+        import uuid
+
+        uuid.UUID(parsed1["log_id"])
+        uuid.UUID(parsed2["log_id"])
+
+    def test_format_includes_environment(self, monkeypatch):
+        """Test that environment field is included in JSON output."""
+        # Set ENVIRONMENT to test value
+        monkeypatch.setenv("ENVIRONMENT", "testing")
+
+        formatter = logging_utils._JsonLinesFormatter()
+
+        record = logging.LogRecord(
+            name="test",
+            level=logging.INFO,
+            pathname="test.py",
+            lineno=1,
+            msg="Test",
+            args=(),
+            exc_info=None,
+        )
+
+        result = formatter.format(record)
+        parsed = json.loads(result)
+
+        assert "environment" in parsed
+        assert parsed["environment"] == "testing"
+
+    def test_format_environment_raises_when_missing(self):
+        """Test that format raises ValueError if ENVIRONMENT is not set."""
+        # Ensure ENVIRONMENT is not set
+        import os
+
+        os.environ.pop("ENVIRONMENT", None)
+
+        formatter = logging_utils._JsonLinesFormatter()
+
+        record = logging.LogRecord(
+            name="test",
+            level=logging.INFO,
+            pathname="test.py",
+            lineno=1,
+            msg="Test",
+            args=(),
+            exc_info=None,
+        )
+
+        with pytest.raises(ValueError) as exc_info:
+            formatter.format(record)
+
+        assert "Missing required environment variable: ENVIRONMENT" in str(exc_info.value)
 
 
 class TestConsoleFormatter:

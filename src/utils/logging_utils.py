@@ -71,7 +71,7 @@ def configure_logging(
     Env vars:
     - LOG_LEVEL (default INFO)
     - LOG_DIR (default storage/logs)
-    - ENVIRONMENT (default development)
+    - ENVIRONMENT
     """
 
     root = logging.getLogger()

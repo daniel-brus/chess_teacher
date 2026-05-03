@@ -16,7 +16,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/python-setup
       - name: Run linter
-        run: ruff check src config tests
+        run: ruff check src scripts tests
 
   test:
     runs-on: ubuntu-latest
@@ -32,4 +32,4 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/python-setup
       - name: Run type check
-        run: mypy src config
+        run: mypy src
