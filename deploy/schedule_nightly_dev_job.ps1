@@ -24,7 +24,9 @@ $trigger = New-ScheduledTaskTrigger -Daily -At 3:00AM
 
 $settings = New-ScheduledTaskSettingsSet `
   -WakeToRun `
-  -StartWhenAvailable
+  -StartWhenAvailable `
+  -AllowStartIfOnBatteries `
+  -DontStopIfGoingOnBatteries
 
 Register-ScheduledTask `
   -TaskName "ChessTeacherNightlyDev" `

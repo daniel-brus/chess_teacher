@@ -10,7 +10,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Config en source code
+# Source code
 COPY src/ ./src/
 COPY scripts/ ./scripts/
 

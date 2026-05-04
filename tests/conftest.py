@@ -15,15 +15,3 @@ sys.path.insert(0, str(project_root))
 def project_root_path():
     """Fixture providing the project root path."""
     return project_root
-
-
-@pytest.fixture
-def data_dir():
-    """Fixture providing the data directory path."""
-    return project_root / "data"
-
-
-@pytest.fixture
-def config_dir():
-    """Fixture providing the config directory path."""
-    return project_root / "config"

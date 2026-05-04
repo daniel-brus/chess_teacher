@@ -123,8 +123,9 @@ class TestGetLogger:
 class TestJsonLinesFormatter:
     """Tests for _JsonLinesFormatter class."""
 
-    def test_format_returns_valid_json(self):
+    def test_format_returns_valid_json(self, mocker):
         """Test that format returns valid JSON string."""
+        mocker.patch.object(logging_utils, "get_env_variable", return_value="test")
         formatter = logging_utils._JsonLinesFormatter()
 
         # Create a mock log record
@@ -147,8 +148,9 @@ class TestJsonLinesFormatter:
         assert "logger" in parsed
         assert "msg" in parsed
 
-    def test_format_includes_timestamp(self):
+    def test_format_includes_timestamp(self, mocker):
         """Test that output includes timestamp."""
+        mocker.patch.object(logging_utils, "get_env_variable", return_value="test")
         formatter = logging_utils._JsonLinesFormatter()
 
         record = logging.LogRecord(
@@ -169,8 +171,9 @@ class TestJsonLinesFormatter:
         assert "T" in ts  # ISO format has T between date and time
         assert "+" in ts or "Z" in ts or "-" in ts[-5:]  # timezone info
 
-    def test_format_includes_all_required_fields(self):
+    def test_format_includes_all_required_fields(self, mocker):
         """Test that all required fields are present."""
+        mocker.patch.object(logging_utils, "get_env_variable", return_value="test")
         formatter = logging_utils._JsonLinesFormatter()
 
         record = logging.LogRecord(
@@ -191,8 +194,9 @@ class TestJsonLinesFormatter:
         assert parsed["logger"] == "my_logger"
         assert parsed["msg"] == "Something happened"
 
-    def test_format_handles_exception_info(self):
+    def test_format_handles_exception_info(self, mocker):
         """Test that exception info is included when present."""
+        mocker.patch.object(logging_utils, "get_env_variable", return_value="test")
         formatter = logging_utils._JsonLinesFormatter()
 
         try:
@@ -215,8 +219,9 @@ class TestJsonLinesFormatter:
 
         assert "exc_info" in parsed
 
-    def test_format_includes_unique_log_id(self):
+    def test_format_includes_unique_log_id(self, mocker):
         """Test that each log record gets a unique log_id."""
+        mocker.patch.object(logging_utils, "get_env_variable", return_value="test")
         formatter = logging_utils._JsonLinesFormatter()
 
         record1 = logging.LogRecord(
@@ -256,11 +261,9 @@ class TestJsonLinesFormatter:
         uuid.UUID(parsed1["log_id"])
         uuid.UUID(parsed2["log_id"])
 
-    def test_format_includes_environment(self, monkeypatch):
+    def test_format_includes_environment(self, mocker):
         """Test that environment field is included in JSON output."""
-        # Set ENVIRONMENT to test value
-        monkeypatch.setenv("ENVIRONMENT", "testing")
-
+        mocker.patch.object(logging_utils, "get_env_variable", return_value="testing")
         formatter = logging_utils._JsonLinesFormatter()
 
         record = logging.LogRecord(
@@ -279,13 +282,13 @@ class TestJsonLinesFormatter:
         assert "environment" in parsed
         assert parsed["environment"] == "testing"
 
-    def test_format_environment_raises_when_missing(self):
+    def test_format_environment_raises_when_missing(self, mocker):
         """Test that format raises ValueError if ENVIRONMENT is not set."""
-        # Ensure ENVIRONMENT is not set
-        import os
-
-        os.environ.pop("ENVIRONMENT", None)
-
+        mocker.patch.object(
+            logging_utils,
+            "get_env_variable",
+            side_effect=ValueError("Missing required environment variable: ENVIRONMENT"),
+        )
         formatter = logging_utils._JsonLinesFormatter()
 
         record = logging.LogRecord(
