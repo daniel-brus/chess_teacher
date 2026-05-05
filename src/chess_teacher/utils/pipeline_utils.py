@@ -6,9 +6,9 @@ from pathlib import Path
 from sqlalchemy import create_engine, text
 from sqlalchemy import inspect as sa_inspect
 
-from src.utils.env_utils import get_env_variable
-from src.utils.logging_utils import get_logger
-from src.utils.metadata_utils import TableMetadata
+from chess_teacher.utils.env_utils import get_env_variable
+from chess_teacher.utils.logging_utils import get_logger
+from chess_teacher.utils.metadata_utils import TableMetadata
 
 
 class Pipeline:

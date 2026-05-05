@@ -1,13 +1,13 @@
 services:
-  app:
-    image: ${DOCKERHUB_USERNAME}/chess-teacher:develop
+  streamlit: # For streamlit app: use --profile streamlit when running docker-compose
+    image: ${DOCKERHUB_USERNAME}/chess_teacher:develop
     build: {}
     pull_policy: always
     environment:
       ENVIRONMENT: DEV
 
   nightly-job:
-    image: ${DOCKERHUB_USERNAME}/chess-teacher:develop
+    image: ${DOCKERHUB_USERNAME}/chess_teacher:develop
     build: {}
     pull_policy: always
 
@@ -16,11 +16,11 @@ services:
         condition: service_healthy
 
     env_file: # could be cleaner in future (only provide necessary vars)
-      - ../.env
+      - ../../.env
     environment: #override local ENVIRONMENT value
       ENVIRONMENT: DEV
 
     volumes:
-      - ../storage/raw:/app/storage/raw
+      - ../../storage/raw:/app/storage/raw
 
     command: python scripts/nightly_job.py

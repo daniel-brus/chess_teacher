@@ -1,7 +1,6 @@
 services:
   db:
     image: postgres:16
-    container_name: chess_teacher_postgres
     restart: unless-stopped
 
     healthcheck:
@@ -12,26 +11,29 @@ services:
 
 
     env_file: # TODO: only provide necessary vars
-      - ../.env
+      - ../../.env
 
     volumes:
-      - ../storage/postgres:/var/lib/postgresql/data
+      - ../../storage/postgres:/var/lib/postgresql/data
 
     ports:
       - "${POSTGRES_PORT}:5432"
 
-  app:
-    build: ..
-    container_name: chess_teacher_app
+  streamlit:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
 
     depends_on:
       - db
 
     env_file:
-      - ../.env
+      - ../../.env
 
     volumes:
-      - ../storage/raw:/app/storage/raw
+      - ../../storage/raw:/app/storage/raw
 
     ports:
       - "${APP_PORT}:8501"
+
+    profiles: ["streamlit"] # use --profile streamlit when running docker-compose to run this service

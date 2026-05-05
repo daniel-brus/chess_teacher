@@ -7,8 +7,7 @@ import tempfile
 from pathlib import Path
 
 import pytest
-
-from src.utils import logging_utils
+from chess_teacher.utils import logging_utils
 
 
 class TestConfigureLogging:

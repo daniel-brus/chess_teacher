@@ -8,7 +8,7 @@ from typing import Any
 
 import yaml
 
-from src.utils.logging_utils import get_logger
+from chess_teacher.utils.logging_utils import get_logger
 
 _IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 

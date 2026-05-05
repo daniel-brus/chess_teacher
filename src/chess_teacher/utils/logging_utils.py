@@ -7,7 +7,7 @@ from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 from typing import Any, ClassVar
 
-from src.utils.env_utils import get_env_variable
+from chess_teacherchess_teacher.utils.env_utils import get_env_variable
 
 # Module-level flag to track logging configuration
 _logging_configured = False

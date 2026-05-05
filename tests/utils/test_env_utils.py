@@ -3,8 +3,7 @@
 import os
 
 import pytest
-
-from src.utils import env_utils
+from chess_teacher.utils import env_utils
 
 
 class TestGetEnvVariable:

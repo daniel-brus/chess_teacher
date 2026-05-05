@@ -1,7 +1,7 @@
 from pathlib import Path
 
-from src.utils.env_utils import get_env_variable
-from src.utils.pipeline_utils import Pipeline
+from chess_teacherchess_teacher.utils.env_utils import get_env_variable
+from chess_teacherchess_teacher.utils.pipeline_utils import Pipeline
 
 
 class DatabaseLoader(Pipeline):
