@@ -14,3 +14,9 @@ preview = true
 quote-style = "double"
 indent-style = "space"
 line-ending = "auto"
+
+[tool.coverage.run]
+omit = ["*/__init__.py"]
+
+[tool.coverage.report]
+omit = ["*/__init__.py"]

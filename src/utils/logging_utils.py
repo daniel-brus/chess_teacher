@@ -18,7 +18,7 @@ def _get_log_dir() -> Path:
     base = get_env_variable("RAW_DIR")
     if not base:
         raise ValueError("Missing env var to configure log_dir: RAW_DIR")
-    return Path(base + "/logs")
+    return Path(base + "/logs/python")
 
 
 class _JsonLinesFormatter(logging.Formatter):
@@ -73,8 +73,8 @@ def configure_logging(
 
     Env vars:
     - LOG_LEVEL (default INFO)
-    - LOG_DIR (default storage/logs)
-    - ENVIRONMENT
+    - LOG_DIR (defaults to _get_log_dir())
+    - ENVIRONMENT (called in _JsonLinesFormatter)
     """
 
     root = logging.getLogger()
