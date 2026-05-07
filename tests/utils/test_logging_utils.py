@@ -7,6 +7,7 @@ import tempfile
 from pathlib import Path
 
 import pytest
+
 from chess_teacher.utils import logging_utils
 
 

@@ -9,14 +9,14 @@ HEADERS = {"User-Agent": "chess_teacher/1.0"}
 def get_archives(username: str) -> list[str]:
     """Haal alle beschikbare maandelijkse archief-URLs op."""
     url = f"{BASE_URL}/player/{username}/games/archives"
-    response = requests.get(url, headers=HEADERS)
+    response = requests.get(url, headers=HEADERS, timeout=10)
     response.raise_for_status()
     return response.json()["archives"]
 
 
 def get_games_for_month(archive_url: str) -> list[dict]:
     """Haal alle potjes op voor een specifieke maand."""
-    response = requests.get(archive_url, headers=HEADERS)
+    response = requests.get(archive_url, headers=HEADERS, timeout=10)
     response.raise_for_status()
     return response.json()["games"]
 

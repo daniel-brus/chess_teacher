@@ -57,5 +57,5 @@ jobs:
       - uses: ./.github/actions/python-setup
       - name: Run Bandit
         run: |
-          bandit -r src config scripts -x .venv,venv,build,dist,.pytest_cache,.ruff_cache -ll
+          bandit -r src scripts apps/streamlit -x .venv,venv,build,dist,.pytest_cache,.ruff_cache -ll
           bandit apps -ll
