@@ -174,7 +174,7 @@ class TestJsonLinesFormatter:
         assert parsed["msg"] == "Something happened"
 
     def test_format_handles_exception_info(self):
-        """Test that exception info is included when present."""
+        """Test that exception type and traceback are included when present."""
         formatter = logging_utils._JsonLinesFormatter()
 
         try:
@@ -195,7 +195,55 @@ class TestJsonLinesFormatter:
         result = formatter.format(record)
         parsed = json.loads(result)
 
-        assert "exc_info" in parsed
+        assert "exc_type" in parsed
+        assert parsed["exc_type"] == "ValueError"
+        assert "exc_tb" in parsed
+        assert "ValueError: test error" in parsed["exc_tb"]
+
+    def test_format_exception_type_varies_by_exception(self):
+        """Test that exc_type changes based on exception type."""
+        formatter = logging_utils._JsonLinesFormatter()
+
+        # Test with KeyError
+        try:
+            raise KeyError("missing_key")
+        except KeyError:
+            exc_info = sys.exc_info()
+
+        record = logging.LogRecord(
+            name="test",
+            level=logging.ERROR,
+            pathname="test.py",
+            lineno=1,
+            msg="Key error",
+            args=(),
+            exc_info=exc_info,
+        )
+
+        result = formatter.format(record)
+        parsed = json.loads(result)
+
+        assert parsed["exc_type"] == "KeyError"
+
+    def test_format_no_exc_type_when_no_exception(self):
+        """Test that exc_type is not included when there's no exception."""
+        formatter = logging_utils._JsonLinesFormatter()
+
+        record = logging.LogRecord(
+            name="test",
+            level=logging.INFO,
+            pathname="test.py",
+            lineno=1,
+            msg="Normal message",
+            args=(),
+            exc_info=None,
+        )
+
+        result = formatter.format(record)
+        parsed = json.loads(result)
+
+        assert "exc_type" not in parsed
+        assert "exc_tb" not in parsed
 
     def test_format_includes_unique_log_id(self):
         """Test that each log record gets a unique log_id."""

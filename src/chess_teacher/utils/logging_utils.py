@@ -36,7 +36,10 @@ class _JsonLinesFormatter(logging.Formatter):
 
         # Exception info
         if record.exc_info:
-            payload["exc_info"] = self.formatException(record.exc_info)
+            exc_type, exc_value, exc_tb = record.exc_info
+            payload["exc_type"] = exc_type.__name__ if exc_type else None
+            if exc_tb:
+                payload["exc_tb"] = self.formatException(record.exc_info)
 
         return json.dumps(payload, ensure_ascii=False)
 
