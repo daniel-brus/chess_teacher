@@ -52,7 +52,7 @@ jobs:
       - name: Run tests with coverage
         run: pytest -v --tb=short --cov=src --cov-report=term
 
-  security:
+  security-scan:
     runs-on: ubuntu-latest
     if: |
       github.event_name == 'pull_request' ||
@@ -62,6 +62,14 @@ jobs:
       - uses: ./.github/actions/python-setup
       - name: Run security audit
         run: pip-audit
+  vulnerability-scan:
+    runs-on: ubuntu-latest
+    if: |
+      github.event_name == 'pull_request' ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/develop')
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/python-setup
       - name: Run Bandit
         run: |
           bandit -r src config scripts -x .venv,venv,build,dist,.pytest_cache,.ruff_cache -ll
