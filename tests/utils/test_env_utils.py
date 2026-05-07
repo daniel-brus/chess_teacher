@@ -3,6 +3,7 @@
 import os
 
 import pytest
+
 from chess_teacher.utils import env_utils
 
 
