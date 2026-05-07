@@ -21,9 +21,6 @@ concurrency:
 jobs:
   lint:
     runs-on: ubuntu-latest
-    if: |
-      github.event_name == 'pull_request' ||
-      (github.event_name == 'push' && github.ref == 'refs/heads/develop')
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/python-setup
@@ -32,9 +29,6 @@ jobs:
 
   type-check:
     runs-on: ubuntu-latest
-    if: |
-      github.event_name == 'pull_request' ||
-      (github.event_name == 'push' && github.ref == 'refs/heads/develop')
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/python-setup
@@ -43,9 +37,6 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
-    if: |
-      github.event_name == 'pull_request' ||
-      (github.event_name == 'push' && github.ref == 'refs/heads/develop')
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/python-setup
@@ -54,9 +45,6 @@ jobs:
 
   security-scan:
     runs-on: ubuntu-latest
-    if: |
-      github.event_name == 'pull_request' ||
-      (github.event_name == 'push' && github.ref == 'refs/heads/develop')
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/python-setup
@@ -64,9 +52,6 @@ jobs:
         run: pip-audit
   vulnerability-scan:
     runs-on: ubuntu-latest
-    if: |
-      github.event_name == 'pull_request' ||
-      (github.event_name == 'push' && github.ref == 'refs/heads/develop')
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/python-setup
