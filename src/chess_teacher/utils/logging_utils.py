@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from chess_teacher.utils.env_utils import get_env_variable
+from chess_teacher.utils.exception_utils import ConfigError
 
 # Module-level flag to track logging configuration
 _logging_configured = False
@@ -17,7 +18,7 @@ def _get_log_dir() -> Path:
     """Get the log directory path from env or default."""
     base = get_env_variable("RAW_DIR")
     if not base:
-        raise ValueError("Missing env var to configure log_dir: RAW_DIR")
+        raise ConfigError("Missing env var to configure log_dir: RAW_DIR")
     return Path(base + "/logs/python")
 
 
@@ -65,6 +66,34 @@ class _ConsoleFormatter(logging.Formatter):
         )
 
 
+class EnhancedLogger(logging.Logger):
+    """Custom logger with added Exception functionality."""
+
+    def log_and_raise(
+        self,
+        exc: Exception,
+        message: str | None = None,
+        level: str = "error",
+        include_traceback: bool = True,
+    ):
+        """Log an exception message at the specified level and then re-raise it.
+        Args:
+            exc: The exception to log and raise.
+            message: Optional custom message, to override the exception's in the logs.
+            level: The logging level (e.g., "error", "warning").
+            include_traceback: Whether to include the traceback in the log.
+        """
+        log_message = message or str(exc)
+
+        log_fn = getattr(self.logger, level.lower(), self.logger.error)
+        # TODO: Change to use specific log levels
+        if not log_fn:  # Log and raise a ConfigError if log level is invalid
+            self.log_and_raise(ConfigError(f"Invalid log level: {level}."))
+
+        log_fn(log_message, exc_info=include_traceback)  # log the exception message
+        raise exc  # Reraise the exception after logging
+
+
 def configure_logging(
     *,
     level: str | None = None,
@@ -80,6 +109,8 @@ def configure_logging(
     - ENVIRONMENT (called in _JsonLinesFormatter)
     """
 
+    # Register custom logger class
+    logging.setLoggerClass(EnhancedLogger)
     root = logging.getLogger()
     global _logging_configured
     if _logging_configured and not force:

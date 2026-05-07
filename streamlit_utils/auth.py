@@ -1,6 +1,9 @@
 import streamlit as st
 
-from chess_teacher.utils.exceptions import AuthError
+from chess_teacher.utils.exception_utils import AuthError
+from chess_teacher.utils.logging_utils import get_logger
+
+logger = get_logger()
 
 
 def login_screen():
@@ -10,13 +13,13 @@ def login_screen():
     user_info = extract_user_info(st.user)
     # TODO: load necessary info into database
     # TODO: load necessary info into session state: just name and sub?
-    return user_info
+    st.json(user_info)
 
 
 def extract_user_info(user):
     try:
-        if user.get("aud", None) != st.secrets["client_id"]:
-            raise AuthError("Invalid audience in user info.")
+        if user.get("aud", None) != st.secrets["auth"]["client_id"]:
+            logger.log_and_raise(AuthError("Invalid user: audience mismatch"))
         return {
             "sub": user.get("sub"),  # unique ID, no fallback
             "email": user.get("email", None),
@@ -27,6 +30,8 @@ def extract_user_info(user):
             "provider": user.get("provider", None),
             "email_verified": user.get("email_verified", None),
         }
-    except AuthError as e:
-        st.error("Error occurred while extracting user information.")
-        raise e
+    except Exception as e:
+        logger.log_exception(e)
+    finally:
+        st.error("Authentication failed. Please try again.")
+        st.stop()
