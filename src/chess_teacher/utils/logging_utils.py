@@ -98,14 +98,23 @@ def configure_logging(
     resolved_log_dir.mkdir(parents=True, exist_ok=True)
     log_file = resolved_log_dir / "app.log"
 
-    file_handler = TimedRotatingFileHandler(
+    class _DailyFileHandler(TimedRotatingFileHandler):
+        """TimedRotatingFileHandler that creates daily subdirectories."""
+
+        def rotation_filename(self, default_name: str) -> str:
+            # Create filename with date-based directory structure
+            # Example output: 2026/05/07/app.log
+            date_dir = Path(default_name).parent / datetime.now(UTC).strftime("%Y/%m/%d")
+            date_dir.mkdir(parents=True, exist_ok=True)
+            return str(date_dir / "app.log")
+
+    file_handler = _DailyFileHandler(
         log_file,
         when="midnight",
         interval=1,
         backupCount=30,  # Keep 30 days of logs
         encoding="utf-8",
     )
-    file_handler.suffix = "%Y/%m/%d"  # Directory structure: YYYY/MM/DD/app.log
     file_handler.setFormatter(_JsonLinesFormatter())
     file_handler.setLevel(resolved_level)
     root.addHandler(file_handler)

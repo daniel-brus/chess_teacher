@@ -306,6 +306,43 @@ class TestJsonLinesFormatter:
         assert "Missing required environment variable: ENVIRONMENT" in str(exc_info.value)
 
 
+class TestDailyFileHandler:
+    """Tests for _DailyFileHandler class."""
+
+    def test_rotation_filename_creates_date_subdirectories(self, mocker):
+        """Test that rotation_filename creates YYYY/MM/DD subdirectories."""
+        root = logging.getLogger()
+        root.handlers.clear()
+        logging_utils._logging_configured = False
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_dir = Path(tmpdir)
+
+            mocker.patch.object(logging_utils, "_get_log_dir", return_value=log_dir)
+            logging_utils.configure_logging(log_dir=log_dir)
+
+            # Get the file handler we just created
+            file_handler = None
+            for handler in root.handlers:
+                if isinstance(handler, logging_utils.TimedRotatingFileHandler):
+                    file_handler = handler
+                    break
+
+            assert file_handler is not None
+
+            # Test rotation_filename
+            default_name = str(log_dir / "app.log")
+            rotated_name = file_handler.rotation_filename(default_name)
+
+            # Should be in YYYY/MM/DD format
+            assert "2026/05/07" in rotated_name or "2026" in rotated_name
+            assert rotated_name.endswith("app.log")
+
+            # The date subdirectory should exist
+            rotated_path = Path(rotated_name)
+            assert rotated_path.parent.exists()
+
+
 class TestConsoleFormatter:
     """Tests for _ConsoleFormatter class."""
 

@@ -1,35 +1,74 @@
 name: CI
 
 on:
-  #push:
-  #  branches: [develop, "feature/*"]
+  push:
+    branches:
+      - develop
+      - 'feature/**'
   pull_request:
-    branches: [main, develop]
+    branches:
+      - develop
+      - main
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+# YAML anchors for DRY config of job conditions
+_job-if: &job-if |
+  github.event_name == 'pull_request' ||
+  (github.event_name == 'push' && github.ref == 'refs/heads/develop')
+
 jobs:
   lint:
     runs-on: ubuntu-latest
+    if: *job-if
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/python-setup
       - name: Run linter
         run: ruff check src scripts tests
 
+  type-check:
+    runs-on: ubuntu-latest
+    if: *job-if
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/python-setup
+      - name: Run type check
+        run: mypy src
+
   test:
     runs-on: ubuntu-latest
+    if: *job-if
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/python-setup
       - name: Run tests with coverage
         run: pytest -v --tb=short --cov=src --cov-report=term
 
-  type-check:
+  security-scan:
     runs-on: ubuntu-latest
+    if: *job-if
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/python-setup
-      - name: Run type check
-        run: mypy src
+      - name: Run security audit
+        run: pip-audit
+  vulnerability-scan:
+    runs-on: ubuntu-latest
+    if: *job-if
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/python-setup
+      - name: Run Bandit
+        run: |
+          bandit -r src config scripts -x .venv,venv,build,dist,.pytest_cache,.ruff_cache -ll
+          bandit apps -ll
