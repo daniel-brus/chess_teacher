@@ -3,7 +3,6 @@ import json
 import logging
 import uuid
 from datetime import UTC, datetime
-from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -20,6 +19,19 @@ def _get_log_dir() -> Path:
     if not base:
         raise ConfigError("Missing env var to configure log_dir: RAW_DIR")
     return Path(base + "/logs/python")
+
+
+def _build_daily_log_path(base_dir: Path) -> Path:
+    """
+    Example:
+        logs/2026/05/08/app.log
+    """
+
+    daily_dir = base_dir / datetime.now(UTC).strftime("%Y/%m/%d")
+
+    daily_dir.mkdir(parents=True, exist_ok=True)
+
+    return daily_dir / "app.log"
 
 
 class _JsonLinesFormatter(logging.Formatter):
@@ -85,10 +97,12 @@ class EnhancedLogger(logging.Logger):
         """
         log_message = message or str(exc)
 
-        log_fn = getattr(self.logger, level.lower(), self.logger.error)
-        # TODO: Change to use specific log levels
-        if not log_fn:  # Log and raise a ConfigError if log level is invalid
-            self.log_and_raise(ConfigError(f"Invalid log level: {level}."))
+        try:
+            log_fn = getattr(self, level.lower(), None)
+        except Exception as e:
+            # If the log level is invalid, log the error and raise a ConfigError
+            self.error(f"Invalid log level: {level}. Error: {e}", exc_info=True)
+            raise ConfigError(f"Invalid log level: {level}.") from e
 
         log_fn(log_message, exc_info=include_traceback)  # log the exception message
         raise exc  # Reraise the exception after logging
@@ -96,61 +110,63 @@ class EnhancedLogger(logging.Logger):
 
 def configure_logging(
     *,
-    level: str | None = None,
+    level: str = "INFO",
     log_dir: Path | None = None,
     force: bool = False,
 ) -> None:
     """
-    Configure logging with JSON lines file + console output.
+    Configure application logging.
 
-    Env vars:
-    - LOG_LEVEL (default INFO)
-    - LOG_DIR (defaults to _get_log_dir())
-    - ENVIRONMENT (called in _JsonLinesFormatter)
+    Creates:
+    - console logger
+    - JSON-lines file logger
+
+    File structure:
+        logs/YYYY/MM/DD/app.log
     """
 
-    # Register custom logger class
-    logging.setLoggerClass(EnhancedLogger)
-    root = logging.getLogger()
     global _logging_configured
+
     if _logging_configured and not force:
         return
 
-    resolved_level = (level or "INFO").upper()
+    # Register custom logger class
+    logging.setLoggerClass(EnhancedLogger)
+
+    resolved_level = level.upper()
     resolved_log_dir = log_dir or _get_log_dir()
+
+    # Root logger
+    root = logging.getLogger()
 
     root.handlers.clear()
     root.setLevel(resolved_level)
 
-    # Console handler with colored output
-    console = logging.StreamHandler()
-    console.setFormatter(_ConsoleFormatter())
-    console.setLevel(resolved_level)
-    root.addHandler(console)
+    # -------------------------------------------------------------------------
+    # Console handler
+    # -------------------------------------------------------------------------
 
-    # File handler with daily JSON lines
-    resolved_log_dir.mkdir(parents=True, exist_ok=True)
-    log_file = resolved_log_dir / "app.log"
+    console_handler = logging.StreamHandler()
 
-    class _DailyFileHandler(TimedRotatingFileHandler):
-        """TimedRotatingFileHandler that creates daily subdirectories."""
+    console_handler.setLevel(resolved_level)
+    console_handler.setFormatter(_ConsoleFormatter())
 
-        def rotation_filename(self, default_name: str) -> str:
-            # Create filename with date-based directory structure
-            # Example output: 2026/05/07/app.log
-            date_dir = Path(default_name).parent / datetime.now(UTC).strftime("%Y/%m/%d")
-            date_dir.mkdir(parents=True, exist_ok=True)
-            return str(date_dir / "app.log")
+    root.addHandler(console_handler)
 
-    file_handler = _DailyFileHandler(
-        log_file,
-        when="midnight",
-        interval=1,
-        backupCount=30,  # Keep 30 days of logs
+    # -------------------------------------------------------------------------
+    # File handler
+    # -------------------------------------------------------------------------
+
+    log_file = _build_daily_log_path(resolved_log_dir)
+
+    file_handler = logging.FileHandler(
+        filename=log_file,
         encoding="utf-8",
     )
-    file_handler.setFormatter(_JsonLinesFormatter())
+
     file_handler.setLevel(resolved_level)
+    file_handler.setFormatter(_JsonLinesFormatter())
+
     root.addHandler(file_handler)
 
     _logging_configured = True
