@@ -72,7 +72,7 @@ class ColumnMetadata:
         return " ".join(parts)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, init=False)
 class TableMetadata:
     schema_name: str
     table_name: str
@@ -80,8 +80,90 @@ class TableMetadata:
     comment: str | None = None
     primary_key: tuple[str, ...] = field(default_factory=tuple)
 
+    def __init__(
+        self,
+        key: str | None = None,
+        *,
+        schema_name: str | None = None,
+        table_name: str | None = None,
+        columns: tuple[ColumnMetadata, ...] | None = None,
+        comment: str | None = None,
+        primary_key: tuple[str, ...] | None = None,
+        yaml_path: str | Path | None = None,
+    ):
+        """Initialize TableMetadata.
+
+        Two modes:
+        1. Load from YAML by key: TableMetadata(key="mykey", yaml_path="path/to/metadata.yml")
+        2. Direct: TableMetadata(schema_name="schema", table_name="table", columns=[...])
+        """
+        # Mode 1: Load from YAML by key
+        if key is not None and (schema_name is None and table_name is None and columns is None):
+            if yaml_path is None:
+                yaml_path = Path("metadata.yml")  # default path
+            loaded = self._load_from_yaml_by_key(key, yaml_path)
+            object.__setattr__(self, "schema_name", loaded.schema_name)
+            object.__setattr__(self, "table_name", loaded.table_name)
+            object.__setattr__(self, "columns", loaded.columns)
+            object.__setattr__(self, "comment", loaded.comment)
+            object.__setattr__(self, "primary_key", loaded.primary_key)
+        # Mode 2: Direct initialization
+        else:
+            if schema_name is None or table_name is None or columns is None:
+                raise ValueError(
+                    "Either provide 'key' for YAML loading, or provide schema_name, table_name, and columns"
+                )
+            object.__setattr__(self, "schema_name", schema_name)
+            object.__setattr__(self, "table_name", table_name)
+            object.__setattr__(self, "columns", columns)
+            object.__setattr__(self, "comment", comment)
+            object.__setattr__(self, "primary_key", primary_key or ())
+
     @staticmethod
-    def from_dict(raw: dict[str, Any]) -> TableMetadata:
+    def _load_from_yaml_by_key(key: str, path: str | Path) -> TableMetadata:
+        """Load a table metadata from YAML by key.
+
+        Expects YAML structure:
+            tables:
+              mykey:
+                schema: schema_name
+                table: table_name
+                columns: [...]
+              otherkey:
+                ...
+        """
+        try:
+            p = Path(path)
+            data = yaml.safe_load(p.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                raise ValueError("metadata.yml must contain a YAML mapping/object at the top level")
+
+            tables = data.get("tables")
+            if not isinstance(tables, dict):
+                raise ValueError("metadata.yml must contain a 'tables' mapping at the top level")
+
+            if key not in tables:
+                available_keys = list(tables.keys())
+                raise ValueError(
+                    f"Key '{key}' not found in tables. Available keys: {available_keys}"
+                )
+
+            table_data = tables[key]
+            if not isinstance(table_data, dict):
+                raise ValueError(f"Table config for key '{key}' must be a mapping/object")
+
+            # Use from_dict to parse the table config
+            result = TableMetadata._from_dict_raw(table_data)
+        except Exception as exc:
+            logger.error("Error loading metadata from %s with key '%s': %s", path, key, exc)
+            raise ValueError(
+                f"Error occurred while loading metadata from {path} with key '{key}': {exc}"
+            )
+        return result
+
+    @staticmethod
+    def _from_dict_raw(raw: dict[str, Any]) -> TableMetadata:
+        """Internal method to create TableMetadata from dict without going through __init__."""
         # Accept either top-level keys or a nested "table" object.
         table_raw = raw.get("table")
         if isinstance(table_raw, dict):
@@ -126,26 +208,14 @@ class TableMetadata:
         else:
             columns = tuple(parsed_columns)
 
-        return TableMetadata(
-            schema_name=schema_name,
-            table_name=table_name,
-            columns=columns,
-            comment=comment,
-            primary_key=primary_key,
-        )
-
-    @staticmethod
-    def from_yaml(path: str | Path) -> TableMetadata:
-        try:
-            p = Path(path)
-            data = yaml.safe_load(p.read_text(encoding="utf-8"))
-            if not isinstance(data, dict):
-                raise ValueError("metadata.yml must contain a YAML mapping/object at the top level")
-            result = TableMetadata.from_dict(data)
-        except Exception as exc:
-            logger.error("Error loading metadata from %s: %s", path, exc)
-            raise ValueError(f"Error occurred while loading metadata from {path}: {exc}")
-        return result
+        # Create without using __init__
+        obj = object.__new__(TableMetadata)
+        object.__setattr__(obj, "schema_name", schema_name)
+        object.__setattr__(obj, "table_name", table_name)
+        object.__setattr__(obj, "columns", columns)
+        object.__setattr__(obj, "comment", comment)
+        object.__setattr__(obj, "primary_key", primary_key)
+        return obj
 
     def qualified_name_sql(self) -> str:
         return f"{_quote_ident(self.schema_name)}.{_quote_ident(self.table_name)}"
@@ -182,11 +252,28 @@ class TableMetadata:
         return [self.create_schema_sql(), self.create_table_sql(), *self.comment_sql()]
 
 
-def ddls_from_metadata_files(paths: Iterable[str | Path], log_warnings: bool = True) -> list[str]:
+# TODO: stop het onderste in een andere class? Of helemaal eruit gooien?
+
+
+def ddls_from_metadata_files(
+    paths: Iterable[str | Path],
+    table_key: str = "default",
+    log_warnings: bool = True,
+) -> list[str]:
+    """Generate DDL statements from metadata YAML files.
+
+    Args:
+        paths: Paths to metadata.yml files
+        table_key: The key under 'tables' in the YAML to load
+        log_warnings: Whether to log warnings for failed files
+
+    Returns:
+        List of DDL statements
+    """
     ddls: list[str] = []
     for path in paths:
         try:
-            ddls.extend(TableMetadata.from_yaml(path).ddl())
+            ddls.extend(TableMetadata(key=table_key, yaml_path=path).ddl())
         except Exception as exc:
             # Best-effort: continue generating DDL for other files.
             if log_warnings:
@@ -194,16 +281,25 @@ def ddls_from_metadata_files(paths: Iterable[str | Path], log_warnings: bool = T
     return ddls
 
 
-def ddls_from_current_directory_metadata(cwd: str | Path = ".") -> list[str]:
-    """
-    Loads `metadata.yml` from the given directory and returns its DDL statements.
+def ddls_from_current_directory_metadata(
+    cwd: str | Path = ".",
+    table_key: str = "default",
+) -> list[str]:
+    """Loads `metadata.yml` from the given directory and returns its DDL statements.
 
     Only looks for a single file named exactly `metadata.yml` in that directory.
     Returns an empty list if the file does not exist.
+
+    Args:
+        cwd: Directory to search for metadata.yml
+        table_key: The key under 'tables' in the YAML to load
+
+    Returns:
+        List of DDL statements
     """
 
     directory = Path(cwd)
     metadata_path = directory / "metadata.yml"
     if not metadata_path.is_file():
         return []
-    return ddls_from_metadata_files([metadata_path], log_warnings=False)
+    return ddls_from_metadata_files([metadata_path], table_key=table_key, log_warnings=False)
