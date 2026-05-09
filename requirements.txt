@@ -6,5 +6,6 @@ sqlite-utils
 apscheduler
 sqlalchemy
 streamlit
+Authlib
 pyyaml
 python-dotenv
