@@ -4,3 +4,7 @@ class ConfigError(Exception):
 
 class AuthError(Exception):
     pass
+
+
+class DatabaseError(Exception):
+    pass

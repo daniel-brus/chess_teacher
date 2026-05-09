@@ -4,8 +4,9 @@ anthropic
 requests
 sqlite-utils
 apscheduler
-sqlalchemy
 streamlit
 Authlib
 pyyaml
 python-dotenv
+sqlalchemy
+psycopg[binary]
