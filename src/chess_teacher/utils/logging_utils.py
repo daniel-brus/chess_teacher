@@ -4,7 +4,7 @@ import logging
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any, ClassVar, cast
 
 from chess_teacher.utils.env_utils import get_env_variable
 from chess_teacher.utils.exception_utils import ConfigError
@@ -101,7 +101,7 @@ class EnhancedLogger(logging.Logger):
         log_message = message or str(exc)
 
         try:
-            log_fn = getattr(self, level.lower(), None)
+            log_fn = getattr(self, level.lower())
         except Exception as e:
             # If the log level is invalid, log the error and raise a ConfigError
             self.error(f"Invalid log level: {level}. Error: {e}", exc_info=True)
@@ -186,12 +186,12 @@ def get_logger(name: str | None = None) -> EnhancedLogger:
 
     configure_logging()
     if name:
-        return logging.getLogger(name)
+        return cast(EnhancedLogger, logging.getLogger(name))
 
     frame = inspect.currentframe()
     if frame is None or frame.f_back is None:
-        return logging.getLogger(__name__)
+        return cast(EnhancedLogger, logging.getLogger(__name__))
 
     caller_globals = frame.f_back.f_globals
     caller_name = caller_globals.get("__name__", __name__)
-    return logging.getLogger(caller_name)
+    return cast(EnhancedLogger, logging.getLogger(caller_name))
