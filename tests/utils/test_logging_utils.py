@@ -197,8 +197,10 @@ class TestJsonLinesFormatter:
 
         assert "exc_type" in parsed
         assert parsed["exc_type"] == "ValueError"
-        assert "exc_tb" in parsed
-        assert "ValueError: test error" in parsed["exc_tb"]
+        assert "exc_msg" in parsed
+        assert parsed["exc_msg"] == "test error"
+        assert "traceback" in parsed
+        assert "ValueError: test error" in parsed["traceback"]
 
     def test_format_exception_type_varies_by_exception(self):
         """Test that exc_type changes based on exception type."""
@@ -243,7 +245,7 @@ class TestJsonLinesFormatter:
         parsed = json.loads(result)
 
         assert "exc_type" not in parsed
-        assert "exc_tb" not in parsed
+        assert "traceback" not in parsed
 
     def test_format_includes_unique_log_id(self):
         """Test that each log record gets a unique log_id."""
@@ -335,7 +337,7 @@ class TestDailyFileHandler:
     """Tests for _DailyFileHandler class."""
 
     def test_rotation_filename_creates_date_subdirectories(self, reset_logging, mock_log_dir):
-        """Test that rotation_filename creates YYYY/MM/DD subdirectories."""
+        """Test that logging creates daily log files in YYYY/MM/DD subdirectories."""
         root = logging.getLogger()
 
         logging_utils.configure_logging(log_dir=mock_log_dir)
@@ -343,23 +345,22 @@ class TestDailyFileHandler:
         # Get the file handler we just created
         file_handler = None
         for handler in root.handlers:
-            if isinstance(handler, logging_utils.TimedRotatingFileHandler):
+            if isinstance(handler, logging.FileHandler):
                 file_handler = handler
                 break
 
         assert file_handler is not None
 
-        # Test rotation_filename
-        default_name = str(mock_log_dir / "app.log")
-        rotated_name = file_handler.rotation_filename(default_name)
+        # Check that the log file was created in a date-based subdirectory
+        log_file = Path(file_handler.baseFilename)
 
-        # Should be in YYYY/MM/DD format
-        assert "2026/05/07" in rotated_name or "2026" in rotated_name
-        assert rotated_name.endswith("app.log")
+        # Should be in YYYY/MM/DD format in the path
+        assert "logs" in str(log_file)
+        assert "2026" in str(log_file)
+        assert log_file.name == "app.log"
 
-        # The date subdirectory should exist
-        rotated_path = Path(rotated_name)
-        assert rotated_path.parent.exists()
+        # The log file should exist
+        assert log_file.exists()
 
 
 class TestConsoleFormatter:

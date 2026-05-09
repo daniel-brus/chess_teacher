@@ -39,7 +39,7 @@ class _JsonLinesFormatter(logging.Formatter):
 
     def format(self, record: logging.LogRecord) -> str:
         payload: dict[str, Any] = {
-            "ts": datetime.now(UTC).isoformat(),
+            "ts": datetime.fromtimestamp(record.created, UTC).isoformat(),
             "level": record.levelname,
             "logger": record.name,
             "msg": record.getMessage(),
@@ -49,10 +49,13 @@ class _JsonLinesFormatter(logging.Formatter):
 
         # Exception info
         if record.exc_info:
-            exc_type, exc_value, exc_tb = record.exc_info
+            exc_type, exc_value, _ = record.exc_info
+
             payload["exc_type"] = exc_type.__name__ if exc_type else None
-            if exc_tb:
-                payload["exc_tb"] = self.formatException(record.exc_info)
+
+            payload["exc_msg"] = str(exc_value) if exc_value else None
+
+            payload["traceback"] = self.formatException(record.exc_info)
 
         return json.dumps(payload, ensure_ascii=False)
 
@@ -71,7 +74,7 @@ class _ConsoleFormatter(logging.Formatter):
 
     def format(self, record: logging.LogRecord) -> str:
         color = self.COLORS.get(record.levelname, "")
-        timestamp = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
+        timestamp = datetime.fromtimestamp(record.created, UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
         return (
             f"{timestamp} {color}{record.levelname:<8}{self.RESET} "
             f"{record.name}: {record.getMessage()}"
