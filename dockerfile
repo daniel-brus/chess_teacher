@@ -15,8 +15,10 @@ RUN pip install .
 
 # Copy scripts and app-files
 COPY scripts/ ./scripts/
-COPY apps/ ./apps/
+COPY streamlit_app.py .
+COPY streamlit_utils/ ./streamlit_utils/
+COPY pages/ ./pages/
 
 RUN mkdir -p storage
 
-CMD ["streamlit","run","apps/streamlit/app.py","--server.address","0.0.0.0","--server.port","8501"]
+CMD ["streamlit","run","streamlit_app.py","--server.address","0.0.0.0","--server.port","8501"]
