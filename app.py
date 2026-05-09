@@ -3,9 +3,10 @@
 import streamlit as st
 
 from chess_teacher.utils.logging_utils import get_logger
-from streamlit_utils.auth import login_screen
+from streamlit_utils.auth import LoginScreen
 
 logger = get_logger()
+login_screen = LoginScreen()
 
 st.set_page_config(
     page_title="Chess Teacher",
@@ -17,8 +18,4 @@ logger.info("Chess Teacher Streamlit app started")
 
 st.title("♟️ Chess Teacher")
 
-if not st.user.get("is_logged_in", False):
-    login_screen()
-else:
-    st.write(f"Welcome, {st.user.get("name", "User")}!")
-    st.button("Log out", on_click=st.logout)
+login_screen.display()

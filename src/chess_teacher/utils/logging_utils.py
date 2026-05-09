@@ -175,7 +175,7 @@ def configure_logging(
     _logging_configured = True
 
 
-def get_logger(name: str | None = None) -> logging.Logger:
+def get_logger(name: str | None = None) -> EnhancedLogger:
     """
     Returns a module logger and ensures logging is configured once.
 
