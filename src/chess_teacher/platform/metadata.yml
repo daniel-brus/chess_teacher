@@ -1,0 +1,63 @@
+tables:
+  users:
+    schema: platform
+    table: users
+    comment: Authenticated users
+    primary_key:
+      - id
+    columns:
+      - name: id
+        data_type: text
+        nullable: false
+        comment: Hashed unique user ID
+
+      - name: sub
+        data_type: text
+        nullable: false
+        comment: Unique ID per provider
+
+      - name: email
+        data_type: text
+        nullable: true
+        comment: User email address
+
+      - name: name
+        data_type: text
+        nullable: true
+        comment: Full display name
+
+      - name: picture
+        data_type: text
+        nullable: true
+        comment: URL to profile picture
+
+      - name: given_name
+        data_type: text
+        nullable: true
+        comment: First name
+
+      - name: family_name
+        data_type: text
+        nullable: true
+        comment: Last name
+
+      - name: provider
+        data_type: text
+        nullable: true
+        comment: OAuth provider (e.g. google, github)
+
+      - name: email_verified
+        data_type: boolean
+        nullable: false
+        default: false
+        comment: Whether email is verified by provider
+
+      - name: latest_login
+        data_type: timestamptz
+        nullable: true
+        comment: Timestamp of most recent login
+
+      - name: latest_pipeline_run
+        data_type: timestamptz
+        nullable: true
+        comment: Timestamp of most recent pipeline run. Used to prevent multiple runs in 24hs.

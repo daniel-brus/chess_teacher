@@ -8,6 +8,7 @@ from typing import Any, ClassVar, cast
 
 from chess_teacher.utils.env_utils import get_env_variable
 from chess_teacher.utils.exception_utils import ConfigError
+from chess_teacher.utils.general_utils import build_daily_path
 
 # Module-level flag to track logging configuration
 _logging_configured = False
@@ -19,19 +20,6 @@ def _get_log_dir() -> Path:
     if not base:
         raise ConfigError("Missing env var to configure log_dir: RAW_DIR")
     return Path(base + "/logs/python")
-
-
-def _build_daily_log_path(base_dir: Path) -> Path:
-    """
-    Example:
-        logs/2026/05/08/app.log
-    """
-
-    daily_dir = base_dir / datetime.now(UTC).strftime("%Y/%m/%d")
-
-    daily_dir.mkdir(parents=True, exist_ok=True)
-
-    return daily_dir / "app.log"
 
 
 class _JsonLinesFormatter(logging.Formatter):
@@ -160,7 +148,7 @@ def configure_logging(
     # File handler
     # -------------------------------------------------------------------------
 
-    log_file = _build_daily_log_path(resolved_log_dir)
+    log_file = build_daily_path(resolved_log_dir, "app.log")
 
     file_handler = logging.FileHandler(
         filename=log_file,
@@ -185,6 +173,8 @@ def get_logger(name: str | None = None) -> EnhancedLogger:
     """
 
     configure_logging()
+
+    # cast is purely mypy-hinting, custom class is already configured
     if name:
         return cast(EnhancedLogger, logging.getLogger(name))
 

@@ -4,7 +4,7 @@ logger = get_logger()
 
 
 def main():
-    logger.info("Nightly job started (test)")
+    logger.info("Nightly job started (test): updated on 10-5")
 
 
 if __name__ == "__main__":

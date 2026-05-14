@@ -2,6 +2,7 @@
 .vscode/
 storage/
 .streamlit/secrets.toml
+testnotebook.ipynb
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

@@ -1,5 +1,7 @@
 import streamlit as st
 
+from chess_teacher.platform.user import User
+from chess_teacher.utils.db_client import get_db_client
 from chess_teacher.utils.exception_utils import AuthError
 from chess_teacher.utils.general_utils import generate_hash
 from chess_teacher.utils.logging_utils import get_logger
@@ -10,6 +12,7 @@ class LoginScreen:
 
     def __init__(self):
         self.logger = get_logger()
+        self.db_client = get_db_client()
 
     def _user_is_logged_in(self) -> bool:
         """Check if the user is logged in."""
@@ -18,7 +21,7 @@ class LoginScreen:
         except Exception:
             self.logger.log_and_raise(AuthError("Failed to check login status"), exc_info=True)
 
-    def _extract_user_info(self, user) -> dict:
+    def _extract_user(self, user) -> User:
         try:
             provider = user.get("provider", None)
             if not provider:
@@ -39,7 +42,7 @@ class LoginScreen:
             }
             if not result["email_verified"]:
                 self.logger.warning(f"User email not verified: {result["email"]}")
-            return result
+            return User(**result)
         except Exception as e:
             self.logger.log_and_raise(e)
 
@@ -54,5 +57,5 @@ class LoginScreen:
                 st.logout()
                 st.rerun()
 
-            user_info = self._extract_user_info(st.user)
-            st.json(user_info)  # TODO: load into data base
+            user = self._extract_user(st.user)
+            user.save_to_db(self.db_client)

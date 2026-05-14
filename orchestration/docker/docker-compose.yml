@@ -30,6 +30,9 @@ services:
     env_file:
       - ../../.env
 
+    environment:
+      POSTGRES_HOST: db
+
     volumes:
       - ../../storage/raw:/app/storage/raw
 

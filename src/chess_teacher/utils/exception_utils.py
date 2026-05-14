@@ -8,3 +8,11 @@ class AuthError(Exception):
 
 class DatabaseError(Exception):
     pass
+
+
+class PipelineError(Exception):
+    pass
+
+
+class MetadataError(Exception):
+    pass

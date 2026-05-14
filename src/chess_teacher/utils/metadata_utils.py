@@ -1,41 +1,18 @@
 from __future__ import annotations
 
-import re
-from collections.abc import Iterable
+import inspect
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-import yaml
-
+from chess_teacher.utils.exception_utils import MetadataError
+from chess_teacher.utils.general_utils import load_yaml, quote_ident, quote_literal, require_ident
 from chess_teacher.utils.logging_utils import get_logger
-
-_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 logger = get_logger()
 
-
-def _require_ident(value: str, *, what: str) -> str:
-    if not isinstance(value, str) or not value.strip():
-        raise ValueError(f"{what} must be a non-empty string")
-    if not _IDENT_RE.match(value):
-        raise ValueError(
-            f"Invalid {what} '{value}'. Use letters/numbers/underscore, start with letter/_"
-        )
-    return value
-
-
-def _quote_ident(value: str) -> str:
-    _require_ident(value, what="identifier")
-    return f'"{value}"'
-
-
-def _quote_literal(value: str) -> str:
-    if value is None:
-        return "NULL"
-    if not isinstance(value, str):
-        value = str(value)
-    return "'" + value.replace("'", "''") + "'"
+# TODO: add other schema functionality (https://docs.sqlalchemy.org/en/21/core/metadata.html#sqlalchemy.schema.Column)
+# e.g. foreignkey, constraint (constraint: maybe a nice class to define? )
 
 
 @dataclass(frozen=True)
@@ -44,32 +21,68 @@ class ColumnMetadata:
     data_type: str
     comment: str | None = None
     nullable: bool = True
-    default: str | None = None
+    default: Any | None = None
+
+    def __post_init__(self) -> None:
+        """Normalize entries"""
+        name = require_ident(self.name.strip().lower(), what="column name")
+        object.__setattr__(self, "name", name)
+        # TODO: moet niet ook require_indent?
+        object.__setattr__(self, "data_type", self.data_type.strip().lower())
+        if self.comment is not None:
+            object.__setattr__(self, "comment", self.comment.strip() or None)
+
+        # double check that name & data_type are not empty string
+        if (not self.name) or (not self.data_type):
+            logger.log_and_raise(
+                MetadataError(
+                    f"Column name and data_type cannot be empty. "
+                    f"Got name='{self.name}', data_type='{self.data_type}'"
+                )
+            )
 
     @staticmethod
     def from_dict(raw: dict[str, Any]) -> ColumnMetadata:
-        name = _require_ident(raw.get("name", ""), what="column name")
-        data_type = raw.get("data_type")
-        if not isinstance(data_type, str) or not data_type.strip():
-            raise ValueError(f"Column '{name}' missing 'type'")
-        comment = raw.get("comment")
-        nullable = raw.get("nullable", True)
-        default = raw.get("default")
-        return ColumnMetadata(
-            name=name,
-            data_type=data_type.strip(),
-            comment=comment.strip() if isinstance(comment, str) and comment.strip() else None,
-            nullable=bool(nullable),
-            default=default.strip() if isinstance(default, str) and default.strip() else None,
-        )
+        try:
+            name = raw.get("name", "")
+            data_type = raw.get("data_type", "")
+            comment = raw.get("comment", None)
+            nullable = raw.get("nullable", True)
+            default = raw.get("default", None)
+            col = ColumnMetadata(
+                name=name,
+                data_type=data_type,
+                comment=comment,
+                nullable=bool(nullable),
+                default=default,
+            )
+        except Exception as e:
+            logger.log_and_raise(MetadataError(f"Error parsing column metadata from dict: {e}"))
+        return col
 
     def column_def_sql(self) -> str:
-        parts: list[str] = [_quote_ident(self.name), self.data_type]
+        parts: list[str] = [quote_ident(self.name), self.data_type]
         if not self.nullable:
             parts.append("NOT NULL")
         if self.default is not None:
-            parts.append(f"DEFAULT {self.default}")
+            parts.append(f"DEFAULT {self._format_default_value()}")
         return " ".join(parts)
+
+    def _format_default_value(self) -> str:
+        """Format default value as valid SQL literal.
+
+        Handles: str, int, float, bool, None
+        """
+        if self.default is None:
+            return "NULL"
+        if isinstance(self.default, bool):
+            return "TRUE" if self.default else "FALSE"
+        if isinstance(self.default, int | float):
+            return str(self.default)
+        if isinstance(self.default, str):
+            return quote_literal(self.default)
+        # Fallback: convert to string and quote
+        return quote_literal(str(self.default))
 
 
 @dataclass(frozen=True, init=False)
@@ -99,8 +112,11 @@ class TableMetadata:
         """
         # Mode 1: Load from YAML by key
         if key is not None and (schema_name is None and table_name is None and columns is None):
-            if yaml_path is None:
-                yaml_path = Path("metadata.yml")  # default path
+            if yaml_path is None:  # find yml from folder where TableMetadata is initialized
+                caller_frame = inspect.stack()[1]
+                caller_file = Path(caller_frame.filename)
+                yaml_path = caller_file.parent / "metadata.yml"
+
             loaded = self._load_from_yaml_by_key(key, yaml_path)
             object.__setattr__(self, "schema_name", loaded.schema_name)
             object.__setattr__(self, "table_name", loaded.table_name)
@@ -110,8 +126,10 @@ class TableMetadata:
         # Mode 2: Direct initialization
         else:
             if schema_name is None or table_name is None or columns is None:
-                raise ValueError(
-                    "Either provide 'key' for YAML loading, or provide schema_name, table_name, and columns"
+                logger.log_and_raise(
+                    MetadataError(
+                        "Either provide 'key' for YAML loading, or provide schema_name, table_name, and columns"
+                    )
                 )
             object.__setattr__(self, "schema_name", schema_name)
             object.__setattr__(self, "table_name", table_name)
@@ -123,7 +141,7 @@ class TableMetadata:
     def _load_from_yaml_by_key(key: str, path: str | Path) -> TableMetadata:
         """Load a table metadata from YAML by key.
 
-        Expects YAML structure:
+        Expects YAML structure with top-level keys:
             tables:
               mykey:
                 schema: schema_name
@@ -133,54 +151,51 @@ class TableMetadata:
                 ...
         """
         try:
-            p = Path(path)
-            data = yaml.safe_load(p.read_text(encoding="utf-8"))
-            if not isinstance(data, dict):
-                raise ValueError("metadata.yml must contain a YAML mapping/object at the top level")
+            data = load_yaml(path)
 
             tables = data.get("tables")
             if not isinstance(tables, dict):
-                raise ValueError("metadata.yml must contain a 'tables' mapping at the top level")
+                raise MetadataError("metadata.yml must contain a 'tables' mapping at the top level")
 
             if key not in tables:
                 available_keys = list(tables.keys())
-                raise ValueError(
+                raise MetadataError(
                     f"Key '{key}' not found in tables. Available keys: {available_keys}"
                 )
 
             table_data = tables[key]
             if not isinstance(table_data, dict):
-                raise ValueError(f"Table config for key '{key}' must be a mapping/object")
+                raise MetadataError(f"Table config for key '{key}' must be a mapping/object")
 
             # Use from_dict to parse the table config
             result = TableMetadata._from_dict_raw(table_data)
         except Exception as exc:
-            logger.error("Error loading metadata from %s with key '%s': %s", path, key, exc)
-            raise ValueError(
-                f"Error occurred while loading metadata from {path} with key '{key}': {exc}"
+            logger.log_and_raise(
+                exc, "Error loading TableMetadata from YAML for key '{key}' at path '{path}': {exc}"
             )
         return result
 
     @staticmethod
     def _from_dict_raw(raw: dict[str, Any]) -> TableMetadata:
-        """Internal method to create TableMetadata from dict without going through __init__."""
-        # Accept either top-level keys or a nested "table" object.
-        table_raw = raw.get("table")
-        if isinstance(table_raw, dict):
-            raw = {**raw, **table_raw}
+        """Internal method to create TableMetadata from dict without going through __init__.
 
-        schema_name = _require_ident(
+        Expects table configuration with top-level keys:
+            schema: schema_name
+            table: table_name
+            columns: [...]
+        """
+        schema_name = require_ident(
             raw.get("schema", ""),
             what="schema name",
-        )
-        table_name = _require_ident(
+        ).lower()
+        table_name = require_ident(
             raw.get("table", ""),
             what="table name",
-        )
+        ).lower()
 
         columns_raw = raw.get("columns")
         if not isinstance(columns_raw, list) or not columns_raw:
-            raise ValueError("metadata must contain a non-empty 'columns' list")
+            raise MetadataError("metadata must contain a non-empty 'columns' list")
         parsed_columns = [ColumnMetadata.from_dict(c) for c in columns_raw]
 
         comment = raw.get("comment")
@@ -193,13 +208,13 @@ class TableMetadata:
             pk_list = [str(x) for x in pk_raw]
         else:
             pk_list = []
-        primary_key = tuple(_require_ident(x, what="primary key column") for x in pk_list)
+        primary_key = tuple(require_ident(x, what="primary key column").lower() for x in pk_list)
 
         if primary_key:
             column_names = {c.name for c in parsed_columns}
             missing = [c for c in primary_key if c not in column_names]
             if missing:
-                raise ValueError(f"primary_key columns not present in columns: {missing}")
+                raise MetadataError(f"primary_key columns not present in columns: {missing}")
             columns_by_name = {c.name: c for c in parsed_columns}
             pk_cols = [columns_by_name[name] for name in primary_key]
             pk_set = set(primary_key)
@@ -218,13 +233,13 @@ class TableMetadata:
         return obj
 
     def qualified_name_sql(self) -> str:
-        return f"{_quote_ident(self.schema_name)}.{_quote_ident(self.table_name)}"
+        return f"{quote_ident(self.schema_name)}.{quote_ident(self.table_name)}"
 
     def create_table_sql(self, *, if_not_exists: bool = True) -> str:
         cols_sql = ",\n  ".join(c.column_def_sql() for c in self.columns)
         constraints: list[str] = []
         if self.primary_key:
-            pk_cols = ", ".join(_quote_ident(c) for c in self.primary_key)
+            pk_cols = ", ".join(quote_ident(c) for c in self.primary_key)
             constraints.append(f"PRIMARY KEY ({pk_cols})")
         if constraints:
             cols_sql = cols_sql + ",\n  " + ",\n  ".join(constraints)
@@ -234,72 +249,19 @@ class TableMetadata:
 
     def create_schema_sql(self, *, if_not_exists: bool = True) -> str:
         ine = "IF NOT EXISTS " if if_not_exists else ""
-        return f"CREATE SCHEMA {ine}{_quote_ident(self.schema_name)};"
+        return f"CREATE SCHEMA {ine}{quote_ident(self.schema_name)};"
 
     def comment_sql(self) -> list[str]:
         stmts: list[str] = []
         qname = self.qualified_name_sql()
         if self.comment:
-            stmts.append(f"COMMENT ON TABLE {qname} IS {_quote_literal(self.comment)};")
+            stmts.append(f"COMMENT ON TABLE {qname} IS {quote_literal(self.comment)};")
         for col in self.columns:
             if col.comment:
                 stmts.append(
-                    f"COMMENT ON COLUMN {qname}.{_quote_ident(col.name)} IS {_quote_literal(col.comment)};"
+                    f"COMMENT ON COLUMN {qname}.{quote_ident(col.name)} IS {quote_literal(col.comment)};"
                 )
         return stmts
 
     def ddl(self) -> list[str]:
         return [self.create_schema_sql(), self.create_table_sql(), *self.comment_sql()]
-
-
-# TODO: stop het onderste in een andere class? Of helemaal eruit gooien?
-
-
-def ddls_from_metadata_files(
-    paths: Iterable[str | Path],
-    table_key: str = "default",
-    log_warnings: bool = True,
-) -> list[str]:
-    """Generate DDL statements from metadata YAML files.
-
-    Args:
-        paths: Paths to metadata.yml files
-        table_key: The key under 'tables' in the YAML to load
-        log_warnings: Whether to log warnings for failed files
-
-    Returns:
-        List of DDL statements
-    """
-    ddls: list[str] = []
-    for path in paths:
-        try:
-            ddls.extend(TableMetadata(key=table_key, yaml_path=path).ddl())
-        except Exception as exc:
-            # Best-effort: continue generating DDL for other files.
-            if log_warnings:
-                logger.warning("Skipping metadata file %s: %s", path, exc)
-    return ddls
-
-
-def ddls_from_current_directory_metadata(
-    cwd: str | Path = ".",
-    table_key: str = "default",
-) -> list[str]:
-    """Loads `metadata.yml` from the given directory and returns its DDL statements.
-
-    Only looks for a single file named exactly `metadata.yml` in that directory.
-    Returns an empty list if the file does not exist.
-
-    Args:
-        cwd: Directory to search for metadata.yml
-        table_key: The key under 'tables' in the YAML to load
-
-    Returns:
-        List of DDL statements
-    """
-
-    directory = Path(cwd)
-    metadata_path = directory / "metadata.yml"
-    if not metadata_path.is_file():
-        return []
-    return ddls_from_metadata_files([metadata_path], table_key=table_key, log_warnings=False)
