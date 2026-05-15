@@ -3,7 +3,6 @@ import streamlit as st
 from chess_teacher.platform.user import User
 from chess_teacher.utils.db_client import get_db_client
 from chess_teacher.utils.exception_utils import AuthError
-from chess_teacher.utils.general_utils import generate_hash
 from chess_teacher.utils.logging_utils import get_logger
 
 
@@ -19,9 +18,11 @@ class LoginScreen:
         try:
             return st.user.is_logged_in
         except Exception:
-            self.logger.log_and_raise(AuthError("Failed to check login status"), exc_info=True)
+            self.logger.log_and_raise(AuthError("Failed to check login status"))
 
-    def _extract_user(self, user) -> User:
+    def _create_new_user(self, user: dict) -> User:
+        """Verify a user entry (st.user dict), create a User object and save
+        the user to the database. If the user already exists, do nothing."""
         try:
             provider = user.get("provider", None)
             if not provider:
@@ -29,22 +30,24 @@ class LoginScreen:
             client_id = st.secrets["auth"].get(provider, {}).get("client_id", None)
             if user.get("aud", None) != client_id:
                 self.logger.log_and_raise(AuthError("Invalid user: audience mismatch"))
-            result = {
-                "id": generate_hash([user.get("sub"), provider]),  # hashed unique ID
-                "sub": user.get("sub"),  # unique ID per provider, no fallback
-                "email": user.get("email", None),
-                "name": user.get("name", None),
-                "picture": user.get("picture", None),
-                "given_name": user.get("given_name", None),
-                "family_name": user.get("family_name", None),
-                "provider": provider,
-                "email_verified": user.get("email_verified", False),
-            }
-            if not result["email_verified"]:
-                self.logger.warning(f"User email not verified: {result["email"]}")
-            return User(**result)
+            if not user.get("email_verified", False):
+                self.logger.warning(
+                    f"User email not verified: {user.get("email", '"email not found')}"
+                )
+            result = User(user)
         except Exception as e:
             self.logger.log_and_raise(e)
+        result.save_to_db(self.db_client)
+        return result
+
+    def _exists_in_db(self, user: dict) -> bool:
+        """Check if the st.user is already registered based on the generated id."""
+        id = User.generate_id(user)
+        return User.exists_in_db(self.db_client, id)
+
+    def _fetch_existing_user(self, *, id: str | None = None, user: dict = {}) -> User:
+        """Fetch an existing User object from the database, using an id or st.user."""
+        return User.fetch_from_db(self.db_client, id=id, user=user)
 
     def display(self):
         if not self._user_is_logged_in():
@@ -52,10 +55,13 @@ class LoginScreen:
             if st.button("Log in with Google"):
                 st.login("google")
         else:
+            if not self._exists_in_db(st.user):
+                user = self._create_new_user(st.user)
+            else:
+                user = self._fetch_existing_user(user=st.user)
+            st.session_state["current_user"] = user
+
             st.write(f"Welcome, {st.user.get("name", "User")}!")
             if st.button("Log out"):
                 st.logout()
                 st.rerun()
-
-            user = self._extract_user(st.user)
-            user.save_to_db(self.db_client)

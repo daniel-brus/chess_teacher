@@ -2,6 +2,7 @@ import hashlib
 import re
 from datetime import UTC, datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import yaml
 
@@ -53,6 +54,14 @@ def load_yaml(path: Path | str) -> dict:
     return data
 
 
+def assert_valid_timezone(timezone: str) -> None:
+    """Raises an error if timezone is not valid"""
+    try:
+        ZoneInfo(timezone)
+    except ZoneInfoNotFoundError as e:
+        raise ValueError(f"Invalid timezone: {timezone}") from e
+
+
 ### SQL-specific helpers ###
 
 
@@ -80,3 +89,7 @@ def quote_literal(value: str) -> str:
     if not isinstance(value, str):
         value = str(value)
     return "'" + value.replace("'", "''") + "'"
+
+
+def generate_ident_is_literal(ident: str, literal: str) -> str:
+    return quote_ident(ident) + " = " + quote_literal(literal)

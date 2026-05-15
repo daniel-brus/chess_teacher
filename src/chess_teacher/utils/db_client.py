@@ -8,7 +8,7 @@ import polars as pl
 
 from chess_teacher.utils.db_engine import EnrichedEngine, get_db_engine
 from chess_teacher.utils.exception_utils import DatabaseError, MetadataError
-from chess_teacher.utils.general_utils import quote_ident, quote_literal
+from chess_teacher.utils.general_utils import generate_ident_is_literal, quote_ident, quote_literal
 from chess_teacher.utils.logging_utils import get_logger
 from chess_teacher.utils.metadata_utils import TableMetadata
 
@@ -17,7 +17,7 @@ from chess_teacher.utils.metadata_utils import TableMetadata
 # ---------------------------------------------------------------------------
 
 
-class WriteStrategy(str, Enum):
+class WriteStrategy(Enum):
     APPEND = "append"
     INSERT_IGNORE = "insert_ignore"
     OVERWRITE = "overwrite"
@@ -402,7 +402,7 @@ class DatabaseClient:
                 )
 
             set_clause = ", ".join(
-                f"{quote_ident(col)} = {quote_literal(val)}" for col, val in values.items()
+                generate_ident_is_literal(col, val) for col, val in values.items()
             )
             sql = f"UPDATE {table.qualified_name_sql()}\nSET {set_clause}\nWHERE {where};"
             affected = self.engine.execute_write(sql, {}) if values else 0
