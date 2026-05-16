@@ -16,6 +16,11 @@ tables:
         nullable: false
         comment: Unique ID per provider
 
+      - name: provider
+        data_type: text
+        nullable: true
+        comment: OAuth provider (e.g. google, github)
+
       - name: email
         data_type: text
         nullable: true
@@ -41,23 +46,36 @@ tables:
         nullable: true
         comment: Last name
 
-      - name: provider
-        data_type: text
-        nullable: true
-        comment: OAuth provider (e.g. google, github)
-
       - name: email_verified
         data_type: boolean
         nullable: false
         default: false
         comment: Whether email is verified by provider
 
+      - name: tier
+        data_type: text
+        nullable: False
+        default: "Free"
+        comment: Tier of the user (Free/Premium)
+
       - name: latest_login
-        data_type: timestamptz
+        data_type: timestamp
         nullable: true
-        comment: Timestamp of most recent login
+        comment: Timestamp of most recent login (UTC)
 
       - name: latest_pipeline_run
-        data_type: timestamptz
+        data_type: timestamp
         nullable: true
-        comment: Timestamp of most recent pipeline run. Used to prevent multiple runs in 24hs.
+        comment: Timestamp of most recent pipeline run (UTC). Used to prevent multiple runs in 24hs.
+
+      - name: cron_time
+        data_type: time
+        nullable: false
+        default: "03:00:00"
+        comment: Time at which the daily cron job for a user is executed.
+
+      - name: timezone
+        data_type: text
+        nullable: false
+        default: "Europe/Amsterdam"
+        comment: Timezone applicable to the cron_time.

@@ -7,6 +7,11 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import yaml
 
 
+def get_current_datetime(tz: str = "UTC"):
+    assert_valid_timezone(tz)
+    return datetime.now(ZoneInfo(tz))
+
+
 def generate_hash(input: str | list[str]) -> str:
     """Generate a sha256hash for the given input string."""
     if isinstance(input, list):

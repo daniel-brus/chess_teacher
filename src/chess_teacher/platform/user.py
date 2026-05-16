@@ -191,3 +191,17 @@ class User:
                 )
             )
         self.upsert_field(db_client, field, ts)
+
+    def delete_from_db(self, db_client: DatabaseClient) -> None:
+        try:
+            tablemetadata = TableMetadata("users")
+            db_client.delete_where(tablemetadata, where=generate_ident_is_literal("id", self.id))
+        except Exception as e:
+            logger.log_and_raise(e)
+
+    @staticmethod
+    def get_metadata() -> TableMetadata:
+        try:
+            return TableMetadata("users")
+        except Exception as e:
+            logger.log_and_raise(e)

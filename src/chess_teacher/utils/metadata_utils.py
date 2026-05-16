@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 from dataclasses import dataclass, field
+from datetime import date, datetime, time
 from pathlib import Path
 from typing import Any
 
@@ -71,7 +72,7 @@ class ColumnMetadata:
     def _format_default_value(self) -> str:
         """Format default value as valid SQL literal.
 
-        Handles: str, int, float, bool, None
+        Handles: str, int, float, bool, (date)(time), None
         """
         if self.default is None:
             return "NULL"
@@ -81,6 +82,11 @@ class ColumnMetadata:
             return str(self.default)
         if isinstance(self.default, str):
             return quote_literal(self.default)
+        if isinstance(
+            self.default,
+            (date | datetime | time),
+        ):
+            return quote_literal(self.default.isoformat())
         # Fallback: convert to string and quote
         return quote_literal(str(self.default))
 
