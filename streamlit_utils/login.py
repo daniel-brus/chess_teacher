@@ -32,17 +32,18 @@ class LoginScreen:
             result = User.from_st_user(user)
         except Exception as e:
             self.logger.log_and_raise(e)
-        result.save_to_db(self.db_client)
+        result.save_new_to_db(self.db_client)
         return result
 
-    def _exists_in_db(self, user: dict) -> bool:
+    def _exists_in_db(self, st_user: dict) -> bool:
         """Check if the st.user (dict) is already registered based on the generated id."""
-        id = User.generate_id(user)
+        id = User.generate_id(st_user)
         return User.exists_in_db(self.db_client, id)
 
-    def _fetch_existing_user(self, *, id: str | None = None, user: dict = {}) -> User:
+    def _fetch_existing_user(self, st_user: dict) -> User:
         """Fetch an existing User object from the database, using an id or st.user (dict)."""
-        return User.fetch_from_db(self.db_client, id=id, user=user)
+        id = User.generate_id(st_user)
+        return User.fetch_from_db(self.db_client, id=id)
 
     def display(self):
         self.logger.info("Login screen started.")
@@ -59,7 +60,7 @@ class LoginScreen:
             if not self._exists_in_db(st_user):
                 user = self._create_new_user(st_user)
             else:
-                user = self._fetch_existing_user(user=st_user)
+                user = self._fetch_existing_user(st_user)
 
             user.upsert_latest(self.db_client, "latest_login", now)
             set_current_user(user)

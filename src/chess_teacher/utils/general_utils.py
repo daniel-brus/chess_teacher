@@ -1,5 +1,6 @@
 import hashlib
 import re
+from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -98,3 +99,13 @@ def quote_literal(value: str) -> str:
 
 def generate_ident_is_literal(ident: str, literal: str) -> str:
     return quote_ident(ident) + " = " + quote_literal(literal)
+
+
+def generate_idents_are_literals(idents: Iterable[str], literals: Iterable[str]) -> str:
+    if len(idents) != len(literals):
+        raise ValueError(
+            f"Number of identifiers ({len(idents)}) and literals ({len(literals)}) must be the same."
+        )
+    return " AND ".join([
+        generate_ident_is_literal(ident, literal) for ident, literal in zip(idents, literals)
+    ])

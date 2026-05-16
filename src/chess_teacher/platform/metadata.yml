@@ -4,9 +4,9 @@ tables:
     table: users
     comment: Authenticated users
     primary_key:
-      - id
+      - user_id
     columns:
-      - name: id
+      - name: user_id
         data_type: text
         nullable: false
         comment: Hashed unique user ID
@@ -79,3 +79,48 @@ tables:
         nullable: false
         default: "Europe/Amsterdam"
         comment: Timezone applicable to the cron_time.
+
+  accounts:
+    schema: platform
+    table: accounts
+    comment: Chess website accounts (e.g. Chess.com, Lichess, etc.)
+    primary_key:
+      - account_id
+    columns:
+      - name: account_id
+        data_type: text
+        nullable: false
+        comment: Hashed unique account ID
+      - platform:
+        data_type: text
+        nullable: false
+        comment: Platform of the account (e.g. Chess.com, Lichess, etc.)
+      - username:
+        data_type: text
+        nullable: false
+        comment: Username of the account
+      - latest_ingestion:
+        data_type: timestamp
+        nullable: true
+        comment: Timestamp of most recent ingestion (UTC). Used to prevent multiple ingestions in 24hs.
+
+  br_users_accounts:
+    schema: platform
+    table: br_users_accounts
+    comment: Bridge between users and accounts
+    primary_key:
+      - user_id
+      - account_id
+    columns:
+      - name: user_id
+        data_type: text
+        nullable: false
+        comment: Hashed unique user ID
+      - name: account_id
+        data_type: text
+        nullable: false
+        comment: Hashed unique account ID
+      - latest_ingestion:
+        data_type: timestamp
+        nullable: true
+        comment: Timestamp of most recent ingestion (UTC). Used to prevent multiple ingestions in 24hs.
