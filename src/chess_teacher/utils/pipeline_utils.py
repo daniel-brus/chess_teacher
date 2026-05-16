@@ -318,17 +318,17 @@ class Pipeline:
                 run_error,
                 f"[Pipeline:{self.name}] Failed to run: {run_error}",
             )
-
-        if run_result is None:
+        elif not run_result:
             self.logger.log_and_raise(
                 PipelineError(f"[Pipeline:{self.name}] Run finished without a run_id.")
             )
-
-        self.logger.info(
-            f"[Pipeline:{self.name}] Finished with result={pipeline_result} "
-            f"in {run_result.duration_seconds:.2f}s."
-        )
-        return run_result
+        else:
+            self.logger.info(
+                f"[Pipeline:{self.name}] Finished with result={pipeline_result} "
+                f"in {run_result.duration_seconds:.2f}s."
+            )
+            return run_result
+        assert False  # Should never happen (mypy check)
 
     # ------------------------------------------------------------------
     # Pre / post hooks

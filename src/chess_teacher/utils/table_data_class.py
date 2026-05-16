@@ -353,9 +353,9 @@ class TableDataClass(ABC):
                 logger.info(
                     f"{type(self).__name__} {self.get_where_clause()} already exists in database."
                 )
-                return False
         except Exception as e:
             logger.log_and_raise(e)
+        return False
 
     def save_to_db(
         self,

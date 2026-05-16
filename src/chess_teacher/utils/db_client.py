@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import date, datetime, time
 from enum import StrEnum
-from typing import Any, Literal
+from typing import Any, Literal, overload
 
 import polars as pl
 
@@ -781,6 +781,30 @@ class DatabaseClient:
     # Read
     # ------------------------------------------------------------------
 
+    @overload
+    def read(
+        self,
+        table: TableMetadata,
+        *,
+        columns: list[str] | None = None,
+        where: str | None = None,
+        order_by: str | None = None,
+        limit: int | None = None,
+        as_polars: Literal[False] = False,
+    ) -> list[dict[str, Any]]: ...
+
+    @overload
+    def read(
+        self,
+        table: TableMetadata,
+        *,
+        columns: list[str] | None = None,
+        where: str | None = None,
+        order_by: str | None = None,
+        limit: int | None = None,
+        as_polars: Literal[True],
+    ) -> pl.DataFrame: ...
+
     def read(
         self,
         table: TableMetadata,
@@ -790,7 +814,7 @@ class DatabaseClient:
         order_by: str | None = None,
         limit: int | None = None,
         as_polars: bool = False,
-    ) -> list[dict] | pl.DataFrame:
+    ) -> list[dict[str, Any]] | pl.DataFrame:
         """Read rows from a table with optional filtering and projection.
 
         Args:
