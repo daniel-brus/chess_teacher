@@ -9,3 +9,4 @@ pip-audit
 bandit
 types-requests
 types-PyYAML
+ipykernel

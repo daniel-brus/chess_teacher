@@ -1,0 +1,122 @@
+tables:
+  users:
+    schema: platform
+    table: users
+    comment: Authenticated users
+    primary_key:
+      - user_id
+    columns:
+      - name: user_id
+        data_type: text
+        nullable: false
+        comment: Hashed unique user ID
+
+      - name: sub
+        data_type: text
+        nullable: false
+        comment: Unique ID per provider
+
+      - name: provider
+        data_type: text
+        nullable: false
+        comment: OAuth provider (e.g. google, github)
+
+      - name: email
+        data_type: text
+        nullable: true
+        comment: User email address
+
+      - name: name
+        data_type: text
+        nullable: true
+        comment: Full display name
+
+      - name: picture
+        data_type: text
+        nullable: true
+        comment: URL to profile picture
+
+      - name: given_name
+        data_type: text
+        nullable: true
+        comment: First name
+
+      - name: family_name
+        data_type: text
+        nullable: true
+        comment: Last name
+
+      - name: email_verified
+        data_type: boolean
+        nullable: false
+        default: false
+        comment: Whether email is verified by provider
+
+      - name: tier
+        data_type: text
+        nullable: False
+        default: "Free"
+        comment: Tier of the user (Free/Premium)
+
+      - name: latest_login
+        data_type: timestamp
+        nullable: true
+        comment: Timestamp of most recent login (UTC)
+
+      - name: latest_pipeline_run
+        data_type: timestamp
+        nullable: true
+        comment: Timestamp of most recent pipeline run (UTC). Used to prevent multiple runs in 24hs.
+
+      - name: cron_time
+        data_type: time
+        nullable: false
+        default: "03:00:00"
+        comment: Time at which the daily cron job for a user is executed.
+
+      - name: timezone
+        data_type: text
+        nullable: false
+        default: "Europe/Amsterdam"
+        comment: Timezone applicable to the cron_time.
+
+  accounts:
+    schema: platform
+    table: accounts
+    comment: Chess website accounts (e.g. Chess.com, Lichess, etc.)
+    primary_key:
+      - account_id
+    columns:
+      - name: account_id
+        data_type: text
+        nullable: false
+        comment: Hashed unique account ID
+      - name: username
+        data_type: text
+        nullable: false
+        comment: Username of the account
+      - name: platform
+        data_type: text
+        nullable: false
+        comment: Platform of the account (e.g. Chess.com, Lichess, etc.)
+      - name: latest_ingestion
+        data_type: timestamp
+        nullable: true
+        comment: Timestamp of most recent ingestion (UTC). Used to prevent multiple ingestions in 24hs.
+
+  br_users_accounts:
+    schema: platform
+    table: br_users_accounts
+    comment: Bridge between users and accounts
+    primary_key:
+      - user_id
+      - account_id
+    columns:
+      - name: user_id
+        data_type: text
+        nullable: false
+        comment: Hashed unique user ID
+      - name: account_id
+        data_type: text
+        nullable: false
+        comment: Hashed unique account ID

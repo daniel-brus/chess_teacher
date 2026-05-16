@@ -1,7 +1,9 @@
 # ZELF TOEGEVOEGD
 .vscode/
+.cursor/
 storage/
 .streamlit/secrets.toml
+testnotebook.ipynb
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

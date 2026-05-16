@@ -4,3 +4,15 @@ class ConfigError(Exception):
 
 class AuthError(Exception):
     pass
+
+
+class DatabaseError(Exception):
+    pass
+
+
+class PipelineError(Exception):
+    pass
+
+
+class MetadataError(Exception):
+    pass

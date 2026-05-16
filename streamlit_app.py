@@ -2,11 +2,8 @@
 
 import streamlit as st
 
-from chess_teacher.utils.logging_utils import get_logger
-from streamlit_utils.auth import LoginScreen
-
-logger = get_logger()
-login_screen = LoginScreen()
+from streamlit_utils.login import LoginScreen
+from streamlit_utils.session_state import force_logout, get_current_user
 
 st.set_page_config(
     page_title="Chess Teacher",
@@ -14,8 +11,26 @@ st.set_page_config(
     layout="centered",
 )
 
-logger.info("Chess Teacher Streamlit app started")
+LoginScreen().display()
+if "current_user" not in st.session_state.keys():
+    st.stop()
+user = get_current_user()
 
-st.title("♟️ Chess Teacher")
+pages = [
+    st.Page("pages/home.py", title="Home"),
+    st.Page("pages/play.py", title="Play"),
+    st.Page("pages/settings.py", title="Settings"),
+]
 
-login_screen.display()
+pg = st.navigation(pages, position="sidebar", expanded=False)
+
+with st.sidebar:
+    if user.picture:
+        st.image(user.picture)
+    else:
+        st.markdown(":chess_pawn:")
+
+    if st.button("Logout"):
+        force_logout()  # clear + rerun → LoginScreen pakt het op
+
+pg.run()
