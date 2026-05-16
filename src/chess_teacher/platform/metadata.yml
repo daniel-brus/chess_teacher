@@ -18,7 +18,7 @@ tables:
 
       - name: provider
         data_type: text
-        nullable: true
+        nullable: false
         comment: OAuth provider (e.g. google, github)
 
       - name: email

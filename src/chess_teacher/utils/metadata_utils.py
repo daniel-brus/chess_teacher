@@ -238,6 +238,12 @@ class TableMetadata:
         object.__setattr__(obj, "primary_key", primary_key)
         return obj
 
+    def column_names(self) -> set[str]:
+        return {column.name for column in self.columns}
+
+    def columns_by_name(self) -> dict[str, ColumnMetadata]:
+        return {column.name: column for column in self.columns}
+
     def qualified_name_sql(self) -> str:
         return f"{quote_ident(self.schema_name)}.{quote_ident(self.table_name)}"
 

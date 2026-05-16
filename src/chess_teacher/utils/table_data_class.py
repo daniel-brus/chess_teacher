@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import MISSING, asdict, fields
-from datetime import UTC, datetime
+from dataclasses import MISSING, Field, asdict, fields, is_dataclass
+from datetime import UTC, date, datetime, time
+from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Self
+from types import UnionType
+from typing import TYPE_CHECKING, Any, Self, Union, get_args, get_origin, get_type_hints
 
-from chess_teacher.utils.exception_utils import ConfigError, DatabaseError
+from chess_teacher.utils.exception_utils import ConfigError, DatabaseError, MetadataError
 from chess_teacher.utils.general_utils import (
     generate_hash,
     generate_ident_is_literal,
@@ -19,6 +21,64 @@ if TYPE_CHECKING:
     from chess_teacher.utils.db_client import DatabaseClient
 
 logger = get_logger()
+
+
+def _unwrap_optional_type(annotation: Any) -> Any:
+    origin = get_origin(annotation)
+    if origin in (UnionType, Union):
+        non_none = [arg for arg in get_args(annotation) if arg is not type(None)]
+        if len(non_none) == 1:
+            return _unwrap_optional_type(non_none[0])
+    return annotation
+
+
+def _is_optional_type(annotation: Any) -> bool:
+    origin = get_origin(annotation)
+    if origin in (UnionType, Union):
+        return type(None) in get_args(annotation)
+    return False
+
+
+def _python_type_to_data_type(annotation: Any) -> str:
+    annotation = _unwrap_optional_type(annotation)
+    if annotation is str:
+        return "text"
+    if annotation is bool:
+        return "boolean"
+    if annotation is datetime:
+        return "timestamp"
+    if annotation is time:
+        return "time"
+    if isinstance(annotation, type) and issubclass(annotation, Enum):
+        return "text"
+    raise TypeError(f"Unsupported type for metadata data_type mapping: {annotation!r}")
+
+
+def _normalize_default_value(value: Any) -> Any:
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, date | datetime | time):
+        return value.isoformat()
+    return value
+
+
+def _dataclass_field_default(field: Field[Any]) -> Any:
+    if field.default_factory is not MISSING:
+        return field.default_factory()
+    if field.default is not MISSING:
+        return field.default
+    return MISSING
+
+
+def _expected_nullable_for_field(field: Field[Any], type_hints: dict[str, Any]) -> bool:
+    return _is_optional_type(type_hints[field.name])
+
+
+def _expected_metadata_default_for_field(field: Field[Any]) -> Any:
+    default = _dataclass_field_default(field)
+    if default is MISSING:
+        return None
+    return _normalize_default_value(default)
 
 
 class TableDataClass(ABC):
@@ -48,6 +108,88 @@ class TableDataClass(ABC):
     def get_timestamp_columns(cls) -> tuple[str, ...]:
         """Field names allowed for upsert_latest; override in subclasses when needed."""
         return ()
+
+    @classmethod
+    def get_dataclass_field_names(cls) -> set[str]:
+        if not is_dataclass(cls):
+            raise TypeError(f"{cls.__name__} must be a @dataclass to sync with metadata")
+        return {field.name for field in fields(cls)}
+
+    @classmethod
+    def validate_metadata_sync(cls) -> list[str]:
+        """Return human-readable errors when dataclass fields and metadata.yml diverge."""
+        metadata = cls.get_metadata()
+        dc_names = cls.get_dataclass_field_names()
+        meta_names = metadata.column_names()
+        columns_by_name = metadata.columns_by_name()
+        type_hints = get_type_hints(cls)
+        errors: list[str] = []
+
+        only_dc = sorted(dc_names - meta_names)
+        only_meta = sorted(meta_names - dc_names)
+        if only_dc:
+            errors.append(f"only on {cls.__name__} dataclass: {only_dc}")
+        if only_meta:
+            errors.append(f"only in metadata.yml: {only_meta}")
+
+        for field in fields(cls):
+            column = columns_by_name[field.name]
+            expected_type = _python_type_to_data_type(type_hints[field.name])
+            if column.data_type != expected_type:
+                errors.append(
+                    f"{field.name}: type dataclass→{expected_type!r}, metadata→{column.data_type!r}"
+                )
+
+            expected_nullable = _expected_nullable_for_field(field, type_hints)
+            if column.nullable != expected_nullable:
+                errors.append(
+                    f"{field.name}: nullable dataclass→{expected_nullable}, "
+                    f"metadata→{column.nullable}"
+                )
+
+            expected_default = _expected_metadata_default_for_field(field)
+            if column.default != expected_default:
+                errors.append(
+                    f"{field.name}: default dataclass→{expected_default!r}, "
+                    f"metadata→{column.default!r}"
+                )
+
+        pk_cols = cls.get_primary_key_columns()
+        if not pk_cols:
+            errors.append(f"{cls.__name__} must declare primary_key in metadata.yml")
+        else:
+            missing_pk_dc = set(pk_cols) - dc_names
+            missing_pk_meta = set(pk_cols) - meta_names
+            if missing_pk_dc:
+                errors.append(f"primary_key not on dataclass: {sorted(missing_pk_dc)}")
+            if missing_pk_meta:
+                errors.append(f"primary_key not in metadata columns: {sorted(missing_pk_meta)}")
+            if metadata.primary_key != pk_cols:
+                errors.append(
+                    f"primary_key mismatch: metadata→{metadata.primary_key!r}, "
+                    f"get_primary_key_columns()→{pk_cols!r}"
+                )
+
+        id_hash_cols = set(cls.get_id_hash_columns())
+        unknown_id_hash = id_hash_cols - dc_names
+        if unknown_id_hash:
+            errors.append(f"get_id_hash_columns not on dataclass: {sorted(unknown_id_hash)}")
+
+        timestamp_cols = set(cls.get_timestamp_columns())
+        unknown_ts = timestamp_cols - dc_names
+        if unknown_ts:
+            errors.append(f"get_timestamp_columns not on dataclass: {sorted(unknown_ts)}")
+
+        return errors
+
+    @classmethod
+    def assert_metadata_sync(cls) -> None:
+        """Raise MetadataError if dataclass fields and metadata.yml are out of sync."""
+        errors = cls.validate_metadata_sync()
+        if errors:
+            logger.log_and_raise(
+                MetadataError(f"{cls.__name__} metadata sync failed:\n  " + "\n  ".join(errors))
+            )
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Self:
