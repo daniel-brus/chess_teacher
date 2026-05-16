@@ -23,4 +23,4 @@ services:
     volumes:
       - ../../storage/raw:/app/storage/raw
 
-    command: python scripts/nightly_job.py
+    command: python scripts/maintenance.py

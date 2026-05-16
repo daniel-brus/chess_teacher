@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import MISSING, Field, asdict, fields, is_dataclass
+from dataclasses import MISSING, Field, fields, is_dataclass
 from datetime import UTC, date, datetime, time
 from enum import StrEnum
 from pathlib import Path
@@ -18,7 +18,7 @@ from chess_teacher.utils.logging_utils import get_logger
 from chess_teacher.utils.metadata_utils import TableMetadata
 
 if TYPE_CHECKING:
-    from chess_teacher.utils.db_client import DatabaseClient
+    from chess_teacher.utils.db_client import DatabaseClient, WriteResult
 
 logger = get_logger()
 
@@ -43,6 +43,8 @@ def _python_type_to_data_type(annotation: Any) -> str:
     annotation = _unwrap_optional_type(annotation)
     if annotation is str:
         return "text"
+    if annotation is int:
+        return "integer"
     if annotation is bool:
         return "boolean"
     if annotation is datetime:
@@ -74,6 +76,10 @@ def _dataclass_fields(cls: type[Any]) -> tuple[Field[Any], ...]:
     if not is_dataclass(cls):
         raise TypeError(f"{cls.__name__} must be a @dataclass to sync with metadata")
     return fields(cast(Any, cls))
+
+
+def _persisted_dataclass_fields(cls: type[Any]) -> tuple[Field[Any], ...]:
+    return tuple(field for field in _dataclass_fields(cls) if field.metadata.get("persist", True))
 
 
 def _expected_nullable_for_field(field: Field[Any], type_hints: dict[str, Any]) -> bool:
@@ -117,7 +123,7 @@ class TableDataClass(ABC):
 
     @classmethod
     def get_dataclass_field_names(cls) -> set[str]:
-        return {field.name for field in _dataclass_fields(cls)}
+        return {field.name for field in _persisted_dataclass_fields(cls)}
 
     @classmethod
     def validate_metadata_sync(cls) -> list[str]:
@@ -136,7 +142,7 @@ class TableDataClass(ABC):
         if only_meta:
             errors.append(f"only in metadata.yml: {only_meta}")
 
-        for field in _dataclass_fields(cls):
+        for field in _persisted_dataclass_fields(cls):
             column = columns_by_name[field.name]
             expected_type = _python_type_to_data_type(type_hints[field.name])
             if column.data_type != expected_type:
@@ -287,14 +293,59 @@ class TableDataClass(ABC):
         pk_cols = type(self).get_primary_key_columns()
         return generate_idents_are_literals(pk_cols, [getattr(self, col) for col in pk_cols])
 
+    def _to_db_record(
+        self,
+        *,
+        include_columns: list[str] | None = None,
+        exclude_columns: list[str] | None = None,
+    ) -> dict[str, Any]:
+        if include_columns is not None and exclude_columns is not None:
+            logger.log_and_raise(ConfigError("Use include_columns or exclude_columns, not both."))
+
+        persisted_fields = _persisted_dataclass_fields(type(self))
+        field_names = {field.name for field in persisted_fields}
+
+        if include_columns is None:
+            selected_columns = set(field_names)
+        else:
+            selected_columns = set(include_columns)
+            unknown_columns = selected_columns - field_names
+            if unknown_columns:
+                logger.log_and_raise(
+                    ConfigError(
+                        f"Unknown include_columns for {type(self).__name__}: "
+                        f"{sorted(unknown_columns)}"
+                    )
+                )
+
+        if exclude_columns is not None:
+            excluded_columns = set(exclude_columns)
+            unknown_columns = excluded_columns - field_names
+            if unknown_columns:
+                logger.log_and_raise(
+                    ConfigError(
+                        f"Unknown exclude_columns for {type(self).__name__}: "
+                        f"{sorted(unknown_columns)}"
+                    )
+                )
+            selected_columns -= excluded_columns
+
+        primary_key_columns = set(type(self).get_primary_key_columns())
+        selected_columns |= primary_key_columns
+
+        return {
+            field.name: getattr(self, field.name)
+            for field in persisted_fields
+            if field.name in selected_columns
+        }
+
     def save_new_to_db(self, db_client: DatabaseClient) -> bool:
         """Save the object to the database. If the object already exists, return False."""
         try:
             tablemetadata = type(self).get_metadata()
             db_client.ensure_table(tablemetadata)
-            result = db_client.insert(
-                [asdict(cast(Any, self))], tablemetadata, on_conflict="nothing"
-            )
+            data = self._to_db_record()
+            result = db_client.insert([data], tablemetadata, on_conflict="nothing")
             if result.rows_inserted == 1:
                 logger.info(f"{type(self).__name__} {self.get_where_clause()} saved to database.")
                 return True
@@ -305,6 +356,39 @@ class TableDataClass(ABC):
                 return False
         except Exception as e:
             logger.log_and_raise(e)
+
+    def save_to_db(
+        self,
+        db_client: DatabaseClient,
+        *,
+        include_columns: list[str] | None = None,
+        exclude_columns: list[str] | None = None,
+    ) -> WriteResult:
+        """
+        Save the object to the database, inserting or updating as needed.
+
+        Primary key columns are always included because merge needs them to match rows.
+        """
+        try:
+            tablemetadata = type(self).get_metadata()
+            db_client.ensure_table(tablemetadata)
+            data = self._to_db_record(
+                include_columns=include_columns,
+                exclude_columns=exclude_columns,
+            )
+            result = db_client.merge(
+                [data],
+                tablemetadata,
+                match_keys=list(tablemetadata.primary_key),
+                when_matched="update",
+                when_not_matched_by_target="insert",
+                when_not_matched_by_source="ignore",
+            )
+            logger.info(f"{type(self).__name__} {self.get_where_clause()} saved to database.")
+            return result
+        except Exception as e:
+            logger.log_and_raise(e)
+            raise
 
     def upsert_field(self, db_client: DatabaseClient, field: str, value: Any) -> None:
         try:

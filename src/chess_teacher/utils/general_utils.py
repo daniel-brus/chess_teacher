@@ -89,7 +89,7 @@ def quote_ident(value: str) -> str:
     return f'"{value}"'
 
 
-def quote_literal(value: str) -> str:
+def quote_literal(value: object | None) -> str:
     if value is None:
         return "NULL"
     if not isinstance(value, str):
@@ -97,7 +97,9 @@ def quote_literal(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
-def generate_ident_is_literal(ident: str, literal: str) -> str:
+def generate_ident_is_literal(ident: str, literal: object | None) -> str:
+    if literal is None:
+        return quote_ident(ident) + " IS NULL"
     return quote_ident(ident) + " = " + quote_literal(literal)
 
 

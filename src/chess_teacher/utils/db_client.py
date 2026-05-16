@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import date, datetime, time
 from enum import StrEnum
 from typing import Any, Literal
 
@@ -117,6 +118,38 @@ def _build_insert_sql(
     return base, records
 
 
+def _value_to_typed_sql(value: Any, data_type: str) -> str:
+    if value is None:
+        return f"NULL::{data_type}"
+    if isinstance(value, bool):
+        literal = "TRUE" if value else "FALSE"
+    elif isinstance(value, int | float):
+        literal = str(value)
+    elif isinstance(value, date | datetime | time):
+        literal = quote_literal(value.isoformat())
+    else:
+        literal = quote_literal(str(value))
+    return f"{literal}::{data_type}"
+
+
+def _build_source_cte(records: list[dict], table: TableMetadata) -> str:
+    col_names = list(records[0].keys())
+    columns_by_name = table.columns_by_name()
+
+    def row_to_sql(row: dict) -> str:
+        return (
+            "("
+            + ", ".join(
+                _value_to_typed_sql(row.get(c), columns_by_name[c].data_type) for c in col_names
+            )
+            + ")"
+        )
+
+    values_rows = ",\n    ".join(row_to_sql(r) for r in records)
+    quoted_cols_csv = ", ".join(quote_ident(c) for c in col_names)
+    return f"WITH _source({quoted_cols_csv}) AS (\n  VALUES\n    {values_rows}\n)"
+
+
 def _build_merge_sql(
     records: list[dict],
     table: TableMetadata,
@@ -135,17 +168,9 @@ def _build_merge_sql(
 
     col_names = list(records[0].keys())
     non_match_cols = [c for c in col_names if c not in match_keys]
-
-    # --- VALUES rows (quoted literals, not bind params) ---
-    # We materialise values directly because MERGE + executemany is awkward.
-    # For large loads the CTE approach keeps it in one round-trip.
-    def row_to_sql(row: dict) -> str:
-        return "(" + ", ".join(quote_literal(str(row.get(c))) for c in col_names) + ")"
-
-    values_rows = ",\n    ".join(row_to_sql(r) for r in records)
     quoted_cols_csv = ", ".join(quote_ident(c) for c in col_names)
 
-    source_cte = f"WITH _source({quoted_cols_csv}) AS (\n  VALUES\n    {values_rows}\n)"
+    source_cte = _build_source_cte(records, table)
 
     # --- ON clause ---
     join_condition = " AND ".join(
@@ -808,15 +833,7 @@ class DatabaseClient:
         match_condition: str | None,
     ) -> int:
         """Count how many source records match existing target rows."""
-        col_names = list(records[0].keys())
-
-        def row_to_sql(row: dict) -> str:
-            return "(" + ", ".join(quote_literal(str(row.get(c))) for c in col_names) + ")"
-
-        values_rows = ",\n    ".join(row_to_sql(r) for r in records)
-        quoted_cols_csv = ", ".join(quote_ident(c) for c in col_names)
-
-        source_cte = f"WITH _source({quoted_cols_csv}) AS (\n  VALUES\n    {values_rows}\n)"
+        source_cte = _build_source_cte(records, table)
 
         # Build join condition
         join_condition = " AND ".join(
@@ -847,15 +864,7 @@ class DatabaseClient:
         match_condition: str | None,
     ) -> int:
         """Count how many target rows have no match in source (for WHEN NOT MATCHED BY SOURCE)."""
-        col_names = list(records[0].keys())
-
-        def row_to_sql(row: dict) -> str:
-            return "(" + ", ".join(quote_literal(str(row.get(c))) for c in col_names) + ")"
-
-        values_rows = ",\n    ".join(row_to_sql(r) for r in records)
-        quoted_cols_csv = ", ".join(quote_ident(c) for c in col_names)
-
-        source_cte = f"WITH _source({quoted_cols_csv}) AS (\n  VALUES\n    {values_rows}\n)"
+        source_cte = _build_source_cte(records, table)
 
         # Build join condition
         join_condition = " AND ".join(
