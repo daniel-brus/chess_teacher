@@ -2,13 +2,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 
 from chess_teacher.utils.table_data_class import TableDataClass
 
 
-class AccountPlatform(Enum):
+class AccountPlatform(StrEnum):
     CHESS_COM = "Chess.com"
     LICHESS = "Lichess"
 
@@ -21,6 +21,14 @@ class Account(TableDataClass):
     username: str
     platform: AccountPlatform
     latest_ingestion: datetime | None = None
+
+    @classmethod
+    def from_username_and_platform(cls, username: str, platform: AccountPlatform) -> Account:
+        return cls(
+            account_id=cls.generate_id({"username": username, "platform": platform}),
+            username=username,
+            platform=platform,
+        )
 
     @classmethod
     def get_key(cls) -> str:

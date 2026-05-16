@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 from typing import Any, Literal
 
 import polars as pl
@@ -17,7 +17,7 @@ from chess_teacher.utils.metadata_utils import TableMetadata
 # ---------------------------------------------------------------------------
 
 
-class WriteStrategy(Enum):
+class WriteStrategy(StrEnum):
     APPEND = "append"
     INSERT_IGNORE = "insert_ignore"
     OVERWRITE = "overwrite"

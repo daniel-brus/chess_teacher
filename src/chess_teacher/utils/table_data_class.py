@@ -3,7 +3,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import MISSING, Field, asdict, fields, is_dataclass
 from datetime import UTC, date, datetime, time
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 from types import UnionType
 from typing import TYPE_CHECKING, Any, Self, Union, cast, get_args, get_origin, get_type_hints
@@ -49,13 +49,13 @@ def _python_type_to_data_type(annotation: Any) -> str:
         return "timestamp"
     if annotation is time:
         return "time"
-    if isinstance(annotation, type) and issubclass(annotation, Enum):
+    if isinstance(annotation, type) and issubclass(annotation, StrEnum):
         return "text"
     raise TypeError(f"Unsupported type for metadata data_type mapping: {annotation!r}")
 
 
 def _normalize_default_value(value: Any) -> Any:
-    if isinstance(value, Enum):
+    if isinstance(value, StrEnum):
         return value.value
     if isinstance(value, date | datetime | time):
         return value.isoformat()
@@ -287,7 +287,8 @@ class TableDataClass(ABC):
         pk_cols = type(self).get_primary_key_columns()
         return generate_idents_are_literals(pk_cols, [getattr(self, col) for col in pk_cols])
 
-    def save_new_to_db(self, db_client: DatabaseClient) -> None:
+    def save_new_to_db(self, db_client: DatabaseClient) -> bool:
+        """Save the object to the database. If the object already exists, return False."""
         try:
             tablemetadata = type(self).get_metadata()
             db_client.ensure_table(tablemetadata)
@@ -296,6 +297,12 @@ class TableDataClass(ABC):
             )
             if result.rows_inserted == 1:
                 logger.info(f"{type(self).__name__} {self.get_where_clause()} saved to database.")
+                return True
+            else:
+                logger.info(
+                    f"{type(self).__name__} {self.get_where_clause()} already exists in database."
+                )
+                return False
         except Exception as e:
             logger.log_and_raise(e)
 

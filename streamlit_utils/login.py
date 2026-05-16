@@ -15,7 +15,7 @@ class LoginScreen:
         self.logger = get_logger()
         self.db_client = get_db_client()
 
-    def _create_new_user(self, user: dict) -> User:
+    def _verify_and_register_user(self, user: dict) -> User:
         """Verify a user entry (st.user dict), create a User object and save
         the user to the database. If the user already exists, do nothing."""
         try:
@@ -32,7 +32,7 @@ class LoginScreen:
             result = User.from_st_user(user)
         except Exception as e:
             self.logger.log_and_raise(e)
-        result.save_new_to_db(self.db_client)
+        _ = result.save_new_to_db(self.db_client)
         return result
 
     def _exists_in_db(self, st_user: dict) -> bool:
@@ -58,7 +58,7 @@ class LoginScreen:
             now = get_current_datetime()
             st_user = st.user.to_dict()
             if not self._exists_in_db(st_user):
-                user = self._create_new_user(st_user)
+                user = self._verify_and_register_user(st_user)
             else:
                 user = self._fetch_existing_user(st_user)
 

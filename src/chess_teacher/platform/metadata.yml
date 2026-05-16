@@ -91,15 +91,15 @@ tables:
         data_type: text
         nullable: false
         comment: Hashed unique account ID
-      - username:
+      - name: username
         data_type: text
         nullable: false
         comment: Username of the account
-      - platform:
+      - name: platform
         data_type: text
         nullable: false
         comment: Platform of the account (e.g. Chess.com, Lichess, etc.)
-      - latest_ingestion:
+      - name: latest_ingestion
         data_type: timestamp
         nullable: true
         comment: Timestamp of most recent ingestion (UTC). Used to prevent multiple ingestions in 24hs.
@@ -120,7 +120,3 @@ tables:
         data_type: text
         nullable: false
         comment: Hashed unique account ID
-      - latest_ingestion:
-        data_type: timestamp
-        nullable: true
-        comment: Timestamp of most recent ingestion (UTC). Used to prevent multiple ingestions in 24hs.
