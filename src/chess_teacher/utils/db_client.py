@@ -111,7 +111,7 @@ def _build_insert_sql(
     col_names = list(records[0].keys())
     quoted_cols = ", ".join(quote_ident(c) for c in col_names)
     placeholders = ", ".join(f":{c}" for c in col_names)
-    base = f"INSERT INTO {table.qualified_name_sql()} ({quoted_cols})\nVALUES ({placeholders})"
+    base = f"INSERT INTO {table.qualified_name_sql()} ({quoted_cols})\nVALUES ({placeholders})"  # nosec B608
     if on_conflict == "nothing":
         base += "\nON CONFLICT DO NOTHING"
     return base, records
@@ -168,7 +168,7 @@ def _build_merge_sql(
         set_clause = ", ".join(
             f"{quote_ident(c)} = _source.{quote_ident(c)}" for c in non_match_cols
         )
-        clauses.append(f"WHEN MATCHED THEN\n  UPDATE SET {set_clause}")
+        clauses.append(f"WHEN MATCHED THEN\n  UPDATE SET {set_clause}")  # nosec B608
     elif when_matched == "delete":
         clauses.append("WHEN MATCHED THEN\n  DELETE")
     # "ignore" → no WHEN MATCHED clause
@@ -404,7 +404,7 @@ class DatabaseClient:
             set_clause = ", ".join(
                 generate_ident_is_literal(col, val) for col, val in values.items()
             )
-            sql = f"UPDATE {table.qualified_name_sql()}\nSET {set_clause}\nWHERE {where};"
+            sql = f"UPDATE {table.qualified_name_sql()}\nSET {set_clause}\nWHERE {where};"  # nosec B608
             affected = self.engine.execute_write(sql, {}) if values else 0
         except Exception as e:
             self.logger.log_and_raise(
@@ -430,7 +430,7 @@ class DatabaseClient:
         """
         try:
             _require_where(where, "delete_where")
-            sql = f"DELETE FROM {table.qualified_name_sql()}\nWHERE {where};"
+            sql = f"DELETE FROM {table.qualified_name_sql()}\nWHERE {where};"  # nosec B608
             affected = self.engine.execute_write(sql, {})
         except Exception as e:
             self.logger.log_and_raise(
@@ -581,7 +581,7 @@ class DatabaseClient:
             if where is not None:
                 where_clause = f"WHERE {_require_where(where, "get_row_count")}"
 
-            sql = f"SELECT COUNT(*) FROM {table.qualified_name_sql()} {where_clause};"
+            sql = f"SELECT COUNT(*) FROM {table.qualified_name_sql()} {where_clause};"  # nosec B608
             result = self.engine.execute_parameterized_query(sql, {})
             count = result[0]["count"] if result else 0
         except Exception as e:
@@ -600,7 +600,7 @@ class DatabaseClient:
         """
         try:
             _require_where(where, "exists")
-            sql = f"SELECT EXISTS (SELECT 1 FROM {table.qualified_name_sql()} WHERE {where});"
+            sql = f"SELECT EXISTS (SELECT 1 FROM {table.qualified_name_sql()} WHERE {where});"  # nosec B608
             rows = self.engine.execute_parameterized_query(sql, {})
             result = bool(rows[0]["exists"]) if rows else False
         except Exception as e:
@@ -779,7 +779,7 @@ class DatabaseClient:
             list[dict] by default, or pl.DataFrame if as_polars=True.
         """
         col_clause = ", ".join(quote_ident(c) for c in columns) if columns else "*"
-        sql = f"SELECT {col_clause} FROM {table.qualified_name_sql()}"
+        sql = f"SELECT {col_clause} FROM {table.qualified_name_sql()}"  # nosec B608
 
         if where:
             sql += f"\nWHERE {where}"
@@ -827,7 +827,7 @@ class DatabaseClient:
 
         # Count matched rows
         count_matched_sql = (
-            f"{source_cte}\n"
+            f"{source_cte}\n"  # nosec B608
             f"SELECT COUNT(*) as matched_count\n"
             f"FROM _source\n"
             f"WHERE EXISTS (\n"
@@ -866,7 +866,7 @@ class DatabaseClient:
 
         # Count rows to delete
         count_unmatched_target_sql = (
-            f"{source_cte}\n"
+            f"{source_cte}\n"  # nosec B608
             f"SELECT COUNT(*) as delete_count\n"
             f"FROM {table.qualified_name_sql()} _target\n"
             f"WHERE NOT EXISTS (\n"

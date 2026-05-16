@@ -6,7 +6,7 @@ from datetime import UTC, date, datetime, time
 from enum import Enum
 from pathlib import Path
 from types import UnionType
-from typing import TYPE_CHECKING, Any, Self, Union, get_args, get_origin, get_type_hints
+from typing import TYPE_CHECKING, Any, Self, Union, cast, get_args, get_origin, get_type_hints
 
 from chess_teacher.utils.exception_utils import ConfigError, DatabaseError, MetadataError
 from chess_teacher.utils.general_utils import (
@@ -70,6 +70,12 @@ def _dataclass_field_default(field: Field[Any]) -> Any:
     return MISSING
 
 
+def _dataclass_fields(cls: type[Any]) -> tuple[Field[Any], ...]:
+    if not is_dataclass(cls):
+        raise TypeError(f"{cls.__name__} must be a @dataclass to sync with metadata")
+    return fields(cast(Any, cls))
+
+
 def _expected_nullable_for_field(field: Field[Any], type_hints: dict[str, Any]) -> bool:
     return _is_optional_type(type_hints[field.name])
 
@@ -111,9 +117,7 @@ class TableDataClass(ABC):
 
     @classmethod
     def get_dataclass_field_names(cls) -> set[str]:
-        if not is_dataclass(cls):
-            raise TypeError(f"{cls.__name__} must be a @dataclass to sync with metadata")
-        return {field.name for field in fields(cls)}
+        return {field.name for field in _dataclass_fields(cls)}
 
     @classmethod
     def validate_metadata_sync(cls) -> list[str]:
@@ -132,7 +136,7 @@ class TableDataClass(ABC):
         if only_meta:
             errors.append(f"only in metadata.yml: {only_meta}")
 
-        for field in fields(cls):
+        for field in _dataclass_fields(cls):
             column = columns_by_name[field.name]
             expected_type = _python_type_to_data_type(type_hints[field.name])
             if column.data_type != expected_type:
@@ -194,7 +198,7 @@ class TableDataClass(ABC):
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Self:
         kwargs: dict[str, Any] = {}
-        for dataclass_field in fields(cls):
+        for dataclass_field in _dataclass_fields(cls):
             field_name = dataclass_field.name
             if field_name in data:
                 kwargs[field_name] = data[field_name]
@@ -222,6 +226,7 @@ class TableDataClass(ABC):
             logger.log_and_raise(
                 ConfigError(f"Hashed PK can not be generated from source: {source}")
             )
+            raise
 
     @classmethod
     def _where_for_id(cls, row_id: str) -> str:
@@ -257,7 +262,7 @@ class TableDataClass(ABC):
         try:
             tablemetadata = cls.get_metadata()
             where = cls._where_for_id(row_id)
-            result = db_client.read(tablemetadata, where=where)
+            result = cast(list[dict[str, Any]], db_client.read(tablemetadata, where=where))
             if len(result) != 1:
                 logger.log_and_raise(
                     DatabaseError(
@@ -276,6 +281,7 @@ class TableDataClass(ABC):
             return db_client.exists(tablemetadata, where=cls._where_for_id(id))
         except Exception as e:
             logger.log_and_raise(e)
+            raise
 
     def get_where_clause(self) -> str:
         pk_cols = type(self).get_primary_key_columns()
@@ -285,7 +291,9 @@ class TableDataClass(ABC):
         try:
             tablemetadata = type(self).get_metadata()
             db_client.ensure_table(tablemetadata)
-            result = db_client.insert([asdict(self)], tablemetadata, on_conflict="nothing")
+            result = db_client.insert(
+                [asdict(cast(Any, self))], tablemetadata, on_conflict="nothing"
+            )
             if result.rows_inserted == 1:
                 logger.info(f"{type(self).__name__} {self.get_where_clause()} saved to database.")
         except Exception as e:

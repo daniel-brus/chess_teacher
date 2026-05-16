@@ -102,10 +102,14 @@ def generate_ident_is_literal(ident: str, literal: str) -> str:
 
 
 def generate_idents_are_literals(idents: Iterable[str], literals: Iterable[str]) -> str:
-    if len(idents) != len(literals):
+    idents_tuple = tuple(idents)
+    literals_tuple = tuple(literals)
+    if len(idents_tuple) != len(literals_tuple):
         raise ValueError(
-            f"Number of identifiers ({len(idents)}) and literals ({len(literals)}) must be the same."
+            f"Number of identifiers ({len(idents_tuple)}) and literals "
+            f"({len(literals_tuple)}) must be the same."
         )
     return " AND ".join([
-        generate_ident_is_literal(ident, literal) for ident, literal in zip(idents, literals)
+        generate_ident_is_literal(ident, literal)
+        for ident, literal in zip(idents_tuple, literals_tuple)
     ])
