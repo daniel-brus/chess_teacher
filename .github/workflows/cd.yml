@@ -11,20 +11,153 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
-  contents: read
+  contents: write
   packages: write
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
+  # ---------------------------------------------------------------------------
+  # Bump version on develop (reads label from the PR that triggered this push)
+  # ---------------------------------------------------------------------------
+  bump-version:
+    runs-on: ubuntu-latest
+    if: github.ref_name == 'develop'
+    outputs:
+      version: ${{ steps.bump.outputs.version }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: Get bump label from merged PR
+        id: label
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Extract PR number from merge commit message:
+          # "Merge pull request #42 from feature/my-feature"
+          PR_NUMBER=$(git log -1 --pretty=%B | grep -oP '(?<=#)\d+' | head -1)
+
+          if [ -z "$PR_NUMBER" ]; then
+            echo "Could not extract PR number from commit message — skipping bump."
+            echo "bump=none" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          echo "PR number: #$PR_NUMBER"
+
+          LABELS=$(gh pr view $PR_NUMBER --json labels --jq '.labels[].name')
+          echo "Labels found: $LABELS"
+
+          if echo "$LABELS" | grep -q "bump:major"; then
+            echo "bump=major" >> $GITHUB_OUTPUT
+          elif echo "$LABELS" | grep -q "bump:minor"; then
+            echo "bump=minor" >> $GITHUB_OUTPUT
+          elif echo "$LABELS" | grep -q "bump:patch"; then
+            echo "bump=patch" >> $GITHUB_OUTPUT
+          else
+            echo "bump=none" >> $GITHUB_OUTPUT
+            echo "No bump label found — skipping version bump."
+          fi
+
+      - name: Bump version in pyproject.toml
+        id: bump
+        if: steps.label.outputs.bump != 'none'
+        run: |
+          # Read current version
+          CURRENT=$(grep '^version = ' pyproject.toml | sed 's/version = "\(.*\)"/\1/')
+          echo "Current version: $CURRENT"
+
+          MAJOR=$(echo $CURRENT | cut -d. -f1)
+          MINOR=$(echo $CURRENT | cut -d. -f2)
+          PATCH=$(echo $CURRENT | cut -d. -f3)
+
+          case "${{ steps.label.outputs.bump }}" in
+            major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
+            minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
+            patch) PATCH=$((PATCH + 1)) ;;
+          esac
+
+          NEW_VERSION="$MAJOR.$MINOR.$PATCH"
+          echo "New version: $NEW_VERSION"
+
+          # Write back to pyproject.toml
+          sed -i "s/^version = \".*\"/version = \"$NEW_VERSION\"/" pyproject.toml
+
+          echo "version=$NEW_VERSION" >> $GITHUB_OUTPUT
+
+      - name: Commit and tag new version
+        if: steps.label.outputs.bump != 'none'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add pyproject.toml
+          git commit -m "chore: bump version to v${{ steps.bump.outputs.version }} [skip ci]"
+          git tag "v${{ steps.bump.outputs.version }}-dev"
+          git push origin develop --follow-tags
+
+      - name: Output current version (no bump)
+        if: steps.label.outputs.bump == 'none'
+        id: current
+        run: |
+          CURRENT=$(grep '^version = ' pyproject.toml | sed 's/version = "\(.*\)"/\1/')
+          echo "version=$CURRENT" >> $GITHUB_OUTPUT
+
+  # ---------------------------------------------------------------------------
+  # Read version on main (no bump — inherits from develop)
+  # ---------------------------------------------------------------------------
+  read-version:
+    runs-on: ubuntu-latest
+    if: github.ref_name == 'main'
+    outputs:
+      version: ${{ steps.read.outputs.version }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Read version from pyproject.toml
+        id: read
+        run: |
+          VERSION=$(grep '^version = ' pyproject.toml | sed 's/version = "\(.*\)"/\1/')
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Version: $VERSION"
+
+      - name: Tag release on main
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "v${{ steps.read.outputs.version }}"
+          git push origin "v${{ steps.read.outputs.version }}"
+
+  # ---------------------------------------------------------------------------
+  # Build and push Docker image
+  # ---------------------------------------------------------------------------
   build-and-push:
     runs-on: ubuntu-latest
+    needs: [bump-version, read-version]
+    if: |
+      always() &&
+      (needs.bump-version.result == 'success' || needs.bump-version.result == 'skipped') &&
+      (needs.read-version.result == 'success' || needs.read-version.result == 'skipped')
     environment: ${{ github.ref_name == 'main' && 'production' || 'development' }}
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}  # re-checkout to get bumped pyproject.toml
+
+      - name: Resolve version
+        id: version
+        run: |
+          VERSION=${{ needs.bump-version.outputs.version || needs.read-version.outputs.version }}
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -53,9 +186,14 @@ jobs:
         with:
           images: ${{ vars.DOCKERHUB_USERNAME }}/chess_teacher
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
+            # develop: develop, v1.1.0-dev, develop-{sha}
             type=raw,value=develop,enable=${{ github.ref_name == 'develop' }}
-            type=sha,format=long,prefix=${{ github.ref_name }}-
+            type=raw,value=v${{ steps.version.outputs.version }}-dev,enable=${{ github.ref_name == 'develop' }}
+            type=sha,format=short,prefix=develop-,enable=${{ github.ref_name == 'develop' }}
+            # main: latest, v1.1.0, main-{sha}
+            type=raw,value=latest,enable=${{ github.ref_name == 'main' }}
+            type=raw,value=v${{ steps.version.outputs.version }},enable=${{ github.ref_name == 'main' }}
+            type=sha,format=short,prefix=main-,enable=${{ github.ref_name == 'main' }}
 
       - name: Build and push image
         uses: docker/build-push-action@v6
@@ -67,6 +205,9 @@ jobs:
           cache-from: type=gha,scope=${{ github.ref_name }}
           cache-to: type=gha,mode=max,scope=${{ github.ref_name }}
 
+  # ---------------------------------------------------------------------------
+  # Deploy (main only — placeholder)
+  # ---------------------------------------------------------------------------
   deploy:
     runs-on: ubuntu-latest
     needs: build-and-push

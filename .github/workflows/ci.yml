@@ -1,11 +1,6 @@
 name: CI
 
 on:
-  push:
-    branches:
-      - develop
-      - 'feature/**'
-      - 'improvement/**'
   pull_request:
     branches:
       - develop
@@ -19,6 +14,26 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  check-bump-label:
+    runs-on: ubuntu-latest
+    if: github.base_ref == 'develop'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check bump label
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          LABELS=$(gh pr view ${{ github.event.pull_request.number }} \
+            --json labels \
+            --jq '.labels[].name')
+
+          if echo "$LABELS" | grep -qE "bump:(major|minor|patch)"; then
+            echo "Bump label found."
+          else
+            echo "Error: PR to develop requires exactly one of: bump:major, bump:minor, bump:patch"
+            exit 1
+          fi
+
   lint:
     runs-on: ubuntu-latest
     steps:
@@ -50,6 +65,7 @@ jobs:
       - uses: ./.github/actions/python-setup
       - name: Run security audit
         run: pip-audit
+
   vulnerability-scan:
     runs-on: ubuntu-latest
     steps:

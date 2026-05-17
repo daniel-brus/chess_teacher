@@ -1,8 +1,8 @@
 from datetime import timedelta
 
+from chess_teacher.pipelines.pipeline_base import Pipeline, PipelineRunResult, PipelineStep
 from chess_teacher.utils.db_client import DatabaseClient
 from chess_teacher.utils.general_utils import get_current_datetime
-from chess_teacher.utils.pipeline_utils import Pipeline, PipelineRunResult, PipelineStep
 
 MAX_TIME_TO_KEEP_LOCK: timedelta = timedelta(days=1)
 
