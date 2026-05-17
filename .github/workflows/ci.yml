@@ -19,6 +19,9 @@ jobs:
     if: github.base_ref == 'develop'
     steps:
       - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.VERSION_BUMP_PAT }}
+          fetch-depth: 0
       - name: Check bump label
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
