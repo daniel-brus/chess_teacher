@@ -1,22 +1,57 @@
 name: CI
 
 on:
-  push:
-    branches: [develop, "feature/*"]
   pull_request:
-    branches: [main, develop]
+    branches:
+      - develop
+      - main
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  check-bump-label:
+    runs-on: ubuntu-latest
+    if: github.base_ref == 'develop'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+      - name: Check bump label
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          LABELS=$(gh pr view ${{ github.event.pull_request.number }} \
+            --json labels \
+            --jq '.labels[].name')
+
+          if echo "$LABELS" | grep -qE "bump:(major|minor|patch)"; then
+            echo "Bump label found."
+          else
+            echo "Error: PR to develop requires exactly one of: bump:major, bump:minor, bump:patch"
+            exit 1
+          fi
+
   lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/python-setup
       - name: Run linter
-        run: ruff check src config tests
+        run: ruff check src scripts tests
+
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/python-setup
+      - name: Run type check
+        run: mypy src
 
   test:
     runs-on: ubuntu-latest
@@ -26,18 +61,20 @@ jobs:
       - name: Run tests with coverage
         run: pytest -v --tb=short --cov=src --cov-report=term
 
-  type-check:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/python-setup
-      - name: Run type check
-        run: mypy src config
-
-  vulnerability-scan:
+  security-scan:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/python-setup
       - name: Run security audit
         run: pip-audit
+
+  vulnerability-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/python-setup
+      - name: Run Bandit
+        run: |
+          bandit -r src scripts apps/streamlit -x .venv,venv,build,dist,.pytest_cache,.ruff_cache -ll
+          bandit apps -ll

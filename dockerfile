@@ -3,19 +3,22 @@ FROM python:3.12-slim
 # Installeer Stockfish
 RUN apt-get update && apt-get install -y stockfish && rm -rf /var/lib/apt/lists/*
 
-# Werkdirectory
 WORKDIR /app
 
-# Dependencies eerst (cache-vriendelijk)
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Config en source code
-COPY config/ ./config/
+# Install source code as package
+COPY pyproject.toml .
 COPY src/ ./src/
+RUN pip install .
+
+# Copy scripts and app-files
 COPY scripts/ ./scripts/
+COPY streamlit_app.py .
+COPY streamlit_utils/ ./streamlit_utils/
+COPY pages/ ./pages/
 
-# Data map aanmaken
-RUN mkdir -p data
+RUN mkdir -p storage
 
-CMD ["python", "scripts/main.py"]
+CMD ["streamlit","run","streamlit_app.py","--server.address","0.0.0.0","--server.port","8501"]

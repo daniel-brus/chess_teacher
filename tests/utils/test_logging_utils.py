@@ -6,118 +6,91 @@ import sys
 import tempfile
 from pathlib import Path
 
-from src.utils import logging_utils
+import pytest
+
+from chess_teacher.utils import logging_utils
+
+
+@pytest.fixture
+def reset_logging():
+    """Reset logging state before each test."""
+    root = logging.getLogger()
+    root.handlers.clear()
+    logging_utils._logging_configured = False
+    yield
+    # Cleanup after test
+    root.handlers.clear()
+    logging_utils._logging_configured = False
+
+
+@pytest.fixture
+def mock_log_dir(mocker):
+    """Mock _get_log_dir to use a temporary directory."""
+    temp_dir = Path(tempfile.gettempdir()) / "test_logs"
+    mocker.patch.object(logging_utils, "_get_log_dir", return_value=temp_dir)
+    return temp_dir
 
 
 class TestConfigureLogging:
     """Tests for configure_logging function."""
 
-    def test_configure_logging_creates_handlers(self, mocker):
+    def test_configure_logging_creates_handlers(self, reset_logging, mock_log_dir):
         """Test that configure_logging adds console and file handlers."""
         root = logging.getLogger()
 
-        # Clear any existing handlers
-        root.handlers.clear()
-        if hasattr(root, "_chess_teacher_logging_configured"):
-            delattr(root, "_chess_teacher_logging_configured")
-
-        # Mock _get_log_dir to use temp directory
-        mock_dir = mocker.patch.object(
-            logging_utils, "_get_log_dir", return_value=Path(tempfile.gettempdir()) / "test_logs"
-        )
         logging_utils.configure_logging()
 
         # Verify handlers were added
         assert len(root.handlers) == 2  # console + file
-        mock_dir.assert_called_once()
 
-    def test_configure_logging_only_runs_once(self, mocker):
+    def test_configure_logging_only_runs_once(self, reset_logging, mock_log_dir):
         """Test that configure_logging doesn't run twice."""
         root = logging.getLogger()
-        root.handlers.clear()
-        if hasattr(root, "_chess_teacher_logging_configured"):
-            delattr(root, "_chess_teacher_logging_configured")
 
         # First call
-        mock_dir = mocker.patch.object(
-            logging_utils, "_get_log_dir", return_value=Path(tempfile.gettempdir()) / "test_logs1"
-        )
         logging_utils.configure_logging()
         first_handler_count = len(root.handlers)
 
         # Second call - should not add more handlers
-        mock_dir.return_value = Path(tempfile.gettempdir()) / "test_logs2"
         logging_utils.configure_logging()
         second_handler_count = len(root.handlers)
 
         assert first_handler_count == second_handler_count
 
-    def test_configure_logging_with_custom_level(self, mocker):
+    def test_configure_logging_with_custom_level(self, reset_logging, mock_log_dir):
         """Test configure_logging accepts custom level parameter."""
         root = logging.getLogger()
-        root.handlers.clear()
-        if hasattr(root, "_chess_teacher_logging_configured"):
-            delattr(root, "_chess_teacher_logging_configured")
 
-        mocker.patch.object(
-            logging_utils, "_get_log_dir", return_value=Path(tempfile.gettempdir()) / "test_logs"
-        )
         logging_utils.configure_logging(level="DEBUG")
 
         assert root.level == logging.DEBUG
 
-    def test_configure_logging_respects_env_level(self, mocker, monkeypatch):
-        """Test configure_logging reads LOG_LEVEL from environment."""
+    def test_configure_logging_defaults_to_info(self, reset_logging, mock_log_dir):
+        """Test configure_logging defaults to INFO level."""
         root = logging.getLogger()
-        root.handlers.clear()
-        if hasattr(root, "_chess_teacher_logging_configured"):
-            delattr(root, "_chess_teacher_logging_configured")
 
-        monkeypatch.setenv("LOG_LEVEL", "WARNING")
-        mocker.patch.object(
-            logging_utils, "_get_log_dir", return_value=Path(tempfile.gettempdir()) / "test_logs"
-        )
         logging_utils.configure_logging()
 
-        assert root.level == logging.WARNING
+        assert root.level == logging.INFO
 
 
 class TestGetLogger:
     """Tests for get_logger function."""
 
-    def test_get_logger_returns_logger(self, mocker):
+    def test_get_logger_returns_logger(self, reset_logging, mock_log_dir):
         """Test that get_logger returns a Logger instance."""
-        mocker.patch.object(
-            logging_utils, "_get_log_dir", return_value=Path(tempfile.gettempdir()) / "test_logs"
-        )
         logger = logging_utils.get_logger("test_module")
         assert isinstance(logger, logging.Logger)
 
-    def test_get_logger_auto_configures(self, mocker):
+    def test_get_logger_auto_configures(self, reset_logging, mock_log_dir):
         """Test that get_logger triggers configuration."""
-        root = logging.getLogger()
-        root.handlers.clear()
-        if hasattr(root, "_chess_teacher_logging_configured"):
-            delattr(root, "_chess_teacher_logging_configured")
-
-        mocker.patch.object(
-            logging_utils, "_get_log_dir", return_value=Path(tempfile.gettempdir()) / "test_logs"
-        )
         logging_utils.get_logger("test_module")
 
         # Should have configured logging
-        assert getattr(root, "_chess_teacher_logging_configured", False)
+        assert logging_utils._logging_configured
 
-    def test_get_logger_without_name_uses_caller_module(self, mocker):
+    def test_get_logger_without_name_uses_caller_module(self, reset_logging, mock_log_dir):
         """Test that get_logger without name uses caller module name."""
-        root = logging.getLogger()
-        root.handlers.clear()
-        if hasattr(root, "_chess_teacher_logging_configured"):
-            delattr(root, "_chess_teacher_logging_configured")
-
-        mocker.patch.object(
-            logging_utils, "_get_log_dir", return_value=Path(tempfile.gettempdir()) / "test_logs"
-        )
         logger = logging_utils.get_logger()
 
         # Should return a logger (name depends on call context)
@@ -126,6 +99,11 @@ class TestGetLogger:
 
 class TestJsonLinesFormatter:
     """Tests for _JsonLinesFormatter class."""
+
+    @pytest.fixture(autouse=True)
+    def _mock_environment(self, mocker):
+        """Mock environment variable for all tests in this class."""
+        mocker.patch.object(logging_utils, "get_env_variable", return_value="test")
 
     def test_format_returns_valid_json(self):
         """Test that format returns valid JSON string."""
@@ -196,7 +174,7 @@ class TestJsonLinesFormatter:
         assert parsed["msg"] == "Something happened"
 
     def test_format_handles_exception_info(self):
-        """Test that exception info is included when present."""
+        """Test that exception type and traceback are included when present."""
         formatter = logging_utils._JsonLinesFormatter()
 
         try:
@@ -217,7 +195,172 @@ class TestJsonLinesFormatter:
         result = formatter.format(record)
         parsed = json.loads(result)
 
-        assert "exc_info" in parsed
+        assert "exc_type" in parsed
+        assert parsed["exc_type"] == "ValueError"
+        assert "exc_msg" in parsed
+        assert parsed["exc_msg"] == "test error"
+        assert "traceback" in parsed
+        assert "ValueError: test error" in parsed["traceback"]
+
+    def test_format_exception_type_varies_by_exception(self):
+        """Test that exc_type changes based on exception type."""
+        formatter = logging_utils._JsonLinesFormatter()
+
+        # Test with KeyError
+        try:
+            raise KeyError("missing_key")
+        except KeyError:
+            exc_info = sys.exc_info()
+
+        record = logging.LogRecord(
+            name="test",
+            level=logging.ERROR,
+            pathname="test.py",
+            lineno=1,
+            msg="Key error",
+            args=(),
+            exc_info=exc_info,
+        )
+
+        result = formatter.format(record)
+        parsed = json.loads(result)
+
+        assert parsed["exc_type"] == "KeyError"
+
+    def test_format_no_exc_type_when_no_exception(self):
+        """Test that exc_type is not included when there's no exception."""
+        formatter = logging_utils._JsonLinesFormatter()
+
+        record = logging.LogRecord(
+            name="test",
+            level=logging.INFO,
+            pathname="test.py",
+            lineno=1,
+            msg="Normal message",
+            args=(),
+            exc_info=None,
+        )
+
+        result = formatter.format(record)
+        parsed = json.loads(result)
+
+        assert "exc_type" not in parsed
+        assert "traceback" not in parsed
+
+    def test_format_includes_unique_log_id(self):
+        """Test that each log record gets a unique log_id."""
+        formatter = logging_utils._JsonLinesFormatter()
+
+        record1 = logging.LogRecord(
+            name="test",
+            level=logging.INFO,
+            pathname="test.py",
+            lineno=1,
+            msg="Message 1",
+            args=(),
+            exc_info=None,
+        )
+
+        record2 = logging.LogRecord(
+            name="test",
+            level=logging.INFO,
+            pathname="test.py",
+            lineno=1,
+            msg="Message 2",
+            args=(),
+            exc_info=None,
+        )
+
+        result1 = formatter.format(record1)
+        result2 = formatter.format(record2)
+
+        parsed1 = json.loads(result1)
+        parsed2 = json.loads(result2)
+
+        # Both should have log_id
+        assert "log_id" in parsed1
+        assert "log_id" in parsed2
+        # Each should be unique
+        assert parsed1["log_id"] != parsed2["log_id"]
+        # Should be valid UUID format
+        import uuid
+
+        uuid.UUID(parsed1["log_id"])
+        uuid.UUID(parsed2["log_id"])
+
+    def test_format_includes_environment(self):
+        """Test that environment field is included in JSON output."""
+        formatter = logging_utils._JsonLinesFormatter()
+
+        record = logging.LogRecord(
+            name="test",
+            level=logging.INFO,
+            pathname="test.py",
+            lineno=1,
+            msg="Test",
+            args=(),
+            exc_info=None,
+        )
+
+        result = formatter.format(record)
+        parsed = json.loads(result)
+
+        assert "environment" in parsed
+        assert parsed["environment"] == "test"
+
+    def test_format_environment_raises_when_missing(self, mocker):
+        """Test that format raises ValueError if ENVIRONMENT is not set."""
+        mocker.patch.object(
+            logging_utils,
+            "get_env_variable",
+            side_effect=ValueError("Missing required environment variable: ENVIRONMENT"),
+        )
+        formatter = logging_utils._JsonLinesFormatter()
+
+        record = logging.LogRecord(
+            name="test",
+            level=logging.INFO,
+            pathname="test.py",
+            lineno=1,
+            msg="Test",
+            args=(),
+            exc_info=None,
+        )
+
+        with pytest.raises(ValueError) as exc_info:
+            formatter.format(record)
+
+        assert "Missing required environment variable: ENVIRONMENT" in str(exc_info.value)
+
+
+class TestDailyFileHandler:
+    """Tests for _DailyFileHandler class."""
+
+    def test_rotation_filename_creates_date_subdirectories(self, reset_logging, mock_log_dir):
+        """Test that logging creates daily log files in YYYY/MM/DD subdirectories."""
+        root = logging.getLogger()
+
+        logging_utils.configure_logging(log_dir=mock_log_dir)
+
+        # Get the file handler we just created
+        file_handler = None
+        for handler in root.handlers:
+            if isinstance(handler, logging.FileHandler):
+                file_handler = handler
+                break
+
+        assert file_handler is not None
+
+        # Check that the log file was created in a date-based subdirectory
+        log_file = Path(file_handler.baseFilename)
+
+        # Should be in YYYY/MM/DD format in the path
+        assert "logs" in str(log_file)
+        assert "2026" in str(log_file)
+        assert log_file.name == "app.log"
+
+        # The log file should exist
+        assert log_file.exists()
 
 
 class TestConsoleFormatter:

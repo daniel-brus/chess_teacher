@@ -1,3 +1,14 @@
+[project]
+name = "chess-teacher"
+version = "0.1.0"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+
+[tool.setuptools.package-data]
+"chess_teacher" = ["**/*.yml"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py312"
@@ -7,10 +18,16 @@ select = ["E", "F", "W", "I", "N", "UP", "RUF"]
 ignore = ["E501"]  # Line too long (handled by formatter)
 
 [tool.ruff.lint.isort]
-known-first-party = ["src"]
+known-first-party = ["chess_teacher"]
 
 [tool.ruff.format]
 preview = true
 quote-style = "double"
 indent-style = "space"
 line-ending = "auto"
+
+[tool.coverage.run]
+omit = ["*/__init__.py"]
+
+[tool.coverage.report]
+omit = ["*/__init__.py"]

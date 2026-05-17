@@ -1,0 +1,69 @@
+tables:
+  pipeline_runs:
+    schema: platform
+    table: pipeline_runs
+    comment: Pipeline run results
+    primary_key:
+      - run_id
+    columns:
+      - name: run_id
+        data_type: text
+        nullable: false
+        comment: UUID of the pipeline run
+      - name: name
+        data_type: text
+        nullable: false
+        comment: Name of the pipeline
+      - name: user_id
+        data_type: text
+        nullable: true
+        comment: ID of the user associated with the pipeline run
+      - name: result
+        data_type: text
+        nullable: false
+        comment: Result of the pipeline run
+      - name: started_at
+        data_type: timestamp
+        nullable: false
+        comment: Timestamp of the start of the pipeline run (UTC)
+      - name: finished_at
+        data_type: timestamp
+        nullable: false
+        comment: Timestamp of the end of the pipeline run (UTC)
+
+  pipeline_run_steps:
+    schema: platform
+    table: pipeline_run_steps
+    comment: Results for individual steps within a pipeline run
+    primary_key:
+      - run_id
+      - step_order
+    columns:
+      - name: run_id
+        data_type: text
+        nullable: false
+        comment: UUID of the pipeline run
+      - name: step_order
+        data_type: integer
+        nullable: false
+        comment: Zero-based order of the step within the pipeline run
+      - name: name
+        data_type: text
+        nullable: false
+        comment: Name of the pipeline step
+      - name: result
+        data_type: text
+        nullable: false
+        comment: Result of the pipeline step
+      - name: started_at
+        data_type: timestamp
+        nullable: false
+        comment: Timestamp of the start of the pipeline step (UTC)
+      - name: finished_at
+        data_type: timestamp
+        nullable: false
+        comment: Timestamp of the end of the pipeline step (UTC)
+      - name: error_message
+        data_type: text
+        nullable: true
+        comment: Error message if the step failed

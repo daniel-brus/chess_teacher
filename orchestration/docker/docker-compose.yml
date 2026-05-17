@@ -1,0 +1,42 @@
+services:
+  db:
+    image: postgres:16
+    restart: unless-stopped
+
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+
+    env_file: # TODO: only provide necessary vars
+      - ../../.env
+
+    volumes:
+      - ../../storage/postgres:/var/lib/postgresql/data
+
+    ports:
+      - "${POSTGRES_PORT}:5432"
+
+  streamlit:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+
+    depends_on:
+      - db
+
+    env_file:
+      - ../../.env
+
+    environment:
+      POSTGRES_HOST: db
+
+    volumes:
+      - ../../storage/raw:/app/storage/raw
+
+    ports:
+      - "${APP_PORT}:8501"
+
+    profiles: ["streamlit"] # use --profile streamlit when running docker-compose to run this service
