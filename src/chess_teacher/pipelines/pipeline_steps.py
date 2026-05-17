@@ -1,5 +1,5 @@
+from chess_teacher.pipelines.pipeline_base import PipelineStep
 from chess_teacher.utils.db_client import DatabaseClient
-from chess_teacher.utils.pipeline_utils import PipelineStep
 
 
 class LoadToDatabaseStep(PipelineStep):

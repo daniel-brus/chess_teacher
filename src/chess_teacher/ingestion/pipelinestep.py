@@ -4,6 +4,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from chess_teacher.ingestion.adapter import AdapterFactory
+from chess_teacher.pipelines.pipeline_base import PipelineStep
 from chess_teacher.platform.account import Account
 from chess_teacher.utils.db_client import DatabaseClient
 from chess_teacher.utils.env_utils import get_env_variable
@@ -14,7 +15,6 @@ from chess_teacher.utils.exception_utils import (
     FileWriteError,
 )
 from chess_teacher.utils.general_utils import build_daily_path, get_current_datetime
-from chess_teacher.utils.pipeline_steps import PipelineStep
 
 
 def _get_target_base_path(account: Account) -> Path:
