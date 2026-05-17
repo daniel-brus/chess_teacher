@@ -64,6 +64,15 @@ def _normalize_default_value(value: Any) -> Any:
     return value
 
 
+def _coerce_from_storage(value: Any, annotation: Any) -> Any:
+    annotation = _unwrap_optional_type(annotation)
+    if isinstance(annotation, type) and issubclass(annotation, StrEnum):
+        if isinstance(value, annotation):
+            return value
+        return annotation(value)
+    return value
+
+
 def _dataclass_field_default(field: Field[Any]) -> Any:
     if field.default_factory is not MISSING:
         return field.default_factory()
@@ -204,10 +213,14 @@ class TableDataClass(ABC):
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Self:
         kwargs: dict[str, Any] = {}
+        type_hints = get_type_hints(cls)
         for dataclass_field in _dataclass_fields(cls):
             field_name = dataclass_field.name
             if field_name in data:
-                kwargs[field_name] = data[field_name]
+                kwargs[field_name] = _coerce_from_storage(
+                    data[field_name],
+                    type_hints[field_name],
+                )
             elif dataclass_field.default is not MISSING:
                 kwargs[field_name] = dataclass_field.default
             elif dataclass_field.default_factory is not MISSING:

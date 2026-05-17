@@ -18,6 +18,7 @@ user = get_current_user()
 
 pages = [
     st.Page("pages/home.py", title="Home"),
+    st.Page("pages/pipeline.py", title="Pipeline"),
     st.Page("pages/play.py", title="Play"),
     st.Page("pages/settings.py", title="Settings"),
 ]

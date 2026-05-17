@@ -25,6 +25,7 @@ class PipelineResult(StrEnum):
     SUCCESS = "success"
     FAILURE = "failure"
     PARTIAL = "partial"
+    IN_PROGRESS = "in_progress"
 
 
 # Sentinel: finished_at value written to DB to signal an active (locked) run.
@@ -241,8 +242,8 @@ class Pipeline:
 
     Lock mechanism (via platform.pipeline_runs):
     - _acquire_lock: inserts a placeholder row with finished_at=EPOCH and
-      result=PARTIAL. If a non-stale row already exists for (user_id, name),
-      raises immediately to prevent concurrent runs.
+      result=IN_PROGRESS. If a non-stale row already exists for (user_id,
+      name), raises immediately to prevent concurrent runs.
     - _save_run_result: overwrites that placeholder with the real result
       (save_new_to_db merges on run_id as PK), then appends per-step results.
     - Stale lock: a lock is considered abandoned when finished_at=EPOCH and
@@ -311,7 +312,10 @@ class Pipeline:
                     finished_at=finished_at,
                     step_results=step_results,
                 )
-                self._post_run(run_result)
+                try:
+                    self._post_run(run_result)
+                finally:
+                    self._release_lock()
 
         if run_error is not None:
             self.logger.log_and_raise(
@@ -392,13 +396,45 @@ class Pipeline:
             run_id=run_id,
             name=self.name,
             user_id=self.user_id,
-            result=PipelineResult.PARTIAL,  # placeholder — overwritten in _save_run_result
+            result=PipelineResult.IN_PROGRESS,  # placeholder — overwritten in _save_run_result
             started_at=started_at,
             finished_at=_LOCK_EPOCH,
         ).save_new_to_db(self.db_client)
 
         self._run_id = run_id
         self.logger.info(f"[Pipeline:{self.name}] Lock acquired (run_id={run_id}).")
+
+    def _release_lock(self) -> bool:
+        """
+        Remove this run's active lock row if it still exists.
+
+        The normal post-run path overwrites the lock row with the final run
+        result. This cleanup only deletes rows that are still marked active.
+        Returns True if cleanup completed without error, otherwise False.
+        """
+        if self._run_id is None:
+            return True
+
+        meta = PipelineRunResult.get_metadata()
+        run_id_clause = generate_ident_is_literal("run_id", self._run_id)
+        finished_at_clause = generate_ident_is_literal("finished_at", _LOCK_EPOCH.isoformat())
+        active_lock_where = f"{run_id_clause} AND {finished_at_clause}"
+
+        try:
+            deleted = self.db_client.delete_where(meta, where=active_lock_where)
+        except Exception as e:
+            self.logger.error(
+                f"[Pipeline:{self.name}] Failed to release active lock "
+                f"(run_id={self._run_id}): {e}",
+                exc_info=True,
+            )
+            return False
+
+        if deleted:
+            self.logger.warning(
+                f"[Pipeline:{self.name}] Released dangling active lock " f"(run_id={self._run_id})."
+            )
+        return True
 
     # ------------------------------------------------------------------
     # DB helpers

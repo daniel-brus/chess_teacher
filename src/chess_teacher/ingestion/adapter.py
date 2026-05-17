@@ -2,6 +2,7 @@ import calendar
 import json
 from abc import ABC, abstractmethod
 from datetime import UTC, datetime, timedelta
+from typing import Literal
 
 import requests
 
@@ -29,13 +30,13 @@ class Adapter(ABC):
         pass
 
     def _get_response(
-        self, *, params: dict | None = None, stream: bool = False, **kwargs
+        self, url: str, *, params: dict | None = None, stream: bool = False
     ) -> requests.Response:
         """Shared GET request with error handling and timeout."""
         try:
-            self.logger.info(f"Getting response from {self._get_base_url(**kwargs)}.")
+            self.logger.info(f"Getting response from {url}.")
             response = requests.get(
-                url=self._get_base_url(**kwargs),
+                url=url,
                 headers=self._get_headers(),
                 params=params,
                 timeout=30,
@@ -81,13 +82,23 @@ class ChessComAdapter(Adapter):
 
         Required kwargs: year (int), month (int)
         """
-        year, month = _validate_year_month(kwargs, self._LAUNCH_YEAR)
+        year, month = _validate_year_month(kwargs, launch_year=self._LAUNCH_YEAR)
         return f"{self._BASE_URL}/player/{self.account.username}/games/{year}/{month:02d}"
 
     def _get_headers(self) -> dict:
         return {
             "Accept": "application/json",
+            "User-Agent": "chess-teacher/1.0 (https://github.com/chess-teacher/chess-teacher)",
         }
+
+    def _try_get_joined_date(self) -> datetime:
+        """Fetch account registration date from Chess.com profile."""
+        try:
+            data = self._get_response(url=f"{self._BASE_URL}/player/{self.account.username}").json()
+            return datetime.fromtimestamp(data["joined"], tz=UTC)
+        except Exception as e:
+            self.logger.warning(f"Error getting joined date, defaulting to: {e}")
+            return datetime(self._LAUNCH_YEAR, 1, 1)
 
     def get_records(self, since: datetime | None = None) -> list[dict]:
         """
@@ -96,10 +107,15 @@ class ChessComAdapter(Adapter):
         Returns a flat list of game dicts (raw Chess.com JSON).
         """
         records = []
-        for year, month in _get_months_since(since or datetime(self._LAUNCH_YEAR, 1, 1)):
-            response = self._get_response(year=year, month=month)
+
+        since_ts = _to_unix(since, unit="s") if since else 0
+        for year, month in _get_months_since(since or self._try_get_joined_date()):
+            response = self._get_response(url=self._get_base_url(year=year, month=month))
             data = response.json()
-            records.extend(data.get("games", []))
+            # filter out the games before the since date since these are already ingested
+            games = [game for game in data.get("games", []) if game.get("end_time", 0) >= since_ts]
+            if games:
+                records.extend(games)
         return records
 
 
@@ -148,13 +164,13 @@ class LichessAdapter(Adapter):
         params = {
             "pgnInJson": "true",  # include PGN inside JSON instead of separate
             "opening": "true",  # include opening info
-            "until": _to_unix_ms(get_current_datetime()),
+            "until": _to_unix(get_current_datetime(), unit="ms"),
         }
 
         if since is not None:
-            params["since"] = _to_unix_ms(since)
+            params["since"] = _to_unix(since, unit="ms")
 
-        response = self._get_response(params=params, stream=True)
+        response = self._get_response(url=self._get_base_url(), params=params, stream=True)
         result = self._parse_ndjson(response)
         self.logger.info(f"Parsed {len(result)} records from {response.url}.")
         return result
@@ -226,8 +242,9 @@ def _get_months_since(since: datetime) -> list[tuple[int, int]]:
     return months
 
 
-def _to_unix_ms(dt: datetime) -> int:
-    """Convert a datetime to Unix timestamp in milliseconds (required by Lichess API)."""
+def _to_unix(dt: datetime, unit: Literal["s", "ms"] = "ms") -> int:
+    """Convert a datetime to Unix timestamp in milliseconds (default) or seconds."""
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=UTC)
-    return int(dt.timestamp() * 1000)
+    factor = 1000 if unit == "ms" else 1
+    return int(dt.timestamp() * factor)
