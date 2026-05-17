@@ -19,6 +19,7 @@ services:
       - ../../.env
     environment: #override local ENVIRONMENT value
       ENVIRONMENT: DEV
+      POSTGRES_HOST: db
 
     volumes:
       - ../../storage/raw:/app/storage/raw

@@ -16,3 +16,11 @@ class PipelineError(Exception):
 
 class MetadataError(Exception):
     pass
+
+
+class AdapterError(Exception):
+    pass
+
+
+class FileWriteError(Exception):
+    pass

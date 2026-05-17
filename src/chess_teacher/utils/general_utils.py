@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import yaml
 
 
-def get_current_datetime(tz: str = "UTC"):
+def get_current_datetime(tz: str = "UTC") -> datetime:
     assert_valid_timezone(tz)
     return datetime.now(ZoneInfo(tz))
 
@@ -23,15 +23,19 @@ def generate_hash(input: str | list[str]) -> str:
     return hashlib.sha256(input_string.encode()).hexdigest()
 
 
-def build_daily_path(base_dir: Path, file_name: str) -> Path:
+def build_daily_path(base_dir: Path, file_name: str | None = None) -> Path:
     """
     Example:
-        base_dir/2026/05/08/app.log
+        base_dir/2026/05/08
+        base_dir/2026/05/08/file_name
     """
 
     daily_dir = base_dir / datetime.now(UTC).strftime("%Y/%m/%d")
 
     daily_dir.mkdir(parents=True, exist_ok=True)
+
+    if file_name is None:
+        return daily_dir
 
     return daily_dir / file_name
 

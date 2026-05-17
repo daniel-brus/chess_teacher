@@ -63,9 +63,11 @@ class FakeDatabaseClient:
 
         return WriteResult(strategy=WriteStrategy.INSERT_IGNORE, rows_inserted=rows_inserted)
 
-    def delete_where(self, table: TableMetadata, where: str) -> None:
+    def delete_where(self, table: TableMetadata, where: str) -> int:
         with self.lock:
-            self.rows.clear()
+            before = len(self.rows)
+            self.rows = [row for row in self.rows if not self._matches_where(row, where)]
+            return before - len(self.rows)
 
     def _matches_where(self, row: dict[str, Any], where: str | None) -> bool:
         if where is None:
@@ -162,7 +164,7 @@ class TestPipelineLock:
             release_step.set()
             first_thread.join(timeout=5)
 
-        # The first pipeline should finish cleanly, with only its active-lock row written.
+        # The first pipeline should finish cleanly, and release its active-lock row.
         assert not first_thread.is_alive()
         assert not first_error
-        assert len(db_client.rows) == 1
+        assert len(db_client.rows) == 0
