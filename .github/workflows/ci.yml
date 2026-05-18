@@ -33,6 +33,7 @@ jobs:
     runs-on: ubuntu-latest
     if: github.base_ref == 'develop'
     steps:
+      - uses: actions/checkout@v4
       - name: Check bump label
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
