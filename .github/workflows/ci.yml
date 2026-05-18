@@ -9,19 +9,31 @@ on:
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
+permissions:
+  contents: read
+  pull-requests: read
+
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
+  check-source-branch:
+    runs-on: ubuntu-latest
+    if: github.base_ref == 'main'
+    steps:
+      - name: Check PR is from develop
+        run: |
+          if [ "${{ github.head_ref }}" != "develop" ]; then
+            echo "Error: PRs to main must come from develop, not '${{ github.head_ref }}'."
+            exit 1
+          fi
+
   check-bump-label:
     runs-on: ubuntu-latest
     if: github.base_ref == 'develop'
     steps:
       - uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          fetch-depth: 0
       - name: Check bump label
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -30,10 +42,17 @@ jobs:
             --json labels \
             --jq '.labels[].name')
 
-          if echo "$LABELS" | grep -qE "bump:(major|minor|patch)"; then
-            echo "Bump label found."
-          else
+          BUMP_LABELS=$(echo "$LABELS" | grep -E '^bump:(major|minor|patch)$' || true)
+          BUMP_COUNT=$(echo "$BUMP_LABELS" | grep -c . || true)
+
+          if [ "$BUMP_COUNT" -eq 1 ]; then
+            echo "Bump label found: $BUMP_LABELS"
+          elif [ "$BUMP_COUNT" -eq 0 ]; then
             echo "Error: PR to develop requires exactly one of: bump:major, bump:minor, bump:patch"
+            exit 1
+          else
+            echo "Error: PR to develop has multiple bump labels. Use exactly one of: bump:major, bump:minor, bump:patch"
+            echo "$BUMP_LABELS"
             exit 1
           fi
 
@@ -43,7 +62,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/python-setup
       - name: Run linter
-        run: ruff check src scripts tests
+        run: ruff check src scripts tests pages streamlit_utils streamlit_app.py
 
   type-check:
     runs-on: ubuntu-latest
@@ -76,5 +95,4 @@ jobs:
       - uses: ./.github/actions/python-setup
       - name: Run Bandit
         run: |
-          bandit -r src scripts apps/streamlit -x .venv,venv,build,dist,.pytest_cache,.ruff_cache -ll
-          bandit apps -ll
+          bandit -r src scripts pages streamlit_utils streamlit_app.py -x .venv,venv,build,dist,.pytest_cache,.ruff_cache -ll
