@@ -103,13 +103,22 @@ def _expected_metadata_default_for_field(field: Field[Any]) -> Any:
 
 
 class TableDataClass(ABC):
-    @classmethod
-    @abstractmethod
-    def get_key(cls) -> str: ...
+    """
+    Base class for all classes that represent a table in the database.
+    Every child class must implement the following methods:
+    - get_yaml_path(): Path to the table's metadata.yml, usually: Path(__file__).parent / "metadata.yml"
+    - get_key(): Key of the table in the metadata.yml file.
+    - get_id_hash_columns(): Columns (in order)that are hashed to generate the primary key.
+    - get_timestamp_columns(): Columns for which upsert_latest should be called, must be of type datetime.
+    """
 
     @classmethod
     @abstractmethod
     def get_yaml_path(cls) -> Path: ...
+
+    @classmethod
+    @abstractmethod
+    def get_key(cls) -> str: ...
 
     @classmethod
     def get_metadata(cls) -> TableMetadata:
@@ -393,9 +402,6 @@ class TableDataClass(ABC):
                 [data],
                 tablemetadata,
                 match_keys=list(tablemetadata.primary_key),
-                when_matched="update",
-                when_not_matched_by_target="insert",
-                when_not_matched_by_source="ignore",
             )
             logger.info(f"{type(self).__name__} {self.get_where_clause()} saved to database.")
             return result

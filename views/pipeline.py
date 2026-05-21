@@ -10,12 +10,12 @@ from chess_teacher.platform.users_accounts import get_accounts_for_user
 from chess_teacher.utils.db_client import get_db_client
 from chess_teacher.utils.logging_utils import get_logger
 from scripts.pipeline import run_pipeline
-from streamlit_utils.session_state import get_current_user
+from streamlit_utils.login import require_authenticated_user
 
 db_client = get_db_client()
 logger = get_logger()
 
-user = get_current_user()
+user = require_authenticated_user()
 
 st.title("Run the pipeline")
 

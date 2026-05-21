@@ -17,7 +17,7 @@ RUN pip install .
 COPY scripts/ ./scripts/
 COPY streamlit_app.py .
 COPY streamlit_utils/ ./streamlit_utils/
-COPY pages/ ./pages/
+COPY views/ ./views/
 
 RUN mkdir -p storage
 

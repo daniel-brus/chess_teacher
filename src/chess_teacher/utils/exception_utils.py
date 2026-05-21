@@ -22,5 +22,13 @@ class AdapterError(Exception):
     pass
 
 
-class FileWriteError(Exception):
+class FileError(Exception):
+    pass
+
+
+class FileWriteError(FileError):
+    pass
+
+
+class FileReadError(FileError):
     pass

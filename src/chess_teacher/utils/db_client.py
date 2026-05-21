@@ -18,11 +18,48 @@ from chess_teacher.utils.metadata_utils import TableMetadata
 # ---------------------------------------------------------------------------
 
 
+WhenMatched = Literal["update", "delete", "ignore"]
+WhenNotMatchedByTarget = Literal["insert", "ignore"]
+WhenNotMatchedBySource = Literal["delete", "ignore"]
+
+
 class WriteStrategy(StrEnum):
     APPEND = "append"
     INSERT_IGNORE = "insert_ignore"
     OVERWRITE = "overwrite"
     MERGE = "merge"
+
+
+@dataclass(frozen=True, slots=True)
+class MergeStrategy:
+    """Postgres MERGE behaviour for matched / unmatched source and target rows."""
+
+    when_matched: WhenMatched = "update"
+    when_not_matched_by_target: WhenNotMatchedByTarget = "insert"
+    when_not_matched_by_source: WhenNotMatchedBySource = "ignore"
+
+    def __post_init__(self) -> None:
+        if (
+            self.when_matched == "ignore"
+            and self.when_not_matched_by_target == "ignore"
+            and self.when_not_matched_by_source == "ignore"
+        ):
+            raise ValueError(
+                "Invalid MergeStrategy: all when_* actions are 'ignore' — "
+                "merge would produce no SQL clauses."
+            )
+
+    @classmethod
+    def upsert(cls) -> MergeStrategy:
+        return cls()
+
+    @classmethod
+    def full_sync(cls) -> MergeStrategy:
+        return cls(when_not_matched_by_source="delete")
+
+    @classmethod
+    def insert_new(cls) -> MergeStrategy:
+        return cls(when_matched="ignore")
 
 
 @dataclass
@@ -155,9 +192,7 @@ def _build_merge_sql(
     table: TableMetadata,
     *,
     match_keys: list[str],
-    when_matched: Literal["update", "delete", "ignore"],
-    when_not_matched_by_target: Literal["insert", "ignore"],
-    when_not_matched_by_source: Literal["delete", "ignore"],
+    strategy: MergeStrategy,
     match_condition: str | None,
 ) -> str:
     """Build a Postgres 16 MERGE statement using a VALUES CTE as source."""
@@ -189,17 +224,17 @@ def _build_merge_sql(
     clauses: list[str] = []
 
     # WHEN MATCHED
-    if when_matched == "update" and non_match_cols:
+    if strategy.when_matched == "update" and non_match_cols:
         set_clause = ", ".join(
             f"{quote_ident(c)} = _source.{quote_ident(c)}" for c in non_match_cols
         )
         clauses.append(f"WHEN MATCHED THEN\n  UPDATE SET {set_clause}")  # nosec B608
-    elif when_matched == "delete":
+    elif strategy.when_matched == "delete":
         clauses.append("WHEN MATCHED THEN\n  DELETE")
     # "ignore" → no WHEN MATCHED clause
 
     # WHEN NOT MATCHED BY TARGET
-    if when_not_matched_by_target == "insert":
+    if strategy.when_not_matched_by_target == "insert":
         clauses.append(
             f"WHEN NOT MATCHED THEN\n"
             f"  INSERT ({quoted_cols_csv})\n"
@@ -207,11 +242,11 @@ def _build_merge_sql(
         )
 
     # WHEN NOT MATCHED BY SOURCE (Postgres 16+)
-    if when_not_matched_by_source == "delete":
+    if strategy.when_not_matched_by_source == "delete":
         clauses.append("WHEN NOT MATCHED BY SOURCE THEN\n  DELETE")
 
     if not clauses:
-        raise ValueError("merge() produced no action clauses — check your when_* parameters.")
+        raise ValueError("merge() produced no action clauses — check MergeStrategy.")
 
     return merge_head + "\n" + "\n".join(clauses) + ";"
 
@@ -319,27 +354,19 @@ class DatabaseClient:
         data: list[dict] | pl.DataFrame,
         table: TableMetadata,
         *,
+        strategy: MergeStrategy | None = None,
         match_keys: list[str] | None = None,
-        when_matched: Literal["update", "delete", "ignore"] = "update",
-        when_not_matched_by_target: Literal["insert", "ignore"] = "insert",
-        when_not_matched_by_source: Literal["delete", "ignore"] = "ignore",
         match_condition: str | None = None,
     ) -> WriteResult:
         """Postgres MERGE with row count tracking.
         # TODO: COPY mode (psycopg3 native, for large loads) instead of merge SQL statement
 
         Args:
+            strategy: Merge behaviour (defaults to upsert via MergeStrategy.upsert()).
             match_keys: Columns to join on. Defaults to table.primary_key.
-            when_matched: What to do when source row matches target row.
-            when_not_matched_by_target: What to do when source row has no match in target.
-            when_not_matched_by_source: What to do when target row has no match in source.
             match_condition: Optional extra SQL condition appended to the ON clause.
-
-        Common patterns:
-            Upsert:     when_matched="update", when_not_matched_by_target="insert"  (defaults)
-            Full sync:  + when_not_matched_by_source="delete"
-            Insert-new: when_matched="ignore", when_not_matched_by_target="insert"
         """
+        merge_strategy = strategy or MergeStrategy.upsert()
         records = _to_records(data)
         if not records:
             self.logger.info("merge → %s: no records to merge", table.qualified_name_sql())
@@ -357,7 +384,7 @@ class DatabaseClient:
             non_matched_count = len(records) - matched_count
 
             deleted_count = 0
-            if when_not_matched_by_source == "delete":
+            if merge_strategy.when_not_matched_by_source == "delete":
                 deleted_count = self._count_deletes(records, table, resolved_keys, match_condition)
 
             # Execute the actual merge
@@ -365,9 +392,7 @@ class DatabaseClient:
                 records,
                 table,
                 match_keys=resolved_keys,
-                when_matched=when_matched,
-                when_not_matched_by_target=when_not_matched_by_target,
-                when_not_matched_by_source=when_not_matched_by_source,
+                strategy=merge_strategy,
                 match_condition=match_condition,
             )
 
@@ -380,10 +405,12 @@ class DatabaseClient:
             )
 
         # Determine rows_inserted based on when_not_matched_by_target
-        rows_inserted = non_matched_count if when_not_matched_by_target == "insert" else 0
+        rows_inserted = (
+            non_matched_count if merge_strategy.when_not_matched_by_target == "insert" else 0
+        )
 
         # Determine rows_updated based on when_matched
-        rows_updated = matched_count if when_matched == "update" else 0
+        rows_updated = matched_count if merge_strategy.when_matched == "update" else 0
 
         self.logger.info(
             "merge → %s: inserted=%d, updated=%d, deleted=%d (source=%d records)",

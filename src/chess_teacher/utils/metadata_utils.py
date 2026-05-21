@@ -1,16 +1,32 @@
 from __future__ import annotations
 
 import inspect
+import logging
 from dataclasses import dataclass, field
 from datetime import date, datetime, time
 from pathlib import Path
 from typing import Any
+
+import polars as pl
 
 from chess_teacher.utils.exception_utils import MetadataError
 from chess_teacher.utils.general_utils import load_yaml, quote_ident, quote_literal, require_ident
 from chess_teacher.utils.logging_utils import get_logger
 
 logger = get_logger()
+
+
+def _dataframe_columns_lower(df: pl.DataFrame) -> set[str]:
+    return {column.lower() for column in df.columns}
+
+
+def _resolve_dataframe_column(df: pl.DataFrame, column_name: str) -> str:
+    """Return the actual DataFrame column name (case-insensitive match)."""
+    for column in df.columns:
+        if column.lower() == column_name:
+            return column
+    raise KeyError(column_name)
+
 
 # TODO: add other schema functionality (https://docs.sqlalchemy.org/en/21/core/metadata.html#sqlalchemy.schema.Column)
 # e.g. foreignkey, constraint (constraint: maybe a nice class to define? )
@@ -243,6 +259,65 @@ class TableMetadata:
 
     def columns_by_name(self) -> dict[str, ColumnMetadata]:
         return {column.name: column for column in self.columns}
+
+    def required_load_columns(self) -> tuple[str, ...]:
+        """
+        Columns that must be present in load data.
+
+        Required when NOT NULL and no database default — the DB cannot fill these in.
+        """
+        return tuple(
+            column.name for column in self.columns if not column.nullable and column.default is None
+        )
+
+    def validate_dataframe_for_load(
+        self,
+        df: pl.DataFrame,
+        *,
+        log: logging.Logger | None = None,
+    ) -> None:
+        """
+        Verify a Polars DataFrame can be loaded into this table.
+
+        - Required columns (NOT NULL, no default): must be present; error if missing.
+          When the frame has rows, required columns must not contain nulls.
+        - Other table columns: may be absent; warning if missing (DB fills NULL/default).
+        """
+        log = log or logger
+        table = self.qualified_name_sql()
+        df_columns = _dataframe_columns_lower(df)
+
+        required = self.required_load_columns()
+        required_set = set(required)
+        missing_required = [column for column in required if column not in df_columns]
+        if missing_required:
+            raise MetadataError(
+                f"DataFrame is missing required columns for {table}: {missing_required}. "
+                f"Required: {list(required)}. Present: {sorted(df_columns)}."
+            )
+
+        optional = tuple(column.name for column in self.columns if column.name not in required_set)
+        missing_optional = [column for column in optional if column not in df_columns]
+        if missing_optional:
+            log.warning(
+                "DataFrame is missing optional columns for %s (nullable and/or DB default): %s.",
+                table,
+                missing_optional,
+            )
+
+        if df.height == 0:
+            return
+
+        null_required = []
+        for column in required:
+            actual = _resolve_dataframe_column(df, column)
+            if df[actual].null_count() > 0:
+                null_required.append(column)
+
+        if null_required:
+            raise MetadataError(
+                f"DataFrame has null values in required columns for {table}: {null_required}."
+            )
 
     def qualified_name_sql(self) -> str:
         return f"{quote_ident(self.schema_name)}.{quote_ident(self.table_name)}"
