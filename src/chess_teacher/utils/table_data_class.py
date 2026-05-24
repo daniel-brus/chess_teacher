@@ -121,18 +121,18 @@ class TableDataClass(ABC):
     def get_key(cls) -> str: ...
 
     @classmethod
+    @abstractmethod
+    def get_id_hash_columns(cls) -> tuple[str, ...]:
+        """Field names (in order) hashed by generate_id into the stored primary key value."""
+        ...
+
+    @classmethod
     def get_metadata(cls) -> TableMetadata:
         return TableMetadata(key=cls.get_key(), yaml_path=cls.get_yaml_path())
 
     @classmethod
     def get_primary_key_columns(cls) -> tuple[str, ...]:
         return cls.get_metadata().primary_key
-
-    @classmethod
-    @abstractmethod
-    def get_id_hash_columns(cls) -> tuple[str, ...]:
-        """Field names (in order) hashed by generate_id into the stored primary key value."""
-        ...
 
     @classmethod
     def get_timestamp_columns(cls) -> tuple[str, ...]:

@@ -32,3 +32,11 @@ class FileWriteError(FileError):
 
 class FileReadError(FileError):
     pass
+
+
+class DataError(Exception):
+    pass
+
+
+class TransformationError(PipelineError):
+    pass

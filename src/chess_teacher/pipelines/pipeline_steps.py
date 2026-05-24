@@ -2,16 +2,21 @@ from __future__ import annotations
 
 from enum import StrEnum
 from pathlib import Path
+from typing import ClassVar
 from uuid import uuid4
 
 import polars as pl
 
 from chess_teacher.pipelines.pipeline_base import PipelineStep
-from chess_teacher.pipelines.transformations import DataFrameTransformation
+from chess_teacher.pipelines.transformations import (
+    CastToDatetimeTransformation,
+    DataFrameTransformation,
+)
 from chess_teacher.utils.db_client import DatabaseClient, MergeStrategy, WriteResult
-from chess_teacher.utils.exception_utils import FileReadError, MetadataError
+from chess_teacher.utils.exception_utils import MetadataError
 from chess_teacher.utils.file_loader import FileLoader, FileLoaderFactory
 from chess_teacher.utils.file_utils import FileType, discover_files, move_file
+from chess_teacher.utils.general_utils import get_current_datetime
 from chess_teacher.utils.metadata_utils import TableMetadata
 
 
@@ -182,6 +187,11 @@ class StorageToTableStep(LoadToDatabaseStep):
         glob_pattern: Optional regex applied to each candidate path (POSIX form).
     """
 
+    # default transformations to apply to the data before the other configured ones
+    DEFAULT_TRANSFORMATIONS: ClassVar[list[DataFrameTransformation]] = [
+        CastToDatetimeTransformation(columns=["ingestion_ts"])
+    ]
+
     def __init__(
         self,
         name: str,
@@ -201,7 +211,7 @@ class StorageToTableStep(LoadToDatabaseStep):
         super().__init__(
             name=name,
             table_metadata=table_metadata,
-            transformations=transformations,
+            transformations=self.DEFAULT_TRANSFORMATIONS + transformations,
             loading_strategy=loading_strategy,
             merge_strategy=merge_strategy,
             cascade=cascade,
@@ -272,11 +282,27 @@ class StorageToTableStep(LoadToDatabaseStep):
         for path in paths:
             self.logger.info(f"[{self.name}] Loading {path}.")
             try:
-                records.extend(self.file_loader.load(path))
-            except FileReadError as e:
+                file_records = self.file_loader.load(path)
+            except Exception as e:
                 self.logger.warning(f"[{self.name}] Failed to load {path}: {e}")
                 self._quarantine_paths([path])
                 continue
-            self._loaded_paths.append(path)
+            self.logger.info(f"[{self.name}] Loaded {len(file_records)} records from {path}.")
 
-        return pl.DataFrame(records)
+            # add filename to records as metadata
+            try:
+                source_file = path.resolve().as_posix()
+                ingestion_ts = get_current_datetime()
+                for record in file_records:
+                    record["_source_file"] = source_file
+                    record["_ingestion_ts"] = ingestion_ts
+                records.extend(file_records)
+                self._loaded_paths.append(path)
+            except Exception as e:
+                self.logger.warning(f"[{self.name}] Failed to add metadata to {path}: {e}")
+                self._quarantine_paths([path])
+            self.logger.info(f"[{self.name}] Added metadata to {path}.")
+        self.logger.info(f"[{self.name}] Loaded {len(records)} records from {len(paths)} paths.")
+
+        df = pl.DataFrame(records)
+        return df

@@ -1,0 +1,48 @@
+tables:
+  raw_games:
+    schema: games
+    table: raw_games
+    comment: Raw games data
+    primary_key:
+      - game_id
+    columns:
+      - name: game_id
+        data_type: text
+        nullable: false
+        comment: Game ID in the database
+      - name: platform
+        data_type: text
+        nullable: false
+        comment: Platform of the game (e.g. Chess.com, Lichess, etc.)
+      - name: platform_game_id
+        data_type: text
+        nullable: false
+        comment: Game ID on the platform
+      - name: account_id
+        data_type: text
+        nullable: false
+        comment: Account ID of the account that the game belongs to
+      - name: username
+        data_type: text
+        nullable: false
+        comment: Username of the account that the game belongs to on the platform
+      - name: color
+        data_type: text
+        nullable: false
+        comment: Color of the user in the game
+      - name: result
+        data_type: text
+        nullable: false
+        comment: Result of the game from the user's perspective
+      - name: reason
+        data_type: text
+        nullable: false
+        comment: Reason for the result
+      - name: user_elo
+        data_type: int
+        nullable: true
+        comment: User's ELO rating at the start of the game
+      - name: opponent_elo
+        data_type: int
+        nullable: true
+        comment: Opponent's ELO rating at the start of the game
