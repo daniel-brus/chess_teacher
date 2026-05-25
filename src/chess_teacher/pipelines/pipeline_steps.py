@@ -7,10 +7,12 @@ from uuid import uuid4
 
 import polars as pl
 
-from chess_teacher.pipelines.pipeline_base import PipelineStep
+from chess_teacher.pipelines.pipeline_base import PipelineContext, PipelineStep
 from chess_teacher.pipelines.transformations import (
+    CastDataTypeTransformation,
     CastToDatetimeTransformation,
     DataFrameTransformation,
+    FilterColumnsTransformation,
 )
 from chess_teacher.utils.db_client import DatabaseClient, MergeStrategy, WriteResult
 from chess_teacher.utils.exception_utils import MetadataError
@@ -18,6 +20,7 @@ from chess_teacher.utils.file_loader import FileLoader, FileLoaderFactory
 from chess_teacher.utils.file_utils import FileType, discover_files, move_file
 from chess_teacher.utils.general_utils import get_current_datetime
 from chess_teacher.utils.metadata_utils import TableMetadata
+from chess_teacher.utils.table_data_class import TableDataClass
 
 
 class LoadingStrategy(StrEnum):
@@ -33,10 +36,15 @@ class LoadingStrategy(StrEnum):
 class LoadToDatabaseStep(PipelineStep):
     """Load data from arbitrary source into a table."""
 
+    DEFAULT_TRANSFORMATIONS: ClassVar[list[type[DataFrameTransformation]]] = [
+        CastDataTypeTransformation,
+        FilterColumnsTransformation,
+    ]
+
     def __init__(
         self,
         name: str,
-        table_metadata: TableMetadata,
+        data_class: type[TableDataClass],
         transformations: list[DataFrameTransformation] = [],
         *,
         loading_strategy: LoadingStrategy,
@@ -45,25 +53,28 @@ class LoadToDatabaseStep(PipelineStep):
         match_condition: str | None = None,
     ) -> None:
         super().__init__(name=name)
-        self.table_metadata = table_metadata
-        self.transformations = transformations
+        self.data_class = data_class
+        self.table_metadata = data_class.get_metadata()
+        # apply metadata-dependent transformations after the user-provided transformations
+        default_transformations = [
+            transformation(data_class) for transformation in self.DEFAULT_TRANSFORMATIONS
+        ]
+        self.transformations = transformations + default_transformations
         self.loading_strategy = loading_strategy
         # load strategy-specific configurations
         if loading_strategy == LoadingStrategy.MERGE:
-            self.merge_strategy = merge_strategy
+            self.merge_strategy = merge_strategy or MergeStrategy.upsert()
             self.match_condition = match_condition
         elif loading_strategy == LoadingStrategy.OVERWRITE:
             self.cascade = cascade
 
-    def run(self, db_client: DatabaseClient) -> None:
+    def run(self, db_client: DatabaseClient, context: PipelineContext) -> None:
         table = self.table_metadata.qualified_name_sql()
         self.logger.info(
             f"[{self.name}] Loading into {table} " f"(strategy={self.loading_strategy.value})."
         )
         if self.loading_strategy == LoadingStrategy.MERGE:
-            merge_label = (
-                self.merge_strategy if self.merge_strategy is not None else MergeStrategy.upsert()
-            )
+            merge_label = self.merge_strategy
             self.logger.info(
                 f"[{self.name}] Merge strategy: "
                 f"matched={merge_label.when_matched}, "
@@ -81,6 +92,9 @@ class LoadToDatabaseStep(PipelineStep):
                 self.logger.warning(
                     f"[{self.name}] Overwrite will truncate {table} and leave it empty."
                 )
+            else:
+                self.logger.info(f"[{self.name}] Nothing to load; skipping.")
+                return
 
         # Apply transformations to the loaded data
         for index, transformation in enumerate(self.transformations, start=1):
@@ -146,8 +160,8 @@ class TransformStep(LoadToDatabaseStep):
     def __init__(
         self,
         name: str,
-        source_table_metadata: TableMetadata,
-        target_table_metadata: TableMetadata,
+        source_data_class: type[TableDataClass],
+        target_data_class: type[TableDataClass],
         transformations: list[DataFrameTransformation] = [],
         *,
         loading_strategy: LoadingStrategy,
@@ -157,14 +171,14 @@ class TransformStep(LoadToDatabaseStep):
     ) -> None:
         super().__init__(
             name=name,
-            table_metadata=target_table_metadata,
+            data_class=target_data_class,
             transformations=transformations,
             loading_strategy=loading_strategy,
             merge_strategy=merge_strategy,
             cascade=cascade,
             match_condition=match_condition,
         )
-        self.source_table_metadata = source_table_metadata
+        self.source_table_metadata = source_data_class.get_metadata()
 
     def _load_records(self, db_client: DatabaseClient) -> pl.DataFrame:
         """Load records from the source table into a Polars DataFrame."""
@@ -187,9 +201,8 @@ class StorageToTableStep(LoadToDatabaseStep):
         glob_pattern: Optional regex applied to each candidate path (POSIX form).
     """
 
-    # default transformations to apply to the data before the other configured ones
-    DEFAULT_TRANSFORMATIONS: ClassVar[list[DataFrameTransformation]] = [
-        CastToDatetimeTransformation(columns=["ingestion_ts"])
+    PRE_LOAD_TRANSFORMATIONS: ClassVar[list[DataFrameTransformation]] = [
+        CastToDatetimeTransformation(columns=["_ingestion_ts"]),
     ]
 
     def __init__(
@@ -197,7 +210,7 @@ class StorageToTableStep(LoadToDatabaseStep):
         name: str,
         storage_path: str,
         file_type: FileType,
-        table_metadata: TableMetadata,
+        data_class: type[TableDataClass],
         transformations: list[DataFrameTransformation] = [],
         *,
         recursive: bool = True,
@@ -210,8 +223,8 @@ class StorageToTableStep(LoadToDatabaseStep):
     ) -> None:
         super().__init__(
             name=name,
-            table_metadata=table_metadata,
-            transformations=self.DEFAULT_TRANSFORMATIONS + transformations,
+            data_class=data_class,
+            transformations=self.PRE_LOAD_TRANSFORMATIONS + transformations,
             loading_strategy=loading_strategy,
             merge_strategy=merge_strategy,
             cascade=cascade,
@@ -225,11 +238,11 @@ class StorageToTableStep(LoadToDatabaseStep):
         self.file_loader: FileLoader = FileLoaderFactory.get_loader(file_type, logger=self.logger)
         self._loaded_paths: list[Path] = []
 
-    def run(self, db_client: DatabaseClient) -> None:
+    def run(self, db_client: DatabaseClient, context: PipelineContext) -> None:
         """Load, transform, and save; quarantine source files if anything fails after load."""
         self._loaded_paths = []
         try:
-            super().run(db_client)
+            super().run(db_client, context)
         except Exception:
             self._quarantine_paths(self._loaded_paths)
             raise

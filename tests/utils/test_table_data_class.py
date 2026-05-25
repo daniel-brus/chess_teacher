@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from chess_teacher.ingestion.raw_games import RawGame
 from chess_teacher.pipelines.pipeline_base import PipelineRunResult, PipelineRunStepResult
 from chess_teacher.platform.account import Account
 from chess_teacher.platform.user import User
@@ -16,6 +17,7 @@ CLASSES_TO_TEST: list[type[TableDataClass]] = [
     UserAccount,
     PipelineRunStepResult,
     PipelineRunResult,
+    RawGame,
 ]
 
 

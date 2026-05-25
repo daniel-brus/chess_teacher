@@ -18,18 +18,22 @@ tables:
         data_type: text
         nullable: true
         comment: ID of the user associated with the pipeline run
+      - name: account_id
+        data_type: text
+        nullable: true
+        comment: ID of the account associated with the pipeline run
       - name: result
         data_type: text
         nullable: false
         comment: Result of the pipeline run
       - name: started_at
-        data_type: timestamp
+        data_type: timestamptz
         nullable: false
-        comment: Timestamp of the start of the pipeline run (UTC)
+        comment: Timestamp of the start of the pipeline run
       - name: finished_at
-        data_type: timestamp
+        data_type: timestamptz
         nullable: false
-        comment: Timestamp of the end of the pipeline run (UTC)
+        comment: Timestamp of the end of the pipeline run
 
   pipeline_run_steps:
     schema: platform
@@ -56,13 +60,13 @@ tables:
         nullable: false
         comment: Result of the pipeline step
       - name: started_at
-        data_type: timestamp
+        data_type: timestamptz
         nullable: false
-        comment: Timestamp of the start of the pipeline step (UTC)
+        comment: Timestamp of the start of the pipeline step
       - name: finished_at
-        data_type: timestamp
+        data_type: timestamptz
         nullable: false
-        comment: Timestamp of the end of the pipeline step (UTC)
+        comment: Timestamp of the end of the pipeline step
       - name: error_message
         data_type: text
         nullable: true

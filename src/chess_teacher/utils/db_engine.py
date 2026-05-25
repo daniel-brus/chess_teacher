@@ -1,9 +1,12 @@
-from sqlalchemy import create_engine, text
+from typing import Any
+
+from sqlalchemy import Connection, create_engine, text
 from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.engine import Engine
 
 from chess_teacher.utils.env_utils import get_env_variable
 from chess_teacher.utils.exception_utils import ConfigError, DatabaseError
+from chess_teacher.utils.general_utils import quote_ident
 from chess_teacher.utils.logging_utils import get_logger
 
 logger = get_logger()
@@ -54,6 +57,30 @@ class EnrichedEngine(Engine):
         except Exception as e:
             self._logger.log_and_raise(DatabaseError(f"Error executing write query: {e}"))
         return return_list
+
+    def copy_records(
+        self,
+        conn: Connection,
+        table_name: str,
+        col_names: list[str],
+        records: list[dict],
+    ) -> None:
+        """Bulk-load rows into an existing table via psycopg3 COPY (same transaction as conn)."""
+        if not records:
+            return
+        quoted_table = quote_ident(table_name)
+        quoted_cols = ", ".join(quote_ident(c) for c in col_names)
+        copy_sql = f"COPY {quoted_table} ({quoted_cols}) FROM STDIN"
+        try:
+            raw_conn: Any = conn.connection.driver_connection
+            with raw_conn.cursor() as cursor:
+                with cursor.copy(copy_sql) as copy:
+                    for record in records:
+                        copy.write_row(tuple(record.get(c) for c in col_names))
+        except Exception as e:
+            self._logger.log_and_raise(
+                DatabaseError(f"Error copying records into {quoted_table}: {e}")
+            )
 
 
 def get_db_engine(

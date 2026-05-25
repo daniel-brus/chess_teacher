@@ -5,11 +5,11 @@ from datetime import datetime
 import streamlit as st
 from streamlit.delta_generator import DeltaGenerator
 
+from chess_teacher.ingestion.main import run_ingestion_pipeline
 from chess_teacher.platform.account import Account
 from chess_teacher.platform.users_accounts import get_accounts_for_user
 from chess_teacher.utils.db_client import get_db_client
 from chess_teacher.utils.logging_utils import get_logger
-from scripts.pipeline import run_pipeline
 from streamlit_utils.login import require_authenticated_user
 
 db_client = get_db_client()
@@ -107,7 +107,7 @@ if st.session_state[_PIPELINE_PENDING_KEY]:
     with st.status("Pipeline is running...", expanded=True) as status:
         started_at = datetime.now()
         try:
-            result = run_pipeline(user, st.session_state[_PIPELINE_ACCOUNT_KEY])
+            result = run_ingestion_pipeline(user.user_id, st.session_state[_PIPELINE_ACCOUNT_KEY])
         except Exception as e:
             status.update(label="Pipeline failed.", state="error", expanded=True)
             st.session_state[_PIPELINE_OUTCOME_KEY] = ("error", f"Pipeline failed: {e}")

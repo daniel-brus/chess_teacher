@@ -1,11 +1,31 @@
+from __future__ import annotations
+
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
+from chess_teacher.utils.chess_utils import Color, Reason, Result
 from chess_teacher.utils.table_data_class import TableDataClass
 
 
 @dataclass(frozen=True)
 class RawGame(TableDataClass):
+    game_id: str
+    platform_game_id: str
+    account_id: str
+    pgn: str
+    color: Color
+    result: Result
+    reason: Reason
+    time_control_initial: int | None = None
+    time_control_increment: int | None = None
+    variant: str = "standard"
+    start_time: datetime | None = None
+    end_time: datetime | None = None
+    eco_code: str | None = None
+    user_elo: int | None = None
+    opponent_elo: int | None = None
+
     @classmethod
     def get_yaml_path(cls) -> Path:
         return Path(__file__).parent / "metadata.yml"
@@ -23,11 +43,3 @@ class RawGame(TableDataClass):
         Note that the platform is unique per account, so does not need to be included.
         """
         return ("account_id", "platform_game_id")
-
-    # @classmethod
-    # def get_timestamp_columns(cls) -> tuple[str, ...]:
-    #     return ("created_at",)
-
-    # @classmethod
-    # def get_dataclass_field_names(cls) -> set[str]:
-    #     return {"id", "created_at", "updated_at"}

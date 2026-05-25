@@ -59,14 +59,14 @@ tables:
         comment: Tier of the user (Free/Premium)
 
       - name: latest_login
-        data_type: timestamp
+        data_type: timestamptz
         nullable: true
-        comment: Timestamp of most recent login (UTC)
+        comment: Timestamp of most recent login
 
       - name: latest_pipeline_run
-        data_type: timestamp
+        data_type: timestamptz
         nullable: true
-        comment: Timestamp of most recent pipeline run (UTC). Used to prevent multiple runs in 24hs.
+        comment: Timestamp of most recent pipeline run. Used to prevent multiple runs in 24hs.
 
       - name: cron_time
         data_type: time
@@ -100,9 +100,9 @@ tables:
         nullable: false
         comment: Platform of the account (e.g. Chess.com, Lichess, etc.)
       - name: latest_ingestion
-        data_type: timestamp
+        data_type: timestamptz
         nullable: true
-        comment: Timestamp of most recent ingestion (UTC). Used to prevent multiple ingestions in 24hs.
+        comment: Timestamp of most recent ingestion. Used to prevent multiple ingestions in 24hs.
 
   br_users_accounts:
     schema: platform

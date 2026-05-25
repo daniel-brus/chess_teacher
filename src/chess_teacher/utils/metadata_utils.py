@@ -28,6 +28,37 @@ def _resolve_dataframe_column(df: pl.DataFrame, column_name: str) -> str:
     raise KeyError(column_name)
 
 
+_POSTGRES_TO_POLARS: dict[str, pl.DataType] = {
+    "text": pl.Utf8,
+    "varchar": pl.Utf8,
+    "character varying": pl.Utf8,
+    "char": pl.Utf8,
+    "character": pl.Utf8,
+    "integer": pl.Int64,
+    "int": pl.Int64,
+    "int4": pl.Int64,
+    "bigint": pl.Int64,
+    "int8": pl.Int64,
+    "boolean": pl.Boolean,
+    "bool": pl.Boolean,
+    "date": pl.Date,
+    "timestamp": pl.Datetime(),
+    "timestamp without time zone": pl.Datetime(),
+    "timestamptz": pl.Datetime(time_zone="UTC"),
+    "timestamp with time zone": pl.Datetime(time_zone="UTC"),
+    "time": pl.Time,
+}
+
+
+def postgres_type_to_polars(data_type: str) -> pl.DataType:
+    """Map a PostgreSQL column type string to a Polars dtype."""
+    base = data_type.strip().lower().split("(")[0].strip()
+    try:
+        return _POSTGRES_TO_POLARS[base]
+    except KeyError:
+        raise MetadataError(f"No Polars mapping for PostgreSQL data_type: {data_type!r}")
+
+
 # TODO: add other schema functionality (https://docs.sqlalchemy.org/en/21/core/metadata.html#sqlalchemy.schema.Column)
 # e.g. foreignkey, constraint (constraint: maybe a nice class to define? )
 
@@ -76,6 +107,10 @@ class ColumnMetadata:
         except Exception as e:
             logger.log_and_raise(MetadataError(f"Error parsing column metadata from dict: {e}"))
         return col
+
+    def polars_dtype(self) -> pl.DataType:
+        """Polars dtype corresponding to this column's PostgreSQL data_type."""
+        return postgres_type_to_polars(self.data_type)
 
     def column_def_sql(self) -> str:
         parts: list[str] = [quote_ident(self.name), self.data_type]

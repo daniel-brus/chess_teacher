@@ -42,6 +42,12 @@ def _as_utc(value: datetime) -> datetime:
 
 
 @dataclass(frozen=True)
+class PipelineContext:
+    user_id: str | None = None
+    account_id: str | None = None
+
+
+@dataclass(frozen=True)
 class StepResult:
     name: str
     result: PipelineResult
@@ -59,6 +65,7 @@ class PipelineRunResult(TableDataClass):
     run_id: str
     name: str
     user_id: str | None
+    account_id: str | None
     result: PipelineResult
     started_at: datetime
     finished_at: datetime
@@ -175,10 +182,10 @@ class PipelineStep(ABC):
         self.logger = logger or get_logger()
 
     @abstractmethod
-    def run(self, db_client: DatabaseClient) -> None:
+    def run(self, db_client: DatabaseClient, context: PipelineContext) -> None:
         """Implement the core logic of this step."""
 
-    def execute(self, db_client: DatabaseClient) -> StepResult:
+    def execute(self, db_client: DatabaseClient, context: PipelineContext) -> StepResult:
         """
         Run this step with retry handling.
         Called by Pipeline.run() — not directly.
@@ -199,7 +206,7 @@ class PipelineStep(ABC):
                 time.sleep(wait)
 
             try:
-                self.run(db_client)
+                self.run(db_client, context)
                 finished_at = get_current_datetime()
                 self.logger.info(
                     f"[{self.name}] Completed in "
@@ -242,8 +249,8 @@ class Pipeline:
 
     Lock mechanism (via platform.pipeline_runs):
     - _acquire_lock: inserts a placeholder row with finished_at=EPOCH and
-      result=IN_PROGRESS. If a non-stale row already exists for (user_id,
-      name), raises immediately to prevent concurrent runs.
+      result=IN_PROGRESS. If a non-stale row already exists for
+      (user_id, account_id, name), raises immediately to prevent concurrent runs.
     - _save_run_result: overwrites that placeholder with the real result
       (save_new_to_db merges on run_id as PK), then appends per-step results.
     - Stale lock: a lock is considered abandoned when finished_at=EPOCH and
@@ -255,13 +262,14 @@ class Pipeline:
         self,
         name: str,
         steps: list[PipelineStep],
-        user_id: str | None = None,  # A pipeline can be associated with a user or not.
+        user_id: str | None = None,
+        account_id: str | None = None,
         db_client: DatabaseClient | None = None,
         lock_timeout_hours: float = _DEFAULT_LOCK_TIMEOUT_HOURS,
         logger: EnhancedLogger | None = None,
     ) -> None:
         self.name = name
-        self.user_id = user_id
+        self.context = PipelineContext(user_id=user_id, account_id=account_id)
         self.steps = steps
         self.db_client = db_client or get_db_client()
         self.lock_timeout_hours = lock_timeout_hours
@@ -269,7 +277,10 @@ class Pipeline:
         self._run_id: str | None = None
 
     def run(self) -> PipelineRunResult:
-        self.logger.info(f"[Pipeline:{self.name}] Starting for user {self.user_id}.")
+        self.logger.info(
+            f"[Pipeline:{self.name}] Starting for user {self.context.user_id} "
+            f"account {self.context.account_id}."
+        )
         started_at = get_current_datetime()
         step_results: tuple[StepResult, ...] = ()
         pipeline_result = PipelineResult.SUCCESS
@@ -280,7 +291,7 @@ class Pipeline:
             self._pre_run(started_at)
 
             for step in self.steps:
-                step_result = step.execute(self.db_client)
+                step_result = step.execute(self.db_client, self.context)
                 step_results += (step_result,)
 
                 if step_result.result == PipelineResult.FAILURE:
@@ -306,7 +317,8 @@ class Pipeline:
                 run_result = PipelineRunResult(
                     run_id=self._run_id,
                     name=self.name,
-                    user_id=self.user_id,
+                    user_id=self.context.user_id,
+                    account_id=self.context.account_id,
                     result=pipeline_result,
                     started_at=started_at,
                     finished_at=finished_at,
@@ -354,16 +366,19 @@ class Pipeline:
     def _acquire_lock(self, started_at: datetime) -> None:
         """
         Register this run as active by inserting a placeholder row with
-        finished_at=EPOCH. Raises if a non-stale lock exists for (user_id, name).
-        Sets self._run_id on success.
+        finished_at=EPOCH. Raises if a non-stale lock exists for
+        (user_id, account_id, name). Sets self._run_id on success.
         """
         meta = PipelineRunResult.get_metadata()
         self.db_client.ensure_table(meta)
 
         name_clause = generate_ident_is_literal("name", self.name)
-        user_id_clause = generate_ident_is_literal("user_id", self.user_id)
+        user_id_clause = generate_ident_is_literal("user_id", self.context.user_id)
+        account_id_clause = generate_ident_is_literal("account_id", self.context.account_id)
         finished_at_clause = generate_ident_is_literal("finished_at", _LOCK_EPOCH.isoformat())
-        active_lock_where = f"{name_clause} " f"AND {user_id_clause} " f"AND {finished_at_clause}"
+        active_lock_where = (
+            f"{name_clause} AND {user_id_clause} AND {account_id_clause} AND {finished_at_clause}"
+        )
         existing: list[dict] = self.db_client.read(  # type: ignore[assignment]
             meta,
             columns=["run_id", "started_at"],
@@ -381,7 +396,8 @@ class Pipeline:
                 self.logger.log_and_raise(
                     PipelineError(
                         f"[Pipeline:{self.name}] Already running for user "
-                        f"{self.user_id!r} (started at {locked_at}). Aborting."
+                        f"{self.context.user_id!r} account {self.context.account_id!r} "
+                        f"(started at {locked_at}). Aborting."
                     )
                 )
 
@@ -395,7 +411,8 @@ class Pipeline:
         PipelineRunResult(
             run_id=run_id,
             name=self.name,
-            user_id=self.user_id,
+            user_id=self.context.user_id,
+            account_id=self.context.account_id,
             result=PipelineResult.IN_PROGRESS,  # placeholder — overwritten in _save_run_result
             started_at=started_at,
             finished_at=_LOCK_EPOCH,

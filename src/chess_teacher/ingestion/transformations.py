@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import PurePosixPath
 from typing import ClassVar
 
@@ -14,6 +14,93 @@ from chess_teacher.utils.exception_utils import DataError, TransformationError
 from chess_teacher.utils.logging_utils import get_logger
 
 logger = get_logger()
+
+
+def is_chess_com_expr() -> pl.Expr:
+    """True when the row is from Chess.com."""
+    return pl.col("platform") == AccountPlatform.CHESS_COM.value
+
+
+def is_lichess_expr() -> pl.Expr:
+    """True when the row is from Lichess."""
+    return pl.col("platform") == AccountPlatform.LICHESS.value
+
+
+def chain_when(branches: list[tuple[pl.Expr, pl.Expr]], *, default: pl.Expr) -> pl.Expr:
+    """Fold ``(condition, value)`` pairs into a nested ``pl.when`` chain."""
+    expr = default
+    for condition, value in reversed(branches):
+        expr = pl.when(condition).then(value).otherwise(expr)
+    return expr
+
+
+def side_username_expr(columns: set[str], side: Color) -> pl.Expr:
+    """Username for ``side`` (white or black), per platform schema."""
+    side_value = side.value
+    branches: list[tuple[pl.Expr, pl.Expr]] = []
+    if side_value in columns:
+        branches.append((is_chess_com_expr(), pl.col(side_value).struct.field("username")))
+    if "players" in columns:
+        branches.append((
+            is_lichess_expr(),
+            pl.col("players").struct.field(side_value).struct.field("user").struct.field("name"),
+        ))
+    return chain_when(branches, default=pl.lit(None).cast(pl.Utf8))
+
+
+def side_rating_expr(columns: set[str], side: Color) -> pl.Expr:
+    """Pre-game rating for ``side``; null when absent."""
+    side_value = side.value
+    branches: list[tuple[pl.Expr, pl.Expr]] = []
+    if side_value in columns:
+        branches.append((is_chess_com_expr(), pl.col(side_value).struct.field("rating")))
+    if "players" in columns:
+        branches.append((
+            is_lichess_expr(),
+            pl.col("players").struct.field(side_value).struct.field("rating"),
+        ))
+    return chain_when(branches, default=pl.lit(None))
+
+
+def parse_pgn_tag(pattern: re.Pattern[str], pgn: str | None) -> str | None:
+    """Return the first value for a PGN tag matched by ``pattern``."""
+    if not pgn:
+        return None
+    match = pattern.search(pgn)
+    return match.group(1) if match else None
+
+
+class FilterGamesWithPGNTransformation(DataFrameTransformation):
+    """Drop rows that have no usable PGN (null, empty, or whitespace-only)."""
+
+    PGN_COLUMN = "pgn"
+
+    def transform(self, df: pl.DataFrame) -> pl.DataFrame:
+        if self.PGN_COLUMN not in df.columns:
+            logger.log_and_raise(
+                TransformationError(
+                    f"Column {self.PGN_COLUMN!r} is required to filter games with PGN."
+                )
+            )
+
+        before = df.height
+        try:
+            result = df.filter(
+                pl.col(self.PGN_COLUMN).is_not_null()
+                & (pl.col(self.PGN_COLUMN).str.strip_chars() != "")
+            )
+        except Exception as e:
+            logger.log_and_raise(TransformationError(f"Failed to filter games with PGN: {e}"))
+
+        dropped = before - result.height
+        if dropped:
+            logger.warning(
+                "FilterGamesWithPGNTransformation: dropped %s row(s) without PGN (%s -> %s).",
+                dropped,
+                before,
+                result.height,
+            )
+        return result
 
 
 class ExtractFileMetadataTransformation(DataFrameTransformation):
@@ -125,6 +212,245 @@ class ExtractFileMetadataTransformation(DataFrameTransformation):
         return result
 
 
+class ExtractPlatformGameIdTransformation(DataFrameTransformation):
+    """
+    Extract the platform game ID from the loaded record.
+    Requires:
+    - the input DataFrame to contain the 'platform' column.
+    Returns the input DataFrame with only these columns added (or updated if already present):
+    - platform_game_id (str: the game ID on the platform)
+    """
+
+    def transform(self, df: pl.DataFrame) -> pl.DataFrame:
+        """If the platform is Chess.com, the platform game ID is the "uuid" field in the record.
+        If the platform is Lichess, the platform game ID is the "id" field in the record.
+        """
+        if "platform" not in df.columns:
+            logger.log_and_raise(
+                TransformationError(
+                    "Column 'platform' is required for platform game ID extraction."
+                )
+            )
+        column_names = set(df.columns)
+        branches: list[tuple[pl.Expr, pl.Expr]] = []
+        if "uuid" in column_names:
+            branches.append((is_chess_com_expr(), pl.col("uuid")))
+        if "id" in column_names:
+            branches.append((is_lichess_expr(), pl.col("id")))
+
+        try:
+            df = df.with_columns(
+                platform_game_id=chain_when(branches, default=pl.lit(None).cast(pl.Utf8))
+            )
+        except Exception as e:
+            logger.log_and_raise(TransformationError(f"Failed to extract platform game ID: {e}"))
+
+        failed_rows = df.filter(pl.col("platform_game_id").is_null()).height
+        if failed_rows:
+            logger.log_and_raise(
+                DataError(f"Failed to extract platform game ID for {failed_rows} rows.")
+            )
+        return df
+
+
+class ExtractGameMetadataTransformation(DataFrameTransformation):
+    """
+    Extract the game metadata from the loaded record.
+    Requires:
+    - the input DataFrame to contain the 'platform' column.
+    Returns the input DataFrame with only these columns added (or updated if already present):
+    - variant (str: the variant of the game)
+    - time_control_initial (str: the initial time control of the game)
+    - time_control_increment (str: the increment of the time control of the game)
+    - start_time (timestamp: the start time of the game (UTC))
+    - end_time (timestamp: the end time of the game (UTC))
+    - eco_code (str: the code of the opening)
+    """
+
+    _OUTPUT_COLUMNS = (
+        "variant",
+        "time_control_initial",
+        "time_control_increment",
+        "start_time",
+        "end_time",
+        "eco_code",
+    )
+
+    _PGN_TIME_CONTROL_RE = re.compile(r'\[TimeControl\s+"([^"]+)"\]', re.IGNORECASE)
+    _PGN_UTC_DATE_RE = re.compile(r'\[UTCDate\s+"([^"]+)"\]', re.IGNORECASE)
+    _PGN_UTC_TIME_RE = re.compile(r'\[UTCTime\s+"([^"]+)"\]', re.IGNORECASE)
+    _PGN_ECO_RE = re.compile(r'\[ECO\s+"([^"]+)"\]', re.IGNORECASE)
+
+    _METADATA_STRUCT_DTYPE = pl.Struct({
+        "variant": pl.Utf8,
+        "time_control_initial": pl.Utf8,
+        "time_control_increment": pl.Utf8,
+        "start_time": pl.Datetime(time_zone="UTC"),
+        "end_time": pl.Datetime(time_zone="UTC"),
+        "eco_code": pl.Utf8,
+    })
+
+    @classmethod
+    def _parse_time_control(cls, value: str | None) -> tuple[str | None, str | None]:
+        """Split a PGN TimeControl tag into initial and increment strings."""
+        if not value:
+            return None, None
+        if "+" in value:
+            initial, increment = value.split("+", 1)
+            return initial, increment
+        return value, "0"
+
+    @classmethod
+    def _parse_utc_start(cls, utc_date: str | None, utc_time: str | None) -> datetime | None:
+        """Combine Chess.com PGN UTCDate and UTCTime tags into a UTC datetime."""
+        if not utc_date or not utc_time:
+            return None
+        try:
+            return datetime.strptime(f"{utc_date} {utc_time}", "%Y.%m.%d %H:%M:%S").replace(
+                tzinfo=UTC
+            )
+        except ValueError:
+            return None
+
+    @classmethod
+    def _unix_seconds_to_datetime(cls, timestamp: int | float | None) -> datetime | None:
+        if timestamp is None:
+            return None
+        return datetime.fromtimestamp(timestamp, tz=UTC)
+
+    @classmethod
+    def _unix_millis_to_datetime(cls, timestamp: int | float | None) -> datetime | None:
+        if timestamp is None:
+            return None
+        return datetime.fromtimestamp(timestamp / 1000, tz=UTC)
+
+    _VARIANT_ALIASES: ClassVar[dict[str, str]] = {
+        "chess": "standard",  # Chess.com ``rules`` value → Lichess-style name
+    }
+
+    @classmethod
+    def _normalize_variant(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.lower()
+        return cls._VARIANT_ALIASES.get(normalized, normalized)
+
+    @classmethod
+    def _extract_chess_com_metadata(cls, row: dict) -> dict[str, str | datetime | None]:
+        pgn = row.get("pgn")
+        time_control = parse_pgn_tag(cls._PGN_TIME_CONTROL_RE, pgn)
+        if not time_control:
+            top_level = row.get("time_control")
+            time_control = str(top_level) if top_level is not None else None
+        initial, increment = cls._parse_time_control(time_control)
+        start_time = cls._parse_utc_start(
+            parse_pgn_tag(cls._PGN_UTC_DATE_RE, pgn),
+            parse_pgn_tag(cls._PGN_UTC_TIME_RE, pgn),
+        )
+        end_time_unix_s = row.get("end_time", None)
+        if end_time_unix_s is None:
+            logger.warning("Empty end_time for game %s.", row.get("platform_game_id"))
+        return {
+            "variant": cls._normalize_variant(row.get("rules")),
+            "time_control_initial": initial,
+            "time_control_increment": increment,
+            "start_time": start_time,
+            "end_time": cls._unix_seconds_to_datetime(end_time_unix_s),
+            "eco_code": parse_pgn_tag(cls._PGN_ECO_RE, pgn),
+        }
+
+    @classmethod
+    def _extract_lichess_metadata(cls, row: dict) -> dict[str, str | datetime | None]:
+        clock = row.get("clock") or {}
+        opening = row.get("opening") or {}
+        initial = clock.get("initial")
+        increment = clock.get("increment")
+        end_timestamp = row.get("endedAt")
+        if end_timestamp is None:
+            end_timestamp = row.get("lastMoveAt")
+        return {
+            "variant": cls._normalize_variant(row.get("variant")),
+            "time_control_initial": str(initial) if initial is not None else None,
+            "time_control_increment": str(increment) if increment is not None else None,
+            "start_time": cls._unix_millis_to_datetime(row.get("createdAt")),
+            "end_time": cls._unix_millis_to_datetime(end_timestamp),
+            "eco_code": opening.get("eco"),
+        }
+
+    @classmethod
+    def _extract_game_metadata_row(cls, row: dict) -> dict[str, str | datetime | None]:
+        platform = row.get("platform")
+        try:
+            if platform == AccountPlatform.CHESS_COM.value:
+                metadata = cls._extract_chess_com_metadata(row)
+            elif platform == AccountPlatform.LICHESS.value:
+                metadata = cls._extract_lichess_metadata(row)
+            else:
+                raise DataError(f"Unsupported platform for game metadata extraction: {platform!r}.")
+        except DataError as e:
+            logger.log_and_raise(e)
+        except Exception as e:
+            logger.log_and_raise(TransformationError(f"Failed to extract game metadata: {e}"))
+        return metadata
+
+    def transform(self, df: pl.DataFrame) -> pl.DataFrame:
+        if "platform" not in df.columns:
+            logger.log_and_raise(
+                TransformationError("Column 'platform' is required for game metadata extraction.")
+            )
+
+        unknown_platform = df.filter(~is_chess_com_expr() & ~is_lichess_expr())
+        if unknown_platform.height:
+            platforms = unknown_platform.get_column("platform").unique().to_list()
+            logger.log_and_raise(
+                TransformationError(
+                    f"Unsupported platform value(s) for game metadata extraction: {platforms!r}."
+                )
+            )
+
+        source_columns = [
+            "platform",
+            "rules",
+            "pgn",
+            "time_control",
+            "end_time",
+            "variant",
+            "clock",
+            "opening",
+            "createdAt",
+            "endedAt",
+            "lastMoveAt",
+        ]
+        try:
+            df = df.with_columns(
+                pl.struct([pl.col(column) for column in source_columns if column in df.columns])
+                .map_elements(
+                    self._extract_game_metadata_row,
+                    return_dtype=self._METADATA_STRUCT_DTYPE,
+                )
+                .alias("_game_metadata")
+            )
+            columns_to_replace = [column for column in self._OUTPUT_COLUMNS if column in df.columns]
+            if columns_to_replace:
+                df = df.drop(columns_to_replace)
+            df = df.unnest("_game_metadata")
+        except (TransformationError, DataError) as e:
+            logger.log_and_raise(e)
+        except Exception as e:
+            logger.log_and_raise(TransformationError(f"Failed to extract game metadata: {e}"))
+
+        for column in self._OUTPUT_COLUMNS:
+            failed_rows = df.filter(pl.col(column).is_null()).height
+            if failed_rows:
+                logger.warning(
+                    "ExtractGameMetadataTransformation: %s row(s) have null %s.",
+                    failed_rows,
+                    column,
+                )
+
+        return df
+
+
 class ExtractPlayersAndResultTransformation(DataFrameTransformation):
     """
     Extract the color of the user from the PGN,
@@ -142,9 +468,6 @@ class ExtractPlayersAndResultTransformation(DataFrameTransformation):
     """
 
     _OUTPUT_COLUMNS = ("color", "result", "reason", "user_elo", "opponent_elo")
-
-    CHESS_COM = AccountPlatform.CHESS_COM.value
-    LICHESS = AccountPlatform.LICHESS.value
 
     _PGN_TERMINATION_RE = re.compile(r'\[Termination\s+"([^"]+)"\]', re.IGNORECASE)
     _PGN_RESULT_RE = re.compile(r'\[Result\s+"([^"]+)"\]', re.IGNORECASE)
@@ -208,74 +531,9 @@ class ExtractPlayersAndResultTransformation(DataFrameTransformation):
     _LICHESS_DECISIVE_STATUSES = frozenset({"mate", "resign", "outoftime"})
 
     @classmethod
-    def _is_chess_com(cls) -> pl.Expr:
-        """True when the row is from Chess.com."""
-        return pl.col("platform") == cls.CHESS_COM
-
-    @classmethod
-    def _is_lichess(cls) -> pl.Expr:
-        """True when the row is from Lichess."""
-        return pl.col("platform") == cls.LICHESS
-
-    @classmethod
-    def _chain_when(cls, branches: list[tuple[pl.Expr, pl.Expr]], *, default: pl.Expr) -> pl.Expr:
-        """Fold ``(condition, value)`` pairs into a nested ``pl.when`` chain."""
-        expr = default
-        for condition, value in reversed(branches):
-            expr = pl.when(condition).then(value).otherwise(expr)
-        return expr
-
-    @classmethod
-    def _side_username_expr(cls, columns: set[str], side: Color) -> pl.Expr:
-        """Username for ``side`` (white or black), per platform schema."""
-        side_value = side.value
-        branches: list[tuple[pl.Expr, pl.Expr]] = []
-        if side_value in columns:
-            branches.append((cls._is_chess_com(), pl.col(side_value).struct.field("username")))
-        if "players" in columns:
-            branches.append((
-                cls._is_lichess(),
-                pl.col("players")
-                .struct.field(side_value)
-                .struct.field("user")
-                .struct.field("name"),
-            ))
-        return cls._chain_when(branches, default=pl.lit(None).cast(pl.Utf8))
-
-    @classmethod
-    def _side_rating_expr(cls, columns: set[str], side: Color) -> pl.Expr:
-        """Pre-game rating for ``side`` (white or black), per platform schema. Returns None if the rating is not present."""
-        side_value = side.value
-        branches: list[tuple[pl.Expr, pl.Expr]] = []
-        if side_value in columns:
-            branches.append((cls._is_chess_com(), pl.col(side_value).struct.field("rating")))
-        if "players" in columns:
-            branches.append((
-                cls._is_lichess(),
-                pl.col("players").struct.field(side_value).struct.field("rating"),
-            ))
-        return cls._chain_when(branches, default=pl.lit(None))
-
-    @classmethod
-    def _parse_pgn_termination(cls, pgn: str | None) -> str | None:
-        """Extract the Termination tag value from a PGN string."""
-        if not pgn:
-            return None
-        match = cls._PGN_TERMINATION_RE.search(pgn)
-        return match.group(1) if match else None
-
-    @classmethod
-    def _parse_pgn_result(cls, pgn: str | None) -> str | None:
-        """Extract the Result tag value from a PGN string."""
-        if not pgn:
-            return None
-        match = cls._PGN_RESULT_RE.search(pgn)
-        return match.group(1) if match else None
-
-    @classmethod
     def _result_from_pgn_tag(cls, color: str, pgn: str | None) -> Result | None:
         """Map a PGN Result tag to the user's result from their color."""
-        result_tag = cls._parse_pgn_result(pgn)
+        result_tag = parse_pgn_tag(cls._PGN_RESULT_RE, pgn)
         if result_tag == "1-0":
             return Result.WIN if color == Color.WHITE.value else Result.LOSS
         if result_tag == "0-1":
@@ -296,7 +554,7 @@ class ExtractPlayersAndResultTransformation(DataFrameTransformation):
     @classmethod
     def _lichess_draw_reason_from_pgn(cls, pgn: str | None) -> Reason:
         """Refine a generic Lichess draw using the PGN Termination tag."""
-        termination = cls._parse_pgn_termination(pgn)
+        termination = parse_pgn_tag(cls._PGN_TERMINATION_RE, pgn)
         if termination is None:
             return Reason.OTHER
         return cls._LICHESS_DRAW_TERMINATION_MAP.get(termination, Reason.OTHER)
@@ -432,11 +690,11 @@ class ExtractPlayersAndResultTransformation(DataFrameTransformation):
             raise DataError("Missing player color for result extraction.")
 
         try:
-            if platform == cls.CHESS_COM:
+            if platform == AccountPlatform.CHESS_COM.value:
                 result_reason = cls._extract_chess_com_result_reason(
                     color, row.get("white"), row.get("black")
                 )
-            elif platform == cls.LICHESS:
+            elif platform == AccountPlatform.LICHESS.value:
                 result_reason = cls._extract_lichess_result_reason(
                     color, row.get("status"), row.get("winner"), row.get("pgn")
                 )
@@ -481,7 +739,7 @@ class ExtractPlayersAndResultTransformation(DataFrameTransformation):
                 )
             )
 
-        unknown_platform = df.filter(~self._is_chess_com() & ~self._is_lichess())
+        unknown_platform = df.filter(~is_chess_com_expr() & ~is_lichess_expr())
         if unknown_platform.height:
             platforms = unknown_platform.get_column("platform").unique().to_list()
             logger.log_and_raise(
@@ -494,8 +752,8 @@ class ExtractPlayersAndResultTransformation(DataFrameTransformation):
             # Determine the color of the user and the opponent
             column_names = set(df.columns)
             account_username = pl.col("username").str.to_lowercase()
-            white_username = self._side_username_expr(column_names, Color.WHITE).str.to_lowercase()
-            black_username = self._side_username_expr(column_names, Color.BLACK).str.to_lowercase()
+            white_username = side_username_expr(column_names, Color.WHITE).str.to_lowercase()
+            black_username = side_username_expr(column_names, Color.BLACK).str.to_lowercase()
 
             white_match = account_username == white_username
             black_match = account_username == black_username
@@ -513,11 +771,11 @@ class ExtractPlayersAndResultTransformation(DataFrameTransformation):
                 .then(pl.lit(Color.WHITE.value))
                 .otherwise(pl.lit(Color.BLACK.value)),
                 user_elo=pl.when(pl.col("_white_match"))
-                .then(self._side_rating_expr(column_names, Color.WHITE))
-                .otherwise(self._side_rating_expr(column_names, Color.BLACK)),
+                .then(side_rating_expr(column_names, Color.WHITE))
+                .otherwise(side_rating_expr(column_names, Color.BLACK)),
                 opponent_elo=pl.when(pl.col("_white_match"))
-                .then(self._side_rating_expr(column_names, Color.BLACK))
-                .otherwise(self._side_rating_expr(column_names, Color.WHITE)),
+                .then(side_rating_expr(column_names, Color.BLACK))
+                .otherwise(side_rating_expr(column_names, Color.WHITE)),
             ).drop("_match_count", "_white_match")
         except (TransformationError, DataError) as e:
             logger.log_and_raise(e)

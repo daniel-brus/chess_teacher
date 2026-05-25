@@ -48,7 +48,9 @@ def _python_type_to_data_type(annotation: Any) -> str:
     if annotation is bool:
         return "boolean"
     if annotation is datetime:
-        return "timestamp"
+        return "timestamptz"
+    if annotation is date:
+        return "date"
     if annotation is time:
         return "time"
     if isinstance(annotation, type) and issubclass(annotation, StrEnum):
@@ -369,10 +371,10 @@ class TableDataClass(ABC):
             data = self._to_db_record()
             result = db_client.insert([data], tablemetadata, on_conflict="nothing")
             if result.rows_inserted == 1:
-                logger.info(f"{type(self).__name__} {self.get_where_clause()} saved to database.")
+                logger.debug(f"{type(self).__name__} {self.get_where_clause()} saved to database.")
                 return True
             else:
-                logger.info(
+                logger.debug(
                     f"{type(self).__name__} {self.get_where_clause()} already exists in database."
                 )
         except Exception as e:
@@ -403,7 +405,7 @@ class TableDataClass(ABC):
                 tablemetadata,
                 match_keys=list(tablemetadata.primary_key),
             )
-            logger.info(f"{type(self).__name__} {self.get_where_clause()} saved to database.")
+            logger.debug(f"{type(self).__name__} {self.get_where_clause()} saved to database.")
             return result
         except Exception as e:
             logger.log_and_raise(e)
