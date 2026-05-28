@@ -95,4 +95,4 @@ jobs:
       - uses: ./.github/actions/python-setup
       - name: Run Bandit
         run: |
-          bandit -r src scripts pages streamlit_utils streamlit_app.py -x .venv,venv,build,dist,.pytest_cache,.ruff_cache -ll
+          bandit -c bandit.yaml -r src scripts pages streamlit_utils streamlit_app.py -ll -q
