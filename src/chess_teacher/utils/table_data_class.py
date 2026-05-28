@@ -6,7 +6,17 @@ from datetime import UTC, date, datetime, time
 from enum import StrEnum
 from pathlib import Path
 from types import UnionType
-from typing import TYPE_CHECKING, Any, Self, Union, cast, get_args, get_origin, get_type_hints
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    ClassVar,
+    Self,
+    Union,
+    cast,
+    get_args,
+    get_origin,
+    get_type_hints,
+)
 
 from chess_teacher.utils.exception_utils import ConfigError, DatabaseError, MetadataError
 from chess_teacher.utils.general_utils import (
@@ -48,7 +58,9 @@ def _python_type_to_data_type(annotation: Any) -> str:
     if annotation is bool:
         return "boolean"
     if annotation is datetime:
-        return "timestamp"
+        return "timestamptz"
+    if annotation is date:
+        return "date"
     if annotation is time:
         return "time"
     if isinstance(annotation, type) and issubclass(annotation, StrEnum):
@@ -64,13 +76,14 @@ def _normalize_default_value(value: Any) -> Any:
     return value
 
 
-def _coerce_from_storage(value: Any, annotation: Any) -> Any:
-    annotation = _unwrap_optional_type(annotation)
-    if isinstance(annotation, type) and issubclass(annotation, StrEnum):
-        if isinstance(value, annotation):
-            return value
-        return annotation(value)
-    return value
+def _enum_fields_from_type_hints(type_hints: dict[str, Any]) -> dict[str, type[StrEnum]]:
+    """Build field name -> StrEnum class map from resolved type hints."""
+    enum_fields: dict[str, type[StrEnum]] = {}
+    for name, hint in type_hints.items():
+        inner = _unwrap_optional_type(hint)
+        if isinstance(inner, type) and issubclass(inner, StrEnum):
+            enum_fields[name] = inner
+    return enum_fields
 
 
 def _dataclass_field_default(field: Field[Any]) -> Any:
@@ -103,13 +116,61 @@ def _expected_metadata_default_for_field(field: Field[Any]) -> Any:
 
 
 class TableDataClass(ABC):
+    """
+    Base class for all classes that represent a table in the database.
+    Every child class must implement the following methods:
+    - get_yaml_path(): Path to the table's metadata.yml, usually: Path(__file__).parent / "metadata.yml"
+    - get_key(): Key of the table in the metadata.yml file.
+    - get_id_hash_columns(): Columns (in order)that are hashed to generate the primary key.
+    - get_timestamp_columns(): Columns for which upsert_latest should be called, must be of type datetime.
+    """
+
+    _resolved_type_hints: ClassVar[dict[str, Any] | None] = None
+    _enum_fields: ClassVar[dict[str, type[StrEnum]] | None] = None
+
+    @classmethod
+    def _resolved_hints(cls) -> dict[str, Any]:
+        """Resolve and cache class type hints on first use."""
+        cached = getattr(cls, "_resolved_type_hints", None)
+        if cached is not None:
+            return cached
+        resolved = get_type_hints(cls)
+        cls._resolved_type_hints = resolved
+        return resolved
+
+    @classmethod
+    def _enum_field_map(cls) -> dict[str, type[StrEnum]]:
+        """Resolve and cache StrEnum fields on first use."""
+        cached = getattr(cls, "_enum_fields", None)
+        if cached is not None:
+            return cached
+        enum_fields = _enum_fields_from_type_hints(cls._resolved_hints())
+        cls._enum_fields = enum_fields
+        return enum_fields
+
+    @classmethod
+    def _coerce_field_value(cls, field_name: str, value: Any) -> Any:
+        """Coerce a DB/storage value for one field (e.g. str -> StrEnum)."""
+        enum_cls = cls._enum_field_map().get(field_name)
+        if enum_cls is None:
+            return value
+        if isinstance(value, enum_cls):
+            return value
+        return enum_cls(value)
+
+    @classmethod
+    @abstractmethod
+    def get_yaml_path(cls) -> Path: ...
+
     @classmethod
     @abstractmethod
     def get_key(cls) -> str: ...
 
     @classmethod
     @abstractmethod
-    def get_yaml_path(cls) -> Path: ...
+    def get_id_hash_columns(cls) -> tuple[str, ...]:
+        """Field names (in order) hashed by generate_id into the stored primary key value."""
+        ...
 
     @classmethod
     def get_metadata(cls) -> TableMetadata:
@@ -118,12 +179,6 @@ class TableDataClass(ABC):
     @classmethod
     def get_primary_key_columns(cls) -> tuple[str, ...]:
         return cls.get_metadata().primary_key
-
-    @classmethod
-    @abstractmethod
-    def get_id_hash_columns(cls) -> tuple[str, ...]:
-        """Field names (in order) hashed by generate_id into the stored primary key value."""
-        ...
 
     @classmethod
     def get_timestamp_columns(cls) -> tuple[str, ...]:
@@ -141,7 +196,7 @@ class TableDataClass(ABC):
         dc_names = cls.get_dataclass_field_names()
         meta_names = metadata.column_names()
         columns_by_name = metadata.columns_by_name()
-        type_hints = get_type_hints(cls)
+        type_hints = cls._resolved_hints()
         errors: list[str] = []
 
         only_dc = sorted(dc_names - meta_names)
@@ -213,14 +268,10 @@ class TableDataClass(ABC):
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Self:
         kwargs: dict[str, Any] = {}
-        type_hints = get_type_hints(cls)
         for dataclass_field in _dataclass_fields(cls):
             field_name = dataclass_field.name
             if field_name in data:
-                kwargs[field_name] = _coerce_from_storage(
-                    data[field_name],
-                    type_hints[field_name],
-                )
+                kwargs[field_name] = cls._coerce_field_value(field_name, data[field_name])
             elif dataclass_field.default is not MISSING:
                 kwargs[field_name] = dataclass_field.default
             elif dataclass_field.default_factory is not MISSING:
@@ -360,10 +411,10 @@ class TableDataClass(ABC):
             data = self._to_db_record()
             result = db_client.insert([data], tablemetadata, on_conflict="nothing")
             if result.rows_inserted == 1:
-                logger.info(f"{type(self).__name__} {self.get_where_clause()} saved to database.")
+                logger.debug(f"{type(self).__name__} {self.get_where_clause()} saved to database.")
                 return True
             else:
-                logger.info(
+                logger.debug(
                     f"{type(self).__name__} {self.get_where_clause()} already exists in database."
                 )
         except Exception as e:
@@ -393,11 +444,8 @@ class TableDataClass(ABC):
                 [data],
                 tablemetadata,
                 match_keys=list(tablemetadata.primary_key),
-                when_matched="update",
-                when_not_matched_by_target="insert",
-                when_not_matched_by_source="ignore",
             )
-            logger.info(f"{type(self).__name__} {self.get_where_clause()} saved to database.")
+            logger.debug(f"{type(self).__name__} {self.get_where_clause()} saved to database.")
             return result
         except Exception as e:
             logger.log_and_raise(e)
@@ -421,7 +469,7 @@ class TableDataClass(ABC):
             logger.log_and_raise(
                 ConfigError(
                     f"Illegal field ({field}) for {type(self).__name__}.upsert_latest(); "
-                    f"must be one of: {", ".join(allowed_fields)}."
+                    f"must be one of: {', '.join(allowed_fields)}."
                 )
             )
         self.upsert_field(db_client, field, ts or datetime.now(UTC))

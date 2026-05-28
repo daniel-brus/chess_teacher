@@ -13,6 +13,12 @@ def get_current_datetime(tz: str = "UTC") -> datetime:
     return datetime.now(ZoneInfo(tz))
 
 
+def as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
 def generate_hash(input: str | list[str]) -> str:
     """Generate a sha256hash for the given input string."""
     if isinstance(input, list):

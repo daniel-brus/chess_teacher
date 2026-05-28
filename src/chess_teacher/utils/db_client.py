@@ -4,8 +4,10 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, time
 from enum import StrEnum
 from typing import Any, Literal, overload
+from uuid import uuid4
 
 import polars as pl
+from sqlalchemy import text
 
 from chess_teacher.utils.db_engine import EnrichedEngine, get_db_engine
 from chess_teacher.utils.exception_utils import DatabaseError, MetadataError
@@ -13,9 +15,16 @@ from chess_teacher.utils.general_utils import generate_ident_is_literal, quote_i
 from chess_teacher.utils.logging_utils import get_logger
 from chess_teacher.utils.metadata_utils import TableMetadata
 
+MERGE_COPY_THRESHOLD = 1000
+
 # ---------------------------------------------------------------------------
 # Supporting types
 # ---------------------------------------------------------------------------
+
+
+WhenMatched = Literal["update", "delete", "ignore"]
+WhenNotMatchedByTarget = Literal["insert", "ignore"]
+WhenNotMatchedBySource = Literal["delete", "ignore"]
 
 
 class WriteStrategy(StrEnum):
@@ -23,6 +32,38 @@ class WriteStrategy(StrEnum):
     INSERT_IGNORE = "insert_ignore"
     OVERWRITE = "overwrite"
     MERGE = "merge"
+
+
+@dataclass(frozen=True, slots=True)
+class MergeStrategy:
+    """Postgres MERGE behaviour for matched / unmatched source and target rows."""
+
+    when_matched: WhenMatched = "update"
+    when_not_matched_by_target: WhenNotMatchedByTarget = "insert"
+    when_not_matched_by_source: WhenNotMatchedBySource = "ignore"
+
+    def __post_init__(self) -> None:
+        if (
+            self.when_matched == "ignore"
+            and self.when_not_matched_by_target == "ignore"
+            and self.when_not_matched_by_source == "ignore"
+        ):
+            raise ValueError(
+                "Invalid MergeStrategy: all when_* actions are 'ignore' — "
+                "merge would produce no SQL clauses."
+            )
+
+    @classmethod
+    def upsert(cls) -> MergeStrategy:
+        return cls()
+
+    @classmethod
+    def full_sync(cls) -> MergeStrategy:
+        return cls(when_not_matched_by_source="delete")
+
+    @classmethod
+    def insert_new(cls) -> MergeStrategy:
+        return cls(when_matched="ignore")
 
 
 @dataclass
@@ -150,68 +191,114 @@ def _build_source_cte(records: list[dict], table: TableMetadata) -> str:
     return f"WITH _source({quoted_cols_csv}) AS (\n  VALUES\n    {values_rows}\n)"
 
 
-def _build_merge_sql(
-    records: list[dict],
-    table: TableMetadata,
-    *,
-    match_keys: list[str],
-    when_matched: Literal["update", "delete", "ignore"],
-    when_not_matched_by_target: Literal["insert", "ignore"],
-    when_not_matched_by_source: Literal["delete", "ignore"],
-    match_condition: str | None,
-) -> str:
-    """Build a Postgres 16 MERGE statement using a VALUES CTE as source."""
-    if not records:
-        raise ValueError("Cannot merge empty dataset.")
-    if not match_keys:
-        raise ValueError("merge() requires at least one match_key.")
+def _staging_table_name() -> str:
+    return f"_merge_staging_{uuid4().hex}"
 
-    col_names = list(records[0].keys())
-    non_match_cols = [c for c in col_names if c not in match_keys]
-    quoted_cols_csv = ", ".join(quote_ident(c) for c in col_names)
 
-    source_cte = _build_source_cte(records, table)
+def _build_create_staging_sql(staging_name: str, col_names: list[str], table: TableMetadata) -> str:
+    columns_by_name = table.columns_by_name()
+    col_defs = ", ".join(f"{quote_ident(c)} {columns_by_name[c].data_type}" for c in col_names)
+    return f"CREATE TEMP TABLE {quote_ident(staging_name)} ({col_defs}) ON COMMIT DROP"
 
-    # --- ON clause ---
+
+def _build_join_condition(match_keys: list[str], match_condition: str | None) -> str:
     join_condition = " AND ".join(
         f"_target.{quote_ident(k)} = _source.{quote_ident(k)}" for k in match_keys
     )
     if match_condition:
         join_condition = f"({join_condition}) AND ({match_condition})"
+    return join_condition
+
+
+def _build_count_matched_sql(
+    table: TableMetadata,
+    join_condition: str,
+    *,
+    source_prefix: str = "",
+    source_from: str = "_source",
+) -> str:
+    return (
+        f"{source_prefix}"
+        f"SELECT COUNT(*) AS matched_count\n"
+        f"FROM {source_from}\n"
+        f"WHERE EXISTS (\n"
+        f"  SELECT 1 FROM {table.qualified_name_sql()} _target\n"
+        f"  WHERE {join_condition}\n"
+        f")"
+    )
+
+
+def _build_count_deletes_sql(
+    table: TableMetadata,
+    join_condition: str,
+    *,
+    source_prefix: str = "",
+    source_from: str = "_source",
+) -> str:
+    return (
+        f"{source_prefix}"
+        f"SELECT COUNT(*) AS delete_count\n"
+        f"FROM {table.qualified_name_sql()} _target\n"
+        f"WHERE NOT EXISTS (\n"
+        f"  SELECT 1 FROM {source_from}\n"
+        f"  WHERE {join_condition}\n"
+        f")"
+    )
+
+
+def _build_merge_sql(
+    table: TableMetadata,
+    col_names: list[str],
+    *,
+    match_keys: list[str],
+    strategy: MergeStrategy,
+    match_condition: str | None,
+    source_prefix: str = "",
+    source_using: str = "_source",
+) -> str:
+    """Build a Postgres 16 MERGE statement from an inline CTE or staging table source."""
+    if not col_names:
+        raise ValueError("Cannot merge empty dataset.")
+    if not match_keys:
+        raise ValueError("merge() requires at least one match_key.")
+
+    non_match_cols = [c for c in col_names if c not in match_keys]
+    quoted_cols_csv = ", ".join(quote_ident(c) for c in col_names)
+    join_condition = _build_join_condition(match_keys, match_condition)
 
     merge_head = (
-        f"{source_cte}\n"
+        f"{source_prefix}"
         f"MERGE INTO {table.qualified_name_sql()} AS _target\n"
-        f"USING _source\n"
+        f"USING {source_using}\n"
         f"ON {join_condition}"
     )
 
     clauses: list[str] = []
 
     # WHEN MATCHED
-    if when_matched == "update" and non_match_cols:
+    if strategy.when_matched == "update" and non_match_cols:
         set_clause = ", ".join(
             f"{quote_ident(c)} = _source.{quote_ident(c)}" for c in non_match_cols
         )
         clauses.append(f"WHEN MATCHED THEN\n  UPDATE SET {set_clause}")
-    elif when_matched == "delete":
+    elif strategy.when_matched == "delete":
         clauses.append("WHEN MATCHED THEN\n  DELETE")
     # "ignore" → no WHEN MATCHED clause
 
     # WHEN NOT MATCHED BY TARGET
-    if when_not_matched_by_target == "insert":
+    if strategy.when_not_matched_by_target == "insert":
         clauses.append(
             f"WHEN NOT MATCHED THEN\n"
             f"  INSERT ({quoted_cols_csv})\n"
-            f"  VALUES ({", ".join(f"_source.{quote_ident(c)}" for c in col_names)})"
+            f"  VALUES ({', '.join(f'_source.{quote_ident(c)}' for c in col_names)})"
         )
 
     # WHEN NOT MATCHED BY SOURCE (Postgres 16+)
-    if when_not_matched_by_source == "delete":
+    if strategy.when_not_matched_by_source == "delete":
         clauses.append("WHEN NOT MATCHED BY SOURCE THEN\n  DELETE")
 
     if not clauses:
-        raise ValueError("merge() produced no action clauses — check your when_* parameters.")
+        raise ValueError("merge() produced no action clauses — check MergeStrategy.")
 
     return merge_head + "\n" + "\n".join(clauses) + ";"
 
@@ -259,7 +346,7 @@ class DatabaseClient:
             strategy = (
                 WriteStrategy.APPEND if on_conflict == "error" else WriteStrategy.INSERT_IGNORE
             )
-            self.logger.info("insert → %s: no records to insert", table.qualified_name_sql())
+            self.logger.debug("insert → %s: no records to insert", table.qualified_name_sql())
             return WriteResult(strategy=strategy, rows_inserted=0)
 
         try:
@@ -267,11 +354,11 @@ class DatabaseClient:
             inserted = self.engine.execute_write(sql, records) if records else 0
 
             if on_conflict == "error":
-                self.logger.info(
+                self.logger.debug(
                     "insert → %s: %d rows inserted", table.qualified_name_sql(), inserted
                 )
             else:
-                self.logger.info(
+                self.logger.debug(
                     "insert → %s: %d/%d rows inserted (skipped %d conflicts)",
                     table.qualified_name_sql(),
                     inserted,
@@ -319,30 +406,26 @@ class DatabaseClient:
         data: list[dict] | pl.DataFrame,
         table: TableMetadata,
         *,
+        strategy: MergeStrategy = MergeStrategy.upsert(),
         match_keys: list[str] | None = None,
-        when_matched: Literal["update", "delete", "ignore"] = "update",
-        when_not_matched_by_target: Literal["insert", "ignore"] = "insert",
-        when_not_matched_by_source: Literal["delete", "ignore"] = "ignore",
         match_condition: str | None = None,
+        use_copy: bool = False,
     ) -> WriteResult:
         """Postgres MERGE with row count tracking.
-        # TODO: COPY mode (psycopg3 native, for large loads) instead of merge SQL statement
+
+        Large loads (more than ``MERGE_COPY_THRESHOLD`` rows, or ``use_copy=True``) stage
+        source rows in a temp table via psycopg3 COPY, then MERGE from that table.
 
         Args:
+            strategy: Merge behaviour (defaults to upsert via MergeStrategy.upsert()).
             match_keys: Columns to join on. Defaults to table.primary_key.
-            when_matched: What to do when source row matches target row.
-            when_not_matched_by_target: What to do when source row has no match in target.
-            when_not_matched_by_source: What to do when target row has no match in source.
             match_condition: Optional extra SQL condition appended to the ON clause.
-
-        Common patterns:
-            Upsert:     when_matched="update", when_not_matched_by_target="insert"  (defaults)
-            Full sync:  + when_not_matched_by_source="delete"
-            Insert-new: when_matched="ignore", when_not_matched_by_target="insert"
+            use_copy: When True, always use COPY staging. When False, staging is still used
+                if the record count exceeds ``MERGE_COPY_THRESHOLD``.
         """
         records = _to_records(data)
         if not records:
-            self.logger.info("merge → %s: no records to merge", table.qualified_name_sql())
+            self.logger.debug("merge → %s: no records to merge", table.qualified_name_sql())
             return WriteResult(strategy=WriteStrategy.MERGE)
 
         resolved_keys = match_keys or list(table.primary_key)
@@ -351,27 +434,37 @@ class DatabaseClient:
                 ValueError("merge() requires match_keys or a primary_key defined on TableMetadata.")
             )
 
+        use_staging = use_copy or len(records) > MERGE_COPY_THRESHOLD
+        source_mode = "copy" if use_staging else "inline"
+
         try:
-            # Count matched and delete rows using helper methods
-            matched_count = self._count_matches(records, table, resolved_keys, match_condition)
-            non_matched_count = len(records) - matched_count
-
-            deleted_count = 0
-            if when_not_matched_by_source == "delete":
-                deleted_count = self._count_deletes(records, table, resolved_keys, match_condition)
-
-            # Execute the actual merge
-            sql = _build_merge_sql(
-                records,
-                table,
-                match_keys=resolved_keys,
-                when_matched=when_matched,
-                when_not_matched_by_target=when_not_matched_by_target,
-                when_not_matched_by_source=when_not_matched_by_source,
-                match_condition=match_condition,
-            )
-
-            self.engine.execute_statements([sql])
+            if use_staging:
+                matched_count, deleted_count = self._merge_via_copy(
+                    records,
+                    table,
+                    resolved_keys=resolved_keys,
+                    strategy=strategy,
+                    match_condition=match_condition,
+                )
+            else:
+                matched_count = self._count_matches(records, table, resolved_keys, match_condition)
+                deleted_count = 0
+                if strategy.when_not_matched_by_source == "delete":
+                    deleted_count = self._count_deletes(
+                        records, table, resolved_keys, match_condition
+                    )
+                col_names = list(records[0].keys())
+                source_prefix = _build_source_cte(records, table) + "\n"
+                sql = _build_merge_sql(
+                    table,
+                    col_names,
+                    match_keys=resolved_keys,
+                    strategy=strategy,
+                    match_condition=match_condition,
+                    source_prefix=source_prefix,
+                    source_using="_source",
+                )
+                self.engine.execute_statements([sql])
         except Exception as e:
             self.logger.log_and_raise(
                 DatabaseError(
@@ -379,19 +472,18 @@ class DatabaseClient:
                 )
             )
 
-        # Determine rows_inserted based on when_not_matched_by_target
-        rows_inserted = non_matched_count if when_not_matched_by_target == "insert" else 0
+        non_matched_count = len(records) - matched_count
+        rows_inserted = non_matched_count if strategy.when_not_matched_by_target == "insert" else 0
+        rows_updated = matched_count if strategy.when_matched == "update" else 0
 
-        # Determine rows_updated based on when_matched
-        rows_updated = matched_count if when_matched == "update" else 0
-
-        self.logger.info(
-            "merge → %s: inserted=%d, updated=%d, deleted=%d (source=%d records)",
+        self.logger.debug(
+            "merge → %s: inserted=%d, updated=%d, deleted=%d (source=%d records, mode=%s)",
             table.qualified_name_sql(),
             rows_inserted,
             rows_updated,
             deleted_count,
             len(records),
+            source_mode,
         )
         return WriteResult(
             strategy=WriteStrategy.MERGE,
@@ -437,7 +529,9 @@ class DatabaseClient:
                     f"Error occurred while updating data in {table.qualified_name_sql()}: {e}"
                 )
             )
-        self.logger.info("update_where → %s: %d rows updated", table.qualified_name_sql(), affected)
+        self.logger.debug(
+            "update_where → %s: %d rows updated", table.qualified_name_sql(), affected
+        )
         return affected
 
     def delete_where(
@@ -463,7 +557,9 @@ class DatabaseClient:
                     f"Error occurred while deleting data from {table.qualified_name_sql()}: {e}"
                 )
             )
-        self.logger.info("delete_where → %s: %d rows deleted", table.qualified_name_sql(), affected)
+        self.logger.debug(
+            "delete_where → %s: %d rows deleted", table.qualified_name_sql(), affected
+        )
         return affected
 
     # ------------------------------------------------------------------
@@ -604,7 +700,7 @@ class DatabaseClient:
         where_clause = ""
         try:
             if where is not None:
-                where_clause = f"WHERE {_require_where(where, "get_row_count")}"
+                where_clause = f"WHERE {_require_where(where, 'get_row_count')}"
 
             sql = f"SELECT COUNT(*) FROM {table.qualified_name_sql()} {where_clause};"
             result = self.engine.execute_parameterized_query(sql, {})
@@ -648,7 +744,7 @@ class DatabaseClient:
             self.logger.log_and_raise(
                 DatabaseError(f"Error occurred while ensuring schema for {table.schema_name}: {e}")
             )
-        self.logger.info("ensure_schema → %s: ok", table.schema_name)
+        self.logger.debug("ensure_schema → %s: ok", table.schema_name)
 
     def ensure_table(self, table: TableMetadata) -> None:
         """Create table if it does not exist. No-op if already present.
@@ -666,7 +762,7 @@ class DatabaseClient:
                     f"Error occurred while ensuring table for {table.qualified_name_sql()}: {e}"
                 )
             )
-        self.logger.info("ensure_table → %s: ok", table.qualified_name_sql())
+        self.logger.debug("ensure_table → %s: ok", table.qualified_name_sql())
 
     def ensure_metadata(self, table: TableMetadata) -> None:
         """Reconcile the live table definition against TableMetadata.
@@ -692,7 +788,7 @@ class DatabaseClient:
         diff = self.schema_diff(table)
 
         if diff.is_match:
-            self.logger.info(
+            self.logger.debug(
                 "ensure_metadata → %s: schema matches, nothing to do", table.qualified_name_sql()
             )
             return
@@ -744,9 +840,11 @@ class DatabaseClient:
         try:
             self.engine.execute_statements(statements)
         except Exception as e:
-            raise MetadataError(
-                f"ensure_metadata failed while applying schema changes to {qname}: {e}"
-            ) from e
+            self.logger.log_and_raise(
+                DatabaseError(
+                    f"ensure_metadata failed while applying schema changes to {qname}: {e}"
+                )
+            )
 
         # Sync comments separately (COMMENT ON is not transactional in PG)
         comment_stmts = table.comment_sql()
@@ -839,7 +937,7 @@ class DatabaseClient:
         sql += ";"
 
         rows = self.engine.execute_parameterized_query(sql, {})
-        self.logger.info("read → %s: %d rows returned", table.qualified_name_sql(), len(rows))
+        self.logger.debug("read → %s: %d rows returned", table.qualified_name_sql(), len(rows))
 
         if as_polars:
             return pl.DataFrame(rows)
@@ -878,6 +976,14 @@ class DatabaseClient:
             f")"
         )
 
+        join_condition = _build_join_condition(resolved_keys, match_condition)
+        source_prefix = _build_source_cte(records, table) + "\n"
+        count_matched_sql = _build_count_matched_sql(
+            table,
+            join_condition,
+            source_prefix=source_prefix,
+            source_from="_source",
+        )
         result = self.engine.execute_parameterized_query(count_matched_sql, {})
         return result[0]["matched_count"] if result else 0
 
@@ -912,6 +1018,72 @@ class DatabaseClient:
 
         result = self.engine.execute_parameterized_query(count_unmatched_target_sql, {})
         return result[0]["delete_count"] if result else 0
+        join_condition = _build_join_condition(resolved_keys, match_condition)
+        source_prefix = _build_source_cte(records, table) + "\n"
+        count_unmatched_target_sql = _build_count_deletes_sql(
+            table,
+            join_condition,
+            source_prefix=source_prefix,
+            source_from="_source",
+        )
+        result = self.engine.execute_parameterized_query(count_unmatched_target_sql, {})
+        return result[0]["delete_count"] if result else 0
+
+    def _merge_via_copy(
+        self,
+        records: list[dict],
+        table: TableMetadata,
+        *,
+        resolved_keys: list[str],
+        strategy: MergeStrategy,
+        match_condition: str | None,
+    ) -> tuple[int, int]:
+        """Stage source rows with COPY, then count and MERGE in one transaction."""
+        staging_name = _staging_table_name()
+        col_names = list(records[0].keys())
+        join_condition = _build_join_condition(resolved_keys, match_condition)
+        staging_from = f"{quote_ident(staging_name)} AS _source"
+        staging_using = staging_from
+
+        create_sql = _build_create_staging_sql(staging_name, col_names, table)
+        count_matched_sql = _build_count_matched_sql(
+            table, join_condition, source_from=staging_from
+        )
+        count_deletes_sql = _build_count_deletes_sql(
+            table, join_condition, source_from=staging_from
+        )
+        merge_sql = _build_merge_sql(
+            table,
+            col_names,
+            match_keys=resolved_keys,
+            strategy=strategy,
+            match_condition=match_condition,
+            source_using=staging_using,
+        )
+
+        try:
+            with self.engine.begin() as conn:
+                conn.execute(text(create_sql))
+                self.engine.copy_records(conn, staging_name, col_names, records)
+
+                matched_row = conn.execute(text(count_matched_sql)).mappings().first()
+                matched_count = int(matched_row["matched_count"]) if matched_row else 0
+
+                deleted_count = 0
+                if strategy.when_not_matched_by_source == "delete":
+                    delete_row = conn.execute(text(count_deletes_sql)).mappings().first()
+                    deleted_count = int(delete_row["delete_count"]) if delete_row else 0
+
+                conn.execute(text(merge_sql))
+        except Exception as e:
+            self.logger.log_and_raise(
+                DatabaseError(
+                    f"Error occurred while COPY merge into {table.qualified_name_sql()} "
+                    f"(staging={staging_name}): {e}"
+                )
+            )
+
+        return matched_count, deleted_count
 
 
 def get_db_client(engine: EnrichedEngine | None = None) -> DatabaseClient:

@@ -1,0 +1,74 @@
+tables:
+  raw_games:
+    schema: games
+    table: raw_games
+    comment: Raw games data
+    primary_key:
+      - game_id
+    columns:
+      - name: game_id
+        data_type: text
+        nullable: false
+        comment: Game ID in the database
+      - name: platform_game_id
+        data_type: text
+        nullable: false
+        comment: Game ID on the platform
+      - name: account_id
+        data_type: text
+        nullable: false
+        comment: Account ID of the account that the game belongs to. Can be used to obtain platform and username.
+
+      - name: pgn
+        data_type: text
+        nullable: false
+        comment: PGN of the game, as loaded from the source API.
+
+      # Added by ExtractGameMetadataTransformation
+      - name: variant
+        data_type: text
+        nullable: false
+        default: "standard"
+        comment: Variant of the game
+      - name: time_control_initial
+        data_type: integer
+        nullable: true
+        comment: Initial time control of the game (seconds)
+      - name: time_control_increment
+        data_type: integer
+        nullable: true
+        comment: Increment of the time control of the game (seconds)
+      - name: start_time
+        data_type: timestamptz
+        nullable: true
+        comment: Start time of the game
+      - name: end_time
+        data_type: timestamptz
+        nullable: true
+        comment: End time of the game
+      - name: eco_code
+        data_type: text
+        nullable: true
+        comment: ECO code of the opening (classification)
+
+      # Added by ExtractPlayersAndResultTransformation
+      - name: color
+        data_type: text
+        nullable: false
+        comment: Color of the user in the game
+      - name: result
+        data_type: text
+        nullable: false
+        comment: Result of the game from the user's perspective
+      - name: reason
+        data_type: text
+        nullable: false
+        comment: Reason for the result
+      - name: user_elo
+        data_type: integer
+        nullable: true
+        comment: User's ELO rating at the start of the game
+      - name: opponent_elo
+        data_type: integer
+        nullable: true
+        comment: Opponent's ELO rating at the start of the game

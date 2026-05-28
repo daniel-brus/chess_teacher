@@ -2,8 +2,8 @@
 
 import streamlit as st
 
-from streamlit_utils.login import LoginScreen
-from streamlit_utils.session_state import force_logout, get_current_user
+from streamlit_utils.login import require_authenticated_user
+from streamlit_utils.session_state import force_logout
 
 st.set_page_config(
     page_title="Chess Teacher",
@@ -11,16 +11,14 @@ st.set_page_config(
     layout="centered",
 )
 
-LoginScreen().display()
-if "current_user" not in st.session_state.keys():
-    st.stop()
-user = get_current_user()
+user = require_authenticated_user()
 
 pages = [
-    st.Page("pages/home.py", title="Home"),
-    st.Page("pages/pipeline.py", title="Pipeline"),
-    st.Page("pages/play.py", title="Play"),
-    st.Page("pages/settings.py", title="Settings"),
+    st.Page("streamlit_pages/home.py", title="Home"),
+    st.Page("streamlit_pages/pipeline.py", title="Pipeline"),
+    st.Page("streamlit_pages/play.py", title="Play"),
+    st.Page("streamlit_pages/statistics.py", title="Statistics"),
+    st.Page("streamlit_pages/settings.py", title="Settings"),
 ]
 
 pg = st.navigation(pages, position="sidebar", expanded=False)
@@ -32,6 +30,6 @@ with st.sidebar:
         st.markdown(":chess_pawn:")
 
     if st.button("Logout"):
-        force_logout()  # clear + rerun → LoginScreen pakt het op
+        force_logout()
 
 pg.run()
