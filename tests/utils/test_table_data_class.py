@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from chess_teacher.ingestion.raw_games import RawGame
-from chess_teacher.pipelines.pipeline_base import PipelineRunResult, PipelineRunStepResult
+from chess_teacher.pipelines.pipeline_helpers import PipelineRunResult, PipelineRunStepResult
 from chess_teacher.platform.account import Account
 from chess_teacher.platform.user import User
 from chess_teacher.platform.users_accounts import UserAccount

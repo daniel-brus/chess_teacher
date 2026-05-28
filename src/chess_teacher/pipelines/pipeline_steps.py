@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from enum import StrEnum
 from pathlib import Path
 from typing import ClassVar
@@ -30,13 +31,13 @@ class LoadingStrategy(StrEnum):
     MERGE = "merge"
 
 
-# TODO: add try-except logic, error handling
+MetadataTransformationFactory = Callable[[type[TableDataClass]], DataFrameTransformation]
 
 
 class LoadToDatabaseStep(PipelineStep):
     """Load data from arbitrary source into a table."""
 
-    DEFAULT_TRANSFORMATIONS: ClassVar[list[type[DataFrameTransformation]]] = [
+    DEFAULT_TRANSFORMATIONS: ClassVar[list[MetadataTransformationFactory]] = [
         CastDataTypeTransformation,
         FilterColumnsTransformation,
     ]
@@ -55,11 +56,13 @@ class LoadToDatabaseStep(PipelineStep):
         super().__init__(name=name)
         self.data_class = data_class
         self.table_metadata = data_class.get_metadata()
+
         # apply metadata-dependent transformations after the user-provided transformations
         default_transformations = [
             transformation(data_class) for transformation in self.DEFAULT_TRANSFORMATIONS
         ]
         self.transformations = transformations + default_transformations
+
         self.loading_strategy = loading_strategy
         # load strategy-specific configurations
         if loading_strategy == LoadingStrategy.MERGE:
@@ -71,7 +74,7 @@ class LoadToDatabaseStep(PipelineStep):
     def run(self, db_client: DatabaseClient, context: PipelineContext) -> None:
         table = self.table_metadata.qualified_name_sql()
         self.logger.info(
-            f"[{self.name}] Loading into {table} " f"(strategy={self.loading_strategy.value})."
+            f"[{self.name}] Loading into {table} (strategy={self.loading_strategy.value})."
         )
         if self.loading_strategy == LoadingStrategy.MERGE:
             merge_label = self.merge_strategy
@@ -83,11 +86,14 @@ class LoadToDatabaseStep(PipelineStep):
             )
 
         # Load records from specified source
-        df = self._load_records(db_client)
+        df = self._load_records(db_client, context)
         self.logger.info(f"[{self.name}] Loaded {df.height} rows, {df.width} columns.")
+        context.progress_update(f"Loaded {df.height} record{'s' if df.height != 1 else ''}.")
 
         if df.height == 0:
             self.logger.warning(f"[{self.name}] Source returned no rows.")
+            context.progress_pop()
+            context.progress_warning(f"No records to load into table {table}. Continuing...")
             if self.loading_strategy == LoadingStrategy.OVERWRITE:
                 self.logger.warning(
                     f"[{self.name}] Overwrite will truncate {table} and leave it empty."
@@ -97,9 +103,13 @@ class LoadToDatabaseStep(PipelineStep):
                 return
 
         # Apply transformations to the loaded data
+        transform_total = len(self.transformations)
         for index, transformation in enumerate(self.transformations, start=1):
             before_rows = df.height
             transform_name = type(transformation).__name__
+            context.progress_update(
+                f"Transformation {index}/{transform_total}: {transform_name}..."
+            )
             df = transformation.transform(df)
             self.logger.info(
                 f"[{self.name}] Transformation {index}/{len(self.transformations)} "
@@ -107,16 +117,20 @@ class LoadToDatabaseStep(PipelineStep):
             )
 
         # Save the transformed data to the target table
+        context.progress_update(
+            f"Saving {df.height} record{'s' if df.height != 1 else ''} to {table}..."
+        )
         result = self._save_records(db_client, self.table_metadata, df)
         self.logger.info(
             f"[{self.name}] Saved to {table}: "
             f"inserted={result.rows_inserted}, updated={result.rows_updated}, "
             f"deleted={result.rows_deleted}."
         )
-
-    def _load_records(self, db_client: DatabaseClient) -> pl.DataFrame:
-        """Load records from the source into a Polars DataFrame."""
-        raise NotImplementedError
+        context.progress_pop()
+        context.progress_success(
+            f"Saved records to {table}: {result.rows_inserted} inserted, "
+            f"{result.rows_updated} updated, {result.rows_deleted} deleted."
+        )
 
     def _save_records(
         self,
@@ -140,7 +154,11 @@ class LoadToDatabaseStep(PipelineStep):
                 case LoadingStrategy.INSERT_IGNORE:
                     return db_client.insert(data, table_metadata, on_conflict="nothing")
                 case LoadingStrategy.OVERWRITE:
-                    return db_client.overwrite(data, table_metadata, self.cascade)
+                    return db_client.overwrite(
+                        data,
+                        table_metadata,
+                        cascade=self.cascade if self.cascade is not None else False,
+                    )
                 case LoadingStrategy.MERGE:
                     return db_client.merge(
                         data,
@@ -152,6 +170,11 @@ class LoadToDatabaseStep(PipelineStep):
                     raise ValueError(f"Unsupported loading strategy: {self.loading_strategy.value}")
         except Exception as e:
             self.logger.log_and_raise(e)
+            raise
+
+    def _load_records(self, db_client: DatabaseClient, context: PipelineContext) -> pl.DataFrame:
+        """Load records from the source into a Polars DataFrame."""
+        raise NotImplementedError
 
 
 class TransformStep(LoadToDatabaseStep):
@@ -180,9 +203,11 @@ class TransformStep(LoadToDatabaseStep):
         )
         self.source_table_metadata = source_data_class.get_metadata()
 
-    def _load_records(self, db_client: DatabaseClient) -> pl.DataFrame:
+    def _load_records(self, db_client: DatabaseClient, context: PipelineContext) -> pl.DataFrame:
         """Load records from the source table into a Polars DataFrame."""
-        return db_client.read(self.source_table_metadata)
+        source = self.source_table_metadata.qualified_name_sql()
+        context.progress_update(f"Reading records from {source}...")
+        return db_client.read(self.source_table_metadata, as_polars=True)
 
 
 class StorageToTableStep(LoadToDatabaseStep):
@@ -196,7 +221,8 @@ class StorageToTableStep(LoadToDatabaseStep):
               (including subdirectories) are loaded and concatenated.
         file_type: File format to load (also used as the required suffix, e.g. ``.jsonl``).
         quarantine_path: When set, files that fail to load or whose batch fails to save
-            are moved here. Successfully saved files are left in place (use a follow-up
+            are moved here, preserving relative paths under ``storage_path`` (same layout
+            as archive). Successfully saved files are left in place (use a follow-up
             archive step to move them to backup storage).
         glob_pattern: Optional regex applied to each candidate path (POSIX form).
     """
@@ -238,8 +264,22 @@ class StorageToTableStep(LoadToDatabaseStep):
         self.file_loader: FileLoader = FileLoaderFactory.get_loader(file_type, logger=self.logger)
         self._loaded_paths: list[Path] = []
 
+    def _resolve_storage_paths(self, db_client: DatabaseClient, context: PipelineContext) -> None:
+        """
+        Override when ``storage_path`` or ``quarantine_path`` depend on runtime context.
+
+        Defaults to values set in ``__init__``. Subclasses typically set both paths
+        together (e.g. ingested source + failed quarantine for the same account).
+        """
+
     def run(self, db_client: DatabaseClient, context: PipelineContext) -> None:
-        """Load, transform, and save; quarantine source files if anything fails after load."""
+        """
+        Load, transform, and save; quarantine source files on load or save failure.
+
+        Per-file load failures quarantine that file only. Transform/save failures
+        quarantine all paths recorded in ``_loaded_paths``.
+        """
+        self._resolve_storage_paths(db_client, context)
         self._loaded_paths = []
         try:
             super().run(db_client, context)
@@ -249,10 +289,15 @@ class StorageToTableStep(LoadToDatabaseStep):
 
     def _quarantine_destination(self, source: Path) -> Path:
         assert self.quarantine_path is not None
-        destination = self.quarantine_path / source.name
+        storage_root = Path(self.storage_path)
+        if self.recursive:
+            relative = source.relative_to(storage_root)
+        else:
+            relative = Path(source.name)
+        destination = self.quarantine_path / relative
         if not destination.exists():
             return destination
-        return self.quarantine_path / f"{source.stem}_{uuid4().hex}{source.suffix}"
+        return destination.with_name(f"{destination.stem}_{uuid4().hex}{destination.suffix}")
 
     def _quarantine_paths(self, paths: list[Path]) -> None:
         if self.quarantine_path is None:
@@ -273,7 +318,7 @@ class StorageToTableStep(LoadToDatabaseStep):
             except Exception as e:
                 self.logger.error(f"[{self.name}] Failed to quarantine {path}: {e}")
 
-    def _load_records(self, db_client: DatabaseClient) -> pl.DataFrame:
+    def _load_records(self, db_client: DatabaseClient, context: PipelineContext) -> pl.DataFrame:
         """Load records from storage into a Polars DataFrame."""
         paths = discover_files(
             Path(self.storage_path),
@@ -289,10 +334,17 @@ class StorageToTableStep(LoadToDatabaseStep):
                 f"(recursive={self.recursive}, suffix=.{self.file_type.value}, "
                 f"glob_pattern={self.glob_pattern!r})."
             )
+            context.progress_pop()
+            context.progress_warning("No files found to extract records from.")
             return pl.DataFrame()
 
+        file_total = len(paths)
+        context.progress_update(
+            f"Found {file_total} file {'s' if file_total != 1 else ''} to load."
+        )
         records: list[dict] = []
-        for path in paths:
+        for file_index, path in enumerate(paths, start=1):
+            context.progress_update(f"Loading file {file_index}/{file_total}...")
             self.logger.info(f"[{self.name}] Loading {path}.")
             try:
                 file_records = self.file_loader.load(path)
@@ -311,11 +363,15 @@ class StorageToTableStep(LoadToDatabaseStep):
                     record["_ingestion_ts"] = ingestion_ts
                 records.extend(file_records)
                 self._loaded_paths.append(path)
+                self.logger.info(f"[{self.name}] Added metadata to {path}.")
             except Exception as e:
                 self.logger.warning(f"[{self.name}] Failed to add metadata to {path}: {e}")
                 self._quarantine_paths([path])
-            self.logger.info(f"[{self.name}] Added metadata to {path}.")
         self.logger.info(f"[{self.name}] Loaded {len(records)} records from {len(paths)} paths.")
+        context.progress_update(
+            f"Loaded {len(records)} record{'s' if len(records) != 1 else ''}. "
+            f"Processed {len(self._loaded_paths)}/{len(paths)} file{'s' if len(self._loaded_paths) != 1 else ''} successfully."
+        )
 
         df = pl.DataFrame(records)
         return df

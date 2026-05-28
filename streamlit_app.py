@@ -14,10 +14,11 @@ st.set_page_config(
 user = require_authenticated_user()
 
 pages = [
-    st.Page("views/home.py", title="Home"),
-    st.Page("views/pipeline.py", title="Pipeline"),
-    st.Page("views/play.py", title="Play"),
-    st.Page("views/settings.py", title="Settings"),
+    st.Page("streamlit_pages/home.py", title="Home"),
+    st.Page("streamlit_pages/pipeline.py", title="Pipeline"),
+    st.Page("streamlit_pages/play.py", title="Play"),
+    st.Page("streamlit_pages/statistics.py", title="Statistics"),
+    st.Page("streamlit_pages/settings.py", title="Settings"),
 ]
 
 pg = st.navigation(pages, position="sidebar", expanded=False)

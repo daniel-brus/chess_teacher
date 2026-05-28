@@ -40,3 +40,7 @@ class DataError(Exception):
 
 class TransformationError(PipelineError):
     pass
+
+
+class PipelineLockError(PipelineError):
+    pass

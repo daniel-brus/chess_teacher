@@ -62,7 +62,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/python-setup
       - name: Run linter
-        run: ruff check src scripts tests pages streamlit_utils streamlit_app.py
+        run: ruff check src scripts tests streamlit_pages streamlit_utils streamlit_app.py
 
   type-check:
     runs-on: ubuntu-latest
@@ -95,4 +95,4 @@ jobs:
       - uses: ./.github/actions/python-setup
       - name: Run Bandit
         run: |
-          bandit -r src scripts pages streamlit_utils streamlit_app.py -x .venv,venv,build,dist,.pytest_cache,.ruff_cache -ll
+          bandit -r src scripts streamlit_pages streamlit_utils streamlit_app.py -x .venv,venv,build,dist,.pytest_cache,.ruff_cache -ll

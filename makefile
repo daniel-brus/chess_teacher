@@ -2,11 +2,11 @@
 
 # New CMD window (detached from make); logs appear in that window, not here.
 streamlit:
-	cmd /c start "Streamlit" cmd /k "cd /d $(CURDIR) && .venv\Scripts\activate.bat && streamlit run streamlit_app.py"
+	cmd /c start "Streamlit" cmd /k "cd /d $(CURDIR) && make streamlit_fg
 
 # Foreground in this terminal (logs here; use with venv already activated).
 streamlit_fg:
-	streamlit run streamlit_app.py
+	.venv\Scripts\activate.bat && make db_up && streamlit run streamlit_app.py
 
 db_up:
 	docker compose -f orchestration/docker/docker-compose.yml --env-file .env up -d

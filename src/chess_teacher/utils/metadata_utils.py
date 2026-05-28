@@ -5,7 +5,7 @@ import logging
 from dataclasses import dataclass, field
 from datetime import date, datetime, time
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import polars as pl
 
@@ -28,26 +28,29 @@ def _resolve_dataframe_column(df: pl.DataFrame, column_name: str) -> str:
     raise KeyError(column_name)
 
 
-_POSTGRES_TO_POLARS: dict[str, pl.DataType] = {
-    "text": pl.Utf8,
-    "varchar": pl.Utf8,
-    "character varying": pl.Utf8,
-    "char": pl.Utf8,
-    "character": pl.Utf8,
-    "integer": pl.Int64,
-    "int": pl.Int64,
-    "int4": pl.Int64,
-    "bigint": pl.Int64,
-    "int8": pl.Int64,
-    "boolean": pl.Boolean,
-    "bool": pl.Boolean,
-    "date": pl.Date,
-    "timestamp": pl.Datetime(),
-    "timestamp without time zone": pl.Datetime(),
-    "timestamptz": pl.Datetime(time_zone="UTC"),
-    "timestamp with time zone": pl.Datetime(time_zone="UTC"),
-    "time": pl.Time,
-}
+_POSTGRES_TO_POLARS: dict[str, pl.DataType] = cast(
+    dict[str, pl.DataType],
+    {
+        "text": pl.Utf8,
+        "varchar": pl.Utf8,
+        "character varying": pl.Utf8,
+        "char": pl.Utf8,
+        "character": pl.Utf8,
+        "integer": pl.Int64,
+        "int": pl.Int64,
+        "int4": pl.Int64,
+        "bigint": pl.Int64,
+        "int8": pl.Int64,
+        "boolean": pl.Boolean,
+        "bool": pl.Boolean,
+        "date": pl.Date,
+        "timestamp": pl.Datetime(),
+        "timestamp without time zone": pl.Datetime(),
+        "timestamptz": pl.Datetime(time_zone="UTC"),
+        "timestamp with time zone": pl.Datetime(time_zone="UTC"),
+        "time": pl.Time,
+    },
+)
 
 
 def postgres_type_to_polars(data_type: str) -> pl.DataType:
@@ -355,6 +358,7 @@ class TableMetadata:
             )
 
     def qualified_name_sql(self) -> str:
+        """Return the full name of the table in the format "schema.table"."""
         return f"{quote_ident(self.schema_name)}.{quote_ident(self.table_name)}"
 
     def create_table_sql(self, *, if_not_exists: bool = True) -> str:

@@ -4,155 +4,74 @@ from __future__ import annotations
 
 import time
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from enum import StrEnum
-from pathlib import Path
 from uuid import uuid4
 
+from chess_teacher.pipelines.pipeline_helpers import (
+    PipelineResult,
+    PipelineRunResult,
+    PipelineRunStepResult,
+    ProgressWindow,
+    StepResult,
+)
 from chess_teacher.utils.db_client import DatabaseClient, get_db_client
-from chess_teacher.utils.exception_utils import DatabaseError, PipelineError
-from chess_teacher.utils.general_utils import generate_ident_is_literal, get_current_datetime
+from chess_teacher.utils.exception_utils import DatabaseError, PipelineError, PipelineLockError
+from chess_teacher.utils.general_utils import (
+    as_utc,
+    generate_ident_is_literal,
+    get_current_datetime,
+)
 from chess_teacher.utils.logging_utils import EnhancedLogger, get_logger
-from chess_teacher.utils.table_data_class import TableDataClass
 
-# ---------------------------------------------------------------------------
-# Enums & result types
-# ---------------------------------------------------------------------------
-
-
-class PipelineResult(StrEnum):
-    SUCCESS = "success"
-    FAILURE = "failure"
-    PARTIAL = "partial"
-    IN_PROGRESS = "in_progress"
-
-
-# Sentinel: finished_at value written to DB to signal an active (locked) run.
+# Sentinel value for finished_at column to signal an active (locked) run.
 _LOCK_EPOCH: datetime = datetime(1970, 1, 1, tzinfo=UTC)
 
 # Default stale-lock timeout.
 _DEFAULT_LOCK_TIMEOUT_HOURS: float = 1.0
 
-
-def _as_utc(value: datetime) -> datetime:
-    if value.tzinfo is None:
-        return value.replace(tzinfo=UTC)
-    return value.astimezone(UTC)
-
-
-@dataclass(frozen=True)
-class PipelineContext:
-    user_id: str | None = None
-    account_id: str | None = None
-
-
-@dataclass(frozen=True)
-class StepResult:
-    name: str
-    result: PipelineResult
-    started_at: datetime
-    finished_at: datetime
-    error_message: str | None = None
-
-    @property
-    def duration_seconds(self) -> float:
-        return (self.finished_at - self.started_at).total_seconds()
-
-
-@dataclass(frozen=True)
-class PipelineRunResult(TableDataClass):
-    run_id: str
-    name: str
-    user_id: str | None
-    account_id: str | None
-    result: PipelineResult
-    started_at: datetime
-    finished_at: datetime
-    step_results: tuple[StepResult, ...] = field(
-        default_factory=tuple,
-        metadata={"persist": False},
-    )
-
-    @property
-    def error_messages(self) -> tuple[str, ...]:
-        return tuple(
-            f"{sr.name}: {sr.error_message}" for sr in self.step_results if sr.error_message
-        )
-
-    @property
-    def duration_seconds(self) -> float:
-        return (self.finished_at - self.started_at).total_seconds()
-
-    @classmethod
-    def get_key(cls) -> str:
-        return "pipeline_runs"
-
-    @classmethod
-    def get_yaml_path(cls) -> Path:
-        return Path(__file__).parent / "metadata.yml"
-
-    @classmethod
-    def get_id_hash_columns(cls) -> tuple[str, ...]:
-        return ()
-
-
-@dataclass(frozen=True)
-class PipelineRunStepResult(TableDataClass):
-    run_id: str
-    step_order: int
-    name: str
-    result: PipelineResult
-    started_at: datetime
-    finished_at: datetime
-    error_message: str | None = None
-
-    @property
-    def duration_seconds(self) -> float:
-        return (self.finished_at - self.started_at).total_seconds()
-
-    @classmethod
-    def from_step_result(
-        cls,
-        *,
-        run_id: str,
-        step_order: int,
-        step_result: StepResult,
-    ) -> PipelineRunStepResult:
-        return cls(
-            run_id=run_id,
-            step_order=step_order,
-            name=step_result.name,
-            result=step_result.result,
-            started_at=step_result.started_at,
-            finished_at=step_result.finished_at,
-            error_message=step_result.error_message,
-        )
-
-    @classmethod
-    def get_key(cls) -> str:
-        return "pipeline_run_steps"
-
-    @classmethod
-    def get_yaml_path(cls) -> Path:
-        return Path(__file__).parent / "metadata.yml"
-
-    @classmethod
-    def get_id_hash_columns(cls) -> tuple[str, ...]:
-        return ()
-
-
-# ---------------------------------------------------------------------------
-# PipelineStep
-# ---------------------------------------------------------------------------
-
-
+# Default exceptions that should not be retried.
 _DEFAULT_NO_RETRY_ON: tuple[type[Exception], ...] = (
     ValueError,
     TypeError,
     AssertionError,
     NotImplementedError,
 )
+
+
+@dataclass(frozen=True)
+class PipelineContext:
+    user_id: str | None = None
+    account_id: str | None = None
+    progress_window: ProgressWindow | None = None
+
+    def progress_next(self, message: str) -> None:
+        if self.progress_window is not None:
+            self.progress_window.next(message)
+
+    def progress_update(self, message: str) -> None:
+        if self.progress_window is not None:
+            self.progress_window.update(message)
+
+    def progress_pop(self, amount: int = 1) -> None:
+        if self.progress_window is not None:
+            self.progress_window.pop(amount)
+
+    def progress_success(self, message: str) -> None:
+        if self.progress_window is not None:
+            self.progress_window.success(message)
+
+    def progress_warning(self, message: str) -> None:
+        if self.progress_window is not None:
+            self.progress_window.warning(message)
+
+    def progress_error(self, message: str) -> None:
+        if self.progress_window is not None:
+            self.progress_window.error(message)
+
+    def progress_clear(self) -> None:
+        if self.progress_window is not None:
+            self.progress_window.clear()
 
 
 class PipelineStep(ABC):
@@ -191,6 +110,7 @@ class PipelineStep(ABC):
         Called by Pipeline.run() — not directly.
         """
         self.logger.info(f"[{self.name}] Starting step.")
+        context.progress_next(f"Starting {self.name}...")
         started_at = get_current_datetime()
 
         attempt = 0
@@ -203,15 +123,20 @@ class PipelineStep(ABC):
                     f"[{self.name}] Retry {attempt}/{self.max_retries} "
                     f"after {wait:.1f}s (reason: {last_error})."
                 )
+                context.progress_pop()
+                context.progress_warning(
+                    f"{self.name}: retry {attempt}/{self.max_retries} in {wait:.0f}s..."
+                )
                 time.sleep(wait)
+                context.progress_update(f"Running {self.name}...")
 
             try:
                 self.run(db_client, context)
                 finished_at = get_current_datetime()
-                self.logger.info(
-                    f"[{self.name}] Completed in "
-                    f"{(finished_at - started_at).total_seconds():.2f}s."
-                )
+                duration_s = (finished_at - started_at).total_seconds()
+                self.logger.info(f"[{self.name}] Completed in {duration_s:.2f}s.")
+                context.progress_pop()
+                context.progress_success(f"{self.name} finished ({duration_s:.1f}s).")
                 return StepResult(
                     name=self.name,
                     result=PipelineResult.SUCCESS,
@@ -222,13 +147,17 @@ class PipelineStep(ABC):
             except Exception as e:
                 last_error = e
                 if isinstance(e, self.no_retry_on):
-                    self.logger.error(f"[{self.name}] Non-retryable error: {e}. Aborting step.")
+                    self.logger.error(
+                        f"[{self.name}] Non-retryable error: {e}. Aborting step.", exc_info=True
+                    )
                     break
                 attempt += 1
 
         # All attempts exhausted (or non-retryable error hit).
         finished_at = get_current_datetime()
         self.logger.error(f"[{self.name}] Failed after {attempt} attempt(s): {last_error}.")
+        context.progress_pop()
+        context.progress_error(f"{self.name} failed: {last_error}")
         return StepResult(
             name=self.name,
             result=PipelineResult.FAILURE,
@@ -267,9 +196,13 @@ class Pipeline:
         db_client: DatabaseClient | None = None,
         lock_timeout_hours: float = _DEFAULT_LOCK_TIMEOUT_HOURS,
         logger: EnhancedLogger | None = None,
+        progress_window: ProgressWindow | None = None,
     ) -> None:
         self.name = name
-        self.context = PipelineContext(user_id=user_id, account_id=account_id)
+        self.context = PipelineContext(
+            user_id=user_id, account_id=account_id, progress_window=progress_window
+        )
+        self.context.progress_clear()  # Clear any previous progress messages
         self.steps = steps
         self.db_client = db_client or get_db_client()
         self.lock_timeout_hours = lock_timeout_hours
@@ -286,20 +219,31 @@ class Pipeline:
         pipeline_result = PipelineResult.SUCCESS
         run_result: PipelineRunResult | None = None
         run_error: Exception | None = None
+        total_steps = len(self.steps)
 
         try:
+            self.context.progress_next(
+                f"Starting {self.name} pipeline ({total_steps} step {'s' if total_steps != 1 else ''})..."
+            )
             self._pre_run(started_at)
 
-            for step in self.steps:
+            for step_index, step in enumerate(self.steps, start=1):
+                self.context.progress_pop()  # pop the previous step result
+                self.context.progress_update(
+                    f"Running step {step_index}/{total_steps}: {step.name}..."
+                )
                 step_result = step.execute(self.db_client, self.context)
                 step_results += (step_result,)
 
+                # self.context.progress_pop()
                 if step_result.result == PipelineResult.FAILURE:
                     if step.critical:
                         self.logger.error(
-                            f"[Pipeline:{self.name}] Critical step '{step.name}' "
-                            f"failed. Aborting."
+                            f"[Pipeline:{self.name}] Critical step '{step.name}' failed. Aborting."
                         )
+                        # self.context.progress_error(
+                        #     f"Pipeline stopped: critical step '{step.name}' failed."
+                        # )
                         pipeline_result = PipelineResult.FAILURE
                         break
                     else:
@@ -307,10 +251,25 @@ class Pipeline:
                             f"[Pipeline:{self.name}] Non-critical step '{step.name}' "
                             f"failed. Continuing."
                         )
+                        # self.context.progress_warning(
+                        #     f"Non-critical step '{step.name}' failed; continuing."
+                        # )
                         pipeline_result = PipelineResult.PARTIAL
+                elif step_result.result == PipelineResult.SUCCESS:
+                    # self.context.progress_success(f"Step `{step.name}` successful.")
+                    pass
+                else:
+                    self.logger.log_and_raise(
+                        PipelineError(
+                            f"Result = {step_result.result.value} for {step.name} (expected SUCCESS or FAILURE)"
+                        )
+                    )
         except Exception as e:
+            if not isinstance(e, PipelineLockError):
+                self.context.progress_error("Unknown pipeline error; aborting run.")
             pipeline_result = PipelineResult.FAILURE
             run_error = e
+
         finally:
             if self._run_id is not None:
                 finished_at = get_current_datetime()
@@ -325,6 +284,8 @@ class Pipeline:
                     step_results=step_results,
                 )
                 try:
+                    self.context.progress_pop()
+                    self.context.progress_update(f"Finishing {self.name}...")
                     self._post_run(run_result)
                 finally:
                     self._release_lock()
@@ -339,10 +300,22 @@ class Pipeline:
                 PipelineError(f"[Pipeline:{self.name}] Run finished without a run_id.")
             )
         else:
+            duration_s = run_result.duration_seconds
             self.logger.info(
                 f"[Pipeline:{self.name}] Finished with result={pipeline_result} "
-                f"in {run_result.duration_seconds:.2f}s."
+                f"in {duration_s:.2f}s."
             )
+            self.context.progress_pop(2)
+            if pipeline_result == PipelineResult.SUCCESS:
+                self.context.progress_success(
+                    f"Pipeline finished successfully in {duration_s:.1f}s."
+                )
+            elif pipeline_result == PipelineResult.PARTIAL:
+                self.context.progress_warning(
+                    f"Pipeline finished with warnings in {duration_s:.1f}s."
+                )
+            else:
+                self.context.progress_error(f"Pipeline failed after {duration_s:.1f}s.")
             return run_result
         assert False  # Should never happen (mypy check)
 
@@ -353,11 +326,14 @@ class Pipeline:
     def _pre_run(self, started_at: datetime) -> None:
         """Checks and setup before any step runs."""
         self._check_db_connection()
+        self.context.progress_pop()
         self._acquire_lock(started_at)
+        self.context.progress_pop()
 
     def _post_run(self, result: PipelineRunResult) -> None:
         """Teardown and persistence — always runs, even on failure."""
         self._save_run_result(result)
+        self.context.progress_pop()
 
     # ------------------------------------------------------------------
     # Lock
@@ -371,6 +347,8 @@ class Pipeline:
         """
         meta = PipelineRunResult.get_metadata()
         self.db_client.ensure_table(meta)
+
+        self.context.progress_next("Registering pipeline run for current account...")
 
         name_clause = generate_ident_is_literal("name", self.name)
         user_id_clause = generate_ident_is_literal("user_id", self.context.user_id)
@@ -386,15 +364,15 @@ class Pipeline:
         )
 
         if existing:
-            stale_cutoff = _as_utc(get_current_datetime()) - timedelta(
-                hours=self.lock_timeout_hours
-            )
-            fresh_locks = [lock for lock in existing if _as_utc(lock["started_at"]) > stale_cutoff]
+            stale_cutoff = as_utc(get_current_datetime()) - timedelta(hours=self.lock_timeout_hours)
+            fresh_locks = [lock for lock in existing if as_utc(lock["started_at"]) > stale_cutoff]
 
             if fresh_locks:
-                locked_at = _as_utc(fresh_locks[0]["started_at"])
+                locked_at = as_utc(fresh_locks[0]["started_at"])
+                self.context.progress_pop()
+                self.context.progress_error("Found an existing unfinished pipeline run; aborting.")
                 self.logger.log_and_raise(
-                    PipelineError(
+                    PipelineLockError(
                         f"[Pipeline:{self.name}] Already running for user "
                         f"{self.context.user_id!r} account {self.context.account_id!r} "
                         f"(started at {locked_at}). Aborting."
@@ -420,6 +398,8 @@ class Pipeline:
 
         self._run_id = run_id
         self.logger.info(f"[Pipeline:{self.name}] Lock acquired (run_id={run_id}).")
+        self.context.progress_pop()
+        self.context.progress_success("Succesfully registered current pipeline run.")
 
     def _release_lock(self) -> bool:
         """
@@ -449,7 +429,7 @@ class Pipeline:
 
         if deleted:
             self.logger.warning(
-                f"[Pipeline:{self.name}] Released dangling active lock " f"(run_id={self._run_id})."
+                f"[Pipeline:{self.name}] Released dangling active lock (run_id={self._run_id})."
             )
         return True
 
@@ -459,9 +439,12 @@ class Pipeline:
 
     def _check_db_connection(self) -> None:
         """Verify DB is reachable before starting."""
+        self.context.progress_next("Checking database connection...")
         try:
             self.db_client.engine.connect()
             self.logger.info(f"[Pipeline:{self.name}] DB connection OK.")
+            self.context.progress_pop()
+            self.context.progress_success("Database connection OK.")
         except Exception as e:
             self.logger.log_and_raise(
                 DatabaseError(f"[Pipeline:{self.name}] DB unreachable before run: {e}")
@@ -474,6 +457,7 @@ class Pipeline:
         on failure.
         """
         try:
+            self.context.progress_next("Saving pipeline run result to database...")
             result.save_to_db(self.db_client)
 
             for step_order, step_result in enumerate(result.step_results):
@@ -484,6 +468,8 @@ class Pipeline:
                 ).save_to_db(self.db_client)
 
             self.logger.info(f"[Pipeline:{self.name}] Run result saved (run_id={result.run_id}).")
+            self.context.progress_pop()
+            self.context.progress_success("Pipeline run result saved to database.")
         except Exception as e:
             self.logger.log_and_raise(
                 DatabaseError(f"[Pipeline:{self.name}] Failed to save run result: {e}.")
