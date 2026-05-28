@@ -153,7 +153,7 @@ def _build_insert_sql(
     col_names = list(records[0].keys())
     quoted_cols = ", ".join(quote_ident(c) for c in col_names)
     placeholders = ", ".join(f":{c}" for c in col_names)
-    base = f"INSERT INTO {table.qualified_name_sql()} ({quoted_cols})\nVALUES ({placeholders})"  # nosec B608
+    base = f"INSERT INTO {table.qualified_name_sql()} ({quoted_cols})\nVALUES ({placeholders})"
     if on_conflict == "nothing":
         base += "\nON CONFLICT DO NOTHING"
     return base, records
@@ -280,7 +280,7 @@ def _build_merge_sql(
         set_clause = ", ".join(
             f"{quote_ident(c)} = _source.{quote_ident(c)}" for c in non_match_cols
         )
-        clauses.append(f"WHEN MATCHED THEN\n  UPDATE SET {set_clause}")  # nosec B608
+        clauses.append(f"WHEN MATCHED THEN\n  UPDATE SET {set_clause}")
     elif strategy.when_matched == "delete":
         clauses.append("WHEN MATCHED THEN\n  DELETE")
     # "ignore" → no WHEN MATCHED clause
@@ -290,7 +290,7 @@ def _build_merge_sql(
         clauses.append(
             f"WHEN NOT MATCHED THEN\n"
             f"  INSERT ({quoted_cols_csv})\n"
-            f"  VALUES ({", ".join(f"_source.{quote_ident(c)}" for c in col_names)})"
+            f"  VALUES ({', '.join(f'_source.{quote_ident(c)}' for c in col_names)})"
         )
 
     # WHEN NOT MATCHED BY SOURCE (Postgres 16+)
@@ -521,7 +521,7 @@ class DatabaseClient:
             set_clause = ", ".join(
                 generate_ident_is_literal(col, val) for col, val in values.items()
             )
-            sql = f"UPDATE {table.qualified_name_sql()}\nSET {set_clause}\nWHERE {where};"  # nosec B608
+            sql = f"UPDATE {table.qualified_name_sql()}\nSET {set_clause}\nWHERE {where};"
             affected = self.engine.execute_write(sql, {}) if values else 0
         except Exception as e:
             self.logger.log_and_raise(
@@ -549,7 +549,7 @@ class DatabaseClient:
         """
         try:
             _require_where(where, "delete_where")
-            sql = f"DELETE FROM {table.qualified_name_sql()}\nWHERE {where};"  # nosec B608
+            sql = f"DELETE FROM {table.qualified_name_sql()}\nWHERE {where};"
             affected = self.engine.execute_write(sql, {})
         except Exception as e:
             self.logger.log_and_raise(
@@ -700,9 +700,9 @@ class DatabaseClient:
         where_clause = ""
         try:
             if where is not None:
-                where_clause = f"WHERE {_require_where(where, "get_row_count")}"
+                where_clause = f"WHERE {_require_where(where, 'get_row_count')}"
 
-            sql = f"SELECT COUNT(*) FROM {table.qualified_name_sql()} {where_clause};"  # nosec B608
+            sql = f"SELECT COUNT(*) FROM {table.qualified_name_sql()} {where_clause};"
             result = self.engine.execute_parameterized_query(sql, {})
             count = result[0]["count"] if result else 0
         except Exception as e:
@@ -721,7 +721,7 @@ class DatabaseClient:
         """
         try:
             _require_where(where, "exists")
-            sql = f"SELECT EXISTS (SELECT 1 FROM {table.qualified_name_sql()} WHERE {where});"  # nosec B608
+            sql = f"SELECT EXISTS (SELECT 1 FROM {table.qualified_name_sql()} WHERE {where});"
             rows = self.engine.execute_parameterized_query(sql, {})
             result = bool(rows[0]["exists"]) if rows else False
         except Exception as e:
@@ -926,7 +926,7 @@ class DatabaseClient:
             list[dict] by default, or pl.DataFrame if as_polars=True.
         """
         col_clause = ", ".join(quote_ident(c) for c in columns) if columns else "*"
-        sql = f"SELECT {col_clause} FROM {table.qualified_name_sql()}"  # nosec B608
+        sql = f"SELECT {col_clause} FROM {table.qualified_name_sql()}"
 
         if where:
             sql += f"\nWHERE {where}"
@@ -955,6 +955,27 @@ class DatabaseClient:
         match_condition: str | None,
     ) -> int:
         """Count how many source records match existing target rows."""
+        source_cte = _build_source_cte(records, table)
+
+        # Build join condition
+        join_condition = " AND ".join(
+            f"_target.{quote_ident(k)} = _source.{quote_ident(k)}" for k in resolved_keys
+        )
+        if match_condition:
+            join_condition = f"({join_condition}) AND ({match_condition})"
+
+        # Count matched rows (identifiers quoted; row values in VALUES CTE)
+        qname = table.qualified_name_sql()
+        count_matched_sql = (
+            f"{source_cte}\n"
+            f"SELECT COUNT(*) AS matched_count\n"
+            f"FROM _source\n"
+            f"WHERE EXISTS (\n"
+            f"  SELECT 1 FROM {qname} _target\n"
+            f"  WHERE {join_condition}\n"
+            f")"
+        )
+
         join_condition = _build_join_condition(resolved_keys, match_condition)
         source_prefix = _build_source_cte(records, table) + "\n"
         count_matched_sql = _build_count_matched_sql(
@@ -974,6 +995,29 @@ class DatabaseClient:
         match_condition: str | None,
     ) -> int:
         """Count how many target rows have no match in source (for WHEN NOT MATCHED BY SOURCE)."""
+        source_cte = _build_source_cte(records, table)
+
+        # Build join condition
+        join_condition = " AND ".join(
+            f"_target.{quote_ident(k)} = _source.{quote_ident(k)}" for k in resolved_keys
+        )
+        if match_condition:
+            join_condition = f"({join_condition}) AND ({match_condition})"
+
+        # Count rows to delete (identifiers quoted; row values in VALUES CTE)
+        qname = table.qualified_name_sql()
+        count_unmatched_target_sql = (
+            f"{source_cte}\n"
+            f"SELECT COUNT(*) AS delete_count\n"
+            f"FROM {qname} _target\n"
+            f"WHERE NOT EXISTS (\n"
+            f"  SELECT 1 FROM _source\n"
+            f"  WHERE {join_condition}\n"
+            f")"
+        )
+
+        result = self.engine.execute_parameterized_query(count_unmatched_target_sql, {})
+        return result[0]["delete_count"] if result else 0
         join_condition = _build_join_condition(resolved_keys, match_condition)
         source_prefix = _build_source_cte(records, table) + "\n"
         count_unmatched_target_sql = _build_count_deletes_sql(

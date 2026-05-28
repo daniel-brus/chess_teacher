@@ -1,0 +1,9 @@
+exclude_dirs:
+  - .venv
+  - venv
+  - build
+  - dist
+  - .pytest_cache
+  - .ruff_cache
+skips:
+  - B608
