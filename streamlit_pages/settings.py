@@ -1,6 +1,6 @@
 import streamlit as st
 
-from chess_teacher.platform.account import Account, AccountPlatform
+from chess_teacher.platform.account import Account
 from chess_teacher.platform.users_accounts import (
     add_account,
     get_accounts_for_user,
@@ -9,6 +9,7 @@ from chess_teacher.platform.users_accounts import (
 )
 from chess_teacher.utils.db_client import get_db_client
 from streamlit_utils.login import require_authenticated_user
+from streamlit_utils.platform_ui import pick_platform, render_platform_logo
 from streamlit_utils.session_state import force_logout
 
 user = require_authenticated_user()
@@ -18,17 +19,9 @@ db_client = get_db_client()
 st.title("Personal Settings")
 
 
-def _platform_label(platform: AccountPlatform | str) -> str:
-    return platform.value if isinstance(platform, AccountPlatform) else platform
-
-
 def _show_add_account_form() -> None:
     with st.form("add_platform_account"):
-        platform = st.selectbox(
-            "Platform",
-            options=list(AccountPlatform),
-            format_func=lambda platform: platform.value,
-        )
+        platform = pick_platform(key_prefix="settings_add_platform")
         username = st.text_input("Username")
         submitted = st.form_submit_button("Add account")
 
@@ -59,7 +52,8 @@ def _show_account_list(accounts_list: list[Account]) -> None:
 
     for account in accounts_list:
         cols = st.columns([2, 3, 2, 2])
-        cols[0].write(_platform_label(account.platform))
+        with cols[0]:
+            render_platform_logo(account.platform, width=24)
         cols[1].write(account.username)
         cols[2].write(account.latest_ingestion or "Never")
         if cols[3].button("Remove", key=f"remove_{account.account_id}"):

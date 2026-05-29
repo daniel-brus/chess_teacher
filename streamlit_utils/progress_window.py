@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import html
 import time
+from dataclasses import dataclass
 from types import TracebackType
 
 import streamlit as st
@@ -35,6 +36,19 @@ _ICON_SPINNER = '<div class="pw-spinner"></div>'
 _ICON_SUCCESS = '<div class="pw-badge" style="background:#dcfce7;color:#1a7f4b">&#10003;</div>'
 _ICON_WARNING = '<div class="pw-badge" style="background:#fef3c7;color:#b45309">&#9888;</div>'
 _ICON_ERROR = '<div class="pw-badge" style="background:#fee2e2;color:#dc2626">&#10007;</div>'
+
+
+@dataclass(frozen=True)
+class ProgressSnapshot:
+    """Frozen progress panel for display after the live run ends."""
+
+    lines: tuple[tuple[str, str], ...]
+    icon_html: str
+
+
+def render_progress_snapshot(snapshot: ProgressSnapshot) -> None:
+    """Render a saved pipeline progress panel (survives ``st.rerun``)."""
+    _render_panel(st.empty(), list(snapshot.lines), snapshot.icon_html)
 
 
 def _render_panel(
@@ -152,6 +166,10 @@ class StreamlitProgressWindow(ProgressWindow):
         self._lines.clear()
         self._icon = _ICON_SPINNER
         self._render()
+
+    def snapshot(self) -> ProgressSnapshot:
+        """Capture the current panel for session state after the run finishes."""
+        return ProgressSnapshot(lines=tuple(self._lines), icon_html=self._icon)
 
     # ------------------------------------------------------------------
     # Internals
