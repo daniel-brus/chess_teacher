@@ -392,14 +392,16 @@ class DatabaseClient:
 
         if records:
             sql_insert, records = _build_insert_sql(records, table, on_conflict="error")
-            self.engine.execute_parameterized_query(sql_insert, records)
+            inserted = self.engine.execute_write(sql_insert, records)
+        else:
+            inserted = 0
 
         self.logger.info(
             "overwrite → %s: table truncated, %d rows inserted",
             table.qualified_name_sql(),
-            len(records),
+            inserted,
         )
-        return WriteResult(strategy=WriteStrategy.OVERWRITE, rows_inserted=len(records))
+        return WriteResult(strategy=WriteStrategy.OVERWRITE, rows_inserted=inserted)
 
     def merge(
         self,

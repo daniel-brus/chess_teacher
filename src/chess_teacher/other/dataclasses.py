@@ -65,3 +65,25 @@ class TimeControlClass(TableDataClass):
             time_control_class_id=cls.generate_id({"time_control_class": category.value}),
             time_control_class=category,
         )
+
+
+@dataclass
+class RawEcoCode(TableDataClass):
+    """Raw ECO opening row from lichess chess-openings TSV files."""
+
+    eco_code_id: str
+    eco_code: str
+    name: str
+    pgn: str
+
+    @classmethod
+    def get_yaml_path(cls) -> Path:
+        return Path(__file__).parent / "metadata.yml"
+
+    @classmethod
+    def get_key(cls) -> str:
+        return "raw_eco_codes"
+
+    @classmethod
+    def get_id_hash_columns(cls) -> tuple[str, ...]:
+        return ("pgn",)

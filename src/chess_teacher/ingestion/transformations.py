@@ -70,6 +70,18 @@ def parse_pgn_tag(pattern: re.Pattern[str], pgn: str | None) -> str | None:
     return match.group(1) if match else None
 
 
+class CleanPGNTransformation(DataFrameTransformation):
+    """
+    Clean the PGN column by removing headers, annotations, etc.
+    Desired format: "1. e4 e5 2. Nf3 Nc6 ... etc."
+
+    Requires:
+    - the input DataFrame to contain the 'pgn' column.
+    Returns the input DataFrame with only these columns added (or updated if already present):
+    - pgn (str: the cleaned PGN)
+    """
+
+
 class FilterGamesWithPGNTransformation(DataFrameTransformation):
     """Drop rows that have no usable PGN (null, empty, or whitespace-only)."""
 
@@ -187,7 +199,8 @@ class ExtractFileMetadataTransformation(DataFrameTransformation):
 
         try:
             result = df.with_columns(
-                pl.col(self.SOURCE_FILE_COLUMN)
+                pl
+                .col(self.SOURCE_FILE_COLUMN)
                 .map_elements(
                     self._parse_source_file_path,
                     return_dtype=pl.Struct({
@@ -423,7 +436,8 @@ class ExtractGameMetadataTransformation(DataFrameTransformation):
         ]
         try:
             df = df.with_columns(
-                pl.struct([pl.col(column) for column in source_columns if column in df.columns])
+                pl
+                .struct([pl.col(column) for column in source_columns if column in df.columns])
                 .map_elements(
                     self._extract_game_metadata_row,
                     return_dtype=self._METADATA_STRUCT_DTYPE,
@@ -723,7 +737,7 @@ class ExtractPlayersAndResultTransformation(DataFrameTransformation):
             detail = "matched both white and black"
 
         raise DataError(
-            f"Account username {sample["username"]!r} on {sample["platform"]!r} "
+            f"Account username {sample['username']!r} on {sample['platform']!r} "
             f"does not uniquely identify a player color ({detail}). "
             f"{bad_rows.height} row(s) affected."
         )
@@ -767,13 +781,16 @@ class ExtractPlayersAndResultTransformation(DataFrameTransformation):
 
             # Add the color, user_elo, and opponent_elo columns
             df = working.with_columns(
-                color=pl.when(pl.col("_white_match"))
+                color=pl
+                .when(pl.col("_white_match"))
                 .then(pl.lit(Color.WHITE.value))
                 .otherwise(pl.lit(Color.BLACK.value)),
-                user_elo=pl.when(pl.col("_white_match"))
+                user_elo=pl
+                .when(pl.col("_white_match"))
                 .then(side_rating_expr(column_names, Color.WHITE))
                 .otherwise(side_rating_expr(column_names, Color.BLACK)),
-                opponent_elo=pl.when(pl.col("_white_match"))
+                opponent_elo=pl
+                .when(pl.col("_white_match"))
                 .then(side_rating_expr(column_names, Color.BLACK))
                 .otherwise(side_rating_expr(column_names, Color.WHITE)),
             ).drop("_match_count", "_white_match")
@@ -788,7 +805,8 @@ class ExtractPlayersAndResultTransformation(DataFrameTransformation):
         required_columns = ["platform", "color", "white", "black", "status", "winner", "pgn"]
         try:
             df = df.with_columns(
-                pl.struct([pl.col(column) for column in required_columns if column in df.columns])
+                pl
+                .struct([pl.col(column) for column in required_columns if column in df.columns])
                 .map_elements(
                     self._extract_result_reason_row,
                     return_dtype=pl.Struct({
