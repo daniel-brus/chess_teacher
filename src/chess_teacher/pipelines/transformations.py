@@ -71,7 +71,8 @@ class CreateHashedIdTransformation(DataFrameTransformation):
 
         try:
             df = df.with_columns(
-                pl.struct([pl.col(col) for col in self.id_hash_columns])
+                pl
+                .struct([pl.col(col) for col in self.id_hash_columns])
                 .map_elements(
                     self._generate_id_from_row,
                     return_dtype=pl.Utf8,
@@ -232,3 +233,72 @@ class JoinWithTableTransformation(DataFrameTransformation):
         except Exception as e:
             logger.log_and_raise(TransformationError(f"Failed to join with table: {e}"))
         return result
+
+
+class RenameColumnsTransformation(DataFrameTransformation):
+    """Rename DataFrame columns.
+    Throw an error if a column is missing, or if a column is renamed to a column that already exists."""
+
+    def __init__(self, mapping: dict[str, str]):
+        super().__init__()
+        self.mapping = mapping
+
+    def transform(self, df: pl.DataFrame) -> pl.DataFrame:
+        missing = [source for source in self.mapping if source not in df.columns]
+        if missing:
+            logger.log_and_raise(TransformationError(f"Cannot rename missing columns: {missing}"))
+
+        target_already_existing = [
+            target for target in self.mapping.values() if target in df.columns
+        ]
+        if target_already_existing:
+            logger.log_and_raise(
+                TransformationError(
+                    f"Cannot rename to columns that already exist: {target_already_existing}"
+                )
+            )
+        try:
+            return df.rename(self.mapping)
+        except Exception as e:
+            logger.log_and_raise(TransformationError(f"Failed to rename columns: {e}"))
+
+
+class AssertUniqueColumnsTransformation(DataFrameTransformation):
+    """Fail when the combination of given columns are not unique across all rows."""
+
+    def __init__(self, columns: str | list[str], *, label: str | None = None):
+        super().__init__()
+        self.columns = columns if isinstance(columns, list) else [columns]
+        self.label = label or ", ".join(self.columns)
+
+    def transform(self, df: pl.DataFrame) -> pl.DataFrame:
+        missing = [column for column in self.columns if column not in df.columns]
+        if missing:
+            logger.log_and_raise(
+                TransformationError(f"Missing columns for uniqueness check: {missing}")
+            )
+
+        unique_count = df.select(self.columns).unique().height
+        if unique_count == df.height:
+            logger.info(
+                "Uniqueness check passed for %s (%s rows).",
+                self.label,
+                df.height,
+            )
+            return df
+
+        duplicate_count = df.height - unique_count
+        sample = (
+            df
+            .group_by(self.columns)
+            .len()
+            .filter(pl.col("len") > 1)
+            .sort("len", descending=True)
+            .head(5)
+        )
+        logger.log_and_raise(
+            TransformationError(
+                f"{self.label} is not unique: {duplicate_count} duplicate row(s). "
+                f"Sample duplicate groups: {sample.to_dicts()}"
+            )
+        )

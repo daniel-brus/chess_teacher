@@ -1,0 +1,76 @@
+tables:
+  time_control_classes:
+    schema: other
+    table: time_control_classes
+    comment: Time control classes
+    primary_key:
+      - time_control_class_id
+    columns:
+      - name: time_control_class_id
+        data_type: text
+        nullable: false
+        comment: Unique identifier for the time control class
+      - name: time_control_class
+        data_type: text
+        nullable: false
+        comment: Time control class (e.g. Bullet, Blitz, etc.)
+
+  variants:
+    schema: other
+    table: variants
+    comment: Chess variants (e.g. standard, chess960, etc.)
+    primary_key:
+      - variant_id
+    columns:
+      - name: variant_id
+        data_type: text
+        nullable: false
+        comment: Unique identifier for the variant
+      - name: variant
+        data_type: text
+        nullable: false
+        comment: Name of the variant
+
+  raw_eco_codes:
+    schema: other
+    table: raw_eco_codes
+    comment: Raw ECO codes, as extracted from lichess github files
+    primary_key:
+      - eco_code_id
+    columns:
+      - name: eco_code_id
+        data_type: text
+        nullable: false
+        comment: Hashed PK representing the opening
+      - name: eco_code
+        data_type: text
+        nullable: false
+        comment: ECO code. Not unique per row.
+      - name: name
+        data_type: text
+        nullable: false
+        comment: 'Name of the opening. Structured as "Opening family: Variation, Subvariation, etc."'
+      - name: pgn
+        data_type: text
+        nullable: false
+        comment: pgn of the opening. Unique per row.
+
+  raw_chess_com_openings:
+    schema: other
+    table: raw_chess_com_openings
+    comment: Chess.com opening slugs and display titles from chess.com/openings pages
+    primary_key:
+      - chess_com_opening_id
+    columns:
+      - name: chess_com_opening_id
+        data_type: text
+        nullable: false
+        comment: Hashed PK from slug
+      - name: slug
+        data_type: text
+        nullable: false
+        comment: Chess.com openings URL path slug
+      - name: name
+        data_type: text
+        nullable: false
+        comment: Human-readable opening title from Chess.com og:title

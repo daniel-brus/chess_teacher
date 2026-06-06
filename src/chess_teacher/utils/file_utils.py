@@ -11,7 +11,7 @@ from chess_teacher.utils.logging_utils import EnhancedLogger, get_logger
 
 class FileType(StrEnum):
     JSONL = "jsonl"
-    # TODO: Add other file types
+    TSV = "tsv"
 
 
 def validate_existing_file(

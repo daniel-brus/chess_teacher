@@ -13,7 +13,8 @@ class RawGame(TableDataClass):
     game_id: str
     platform_game_id: str
     account_id: str
-    pgn: str
+    raw_pgn: str
+    cleaned_pgn: str
     color: Color
     result: Result
     reason: Reason
@@ -23,8 +24,11 @@ class RawGame(TableDataClass):
     start_time: datetime | None = None
     end_time: datetime | None = None
     eco_code: str | None = None
+    chess_com_opening_slug: str | None = None
     user_elo: int | None = None
     opponent_elo: int | None = None
+    opening_name: str | None = None
+    opening_family: str | None = None
 
     @classmethod
     def get_yaml_path(cls) -> Path:

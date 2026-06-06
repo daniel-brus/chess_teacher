@@ -4,7 +4,7 @@ import logging
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, ClassVar, cast
+from typing import Any, ClassVar, NoReturn, cast
 
 from chess_teacher.utils.env_utils import get_env_variable
 from chess_teacher.utils.exception_utils import ConfigError
@@ -78,7 +78,7 @@ class EnhancedLogger(logging.Logger):
         message: str | None = None,
         level: str = "error",
         include_traceback: bool = True,
-    ):
+    ) -> NoReturn:
         """Log an exception message at the specified level and then re-raise it.
         Args:
             exc: The exception to log and raise.

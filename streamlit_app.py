@@ -3,13 +3,11 @@
 import streamlit as st
 
 from streamlit_utils.login import require_authenticated_user
+from streamlit_utils.page_config import configure_page
+from streamlit_utils.profile_ui import render_sidebar_profile
 from streamlit_utils.session_state import force_logout
 
-st.set_page_config(
-    page_title="Chess Teacher",
-    page_icon="♟️",
-    layout="centered",
-)
+configure_page()
 
 user = require_authenticated_user()
 
@@ -21,15 +19,14 @@ pages = [
     st.Page("streamlit_pages/settings.py", title="Settings"),
 ]
 
-pg = st.navigation(pages, position="sidebar", expanded=False)
+pg = st.navigation(pages, position="hidden")
 
 with st.sidebar:
-    if user.picture:
-        st.image(user.picture)
-    else:
-        st.markdown(":chess_pawn:")
-
-    if st.button("Logout"):
-        force_logout()
+    render_sidebar_profile(user)
+    for page in pages:
+        st.page_link(page, width="stretch")
+    with st.container(key="sidebar_logout"):
+        if st.button("Logout", width="stretch"):
+            force_logout()
 
 pg.run()

@@ -6,6 +6,7 @@ from chess_teacher.utils.exception_utils import AuthError
 from chess_teacher.utils.general_utils import get_current_datetime
 from chess_teacher.utils.logging_utils import get_logger
 from streamlit_utils.session_state import get_current_user, set_current_user, st_user_is_logged_in
+from streamlit_utils.theme import apply_app_theme
 
 
 class LoginScreen:
@@ -27,7 +28,7 @@ class LoginScreen:
                 self.logger.log_and_raise(AuthError("Invalid user: audience mismatch"))
             if not user.get("email_verified", False):
                 self.logger.warning(
-                    f"User email not verified: {user.get("email", "email not found")}"
+                    f"User email not verified: {user.get('email', 'email not found')}"
                 )
             result = User.from_st_user(user)
         except Exception as e:
@@ -48,6 +49,7 @@ class LoginScreen:
     def display(self):
         self.logger.info("Login screen started.")
         if not st_user_is_logged_in():
+            apply_app_theme(None)
             st.header("Log in to app")
             if st.button("Log in with Google"):
                 st.login("google")
@@ -74,4 +76,6 @@ def require_authenticated_user() -> User:
     Safe when Streamlit auto-discovers page scripts without running streamlit_app.py.
     """
     LoginScreen().display()
-    return get_current_user()
+    user = get_current_user()
+    apply_app_theme(user)
+    return user

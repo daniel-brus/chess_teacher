@@ -6,12 +6,17 @@ from uuid import uuid4
 from chess_teacher.ingestion.adapter import AdapterFactory
 from chess_teacher.ingestion.raw_games import RawGame
 from chess_teacher.ingestion.transformations import (
+    ApplyChessComOpeningLookupTransformation,
+    ApplyLichessOpeningNameTransformation,
+    CleanPGNTransformation,
+    DeriveOpeningTransformation,
     ExtractFileMetadataTransformation,
     ExtractGameMetadataTransformation,
     ExtractPlatformGameIdTransformation,
     ExtractPlayersAndResultTransformation,
     FilterGamesWithPGNTransformation,
 )
+from chess_teacher.other.dataclasses import RawEcoCode
 from chess_teacher.pipelines.pipeline_base import PipelineContext, PipelineStep
 from chess_teacher.pipelines.pipeline_steps import (
     LoadingStrategy,
@@ -19,8 +24,10 @@ from chess_teacher.pipelines.pipeline_steps import (
     StorageToTableStep,
 )
 from chess_teacher.pipelines.transformations import (
+    AssertUniqueColumnsTransformation,
     CreateHashedIdTransformation,
     JoinWithTableTransformation,
+    RenameColumnsTransformation,
 )
 from chess_teacher.platform.account import Account
 from chess_teacher.utils.db_client import DatabaseClient
@@ -137,12 +144,23 @@ class LoadIngestedFilesToDB(StorageToTableStep):
             data_class=RawGame,
             transformations=[
                 FilterGamesWithPGNTransformation(),
+                RenameColumnsTransformation({"pgn": "raw_pgn"}),
                 ExtractFileMetadataTransformation(),
                 JoinWithTableTransformation(with_data_class=Account),
                 ExtractPlatformGameIdTransformation(),
                 CreateHashedIdTransformation(data_class=RawGame),
                 ExtractGameMetadataTransformation(),
+                ApplyLichessOpeningNameTransformation(),
                 ExtractPlayersAndResultTransformation(),
+                CleanPGNTransformation(),
+                JoinWithTableTransformation(
+                    with_data_class=RawEcoCode,
+                    left_on=["eco_code"],
+                    right_on=["eco_code"],
+                ),
+                DeriveOpeningTransformation(),
+                ApplyChessComOpeningLookupTransformation(),
+                AssertUniqueColumnsTransformation("game_id", label="game_id"),
             ],
             loading_strategy=LoadingStrategy.MERGE,
             merge_strategy=MergeStrategy.upsert(),

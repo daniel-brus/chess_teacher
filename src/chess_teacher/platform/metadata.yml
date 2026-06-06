@@ -34,7 +34,7 @@ tables:
       - name: picture
         data_type: text
         nullable: true
-        comment: URL to profile picture
+        comment: OAuth profile URL or upload:object-key via profile picture store
 
       - name: given_name
         data_type: text
@@ -79,6 +79,16 @@ tables:
         nullable: false
         default: "Europe/Amsterdam"
         comment: Timezone applicable to the cron_time.
+
+      - name: default_light_theme_id
+        data_type: text
+        nullable: true
+        comment: Chessboard theme id from themes.toml [themes.light.*]; null uses built-in light palette.
+
+      - name: default_dark_theme_id
+        data_type: text
+        nullable: true
+        comment: Chessboard theme id from themes.toml [themes.dark.*]; null uses built-in dark palette.
 
   accounts:
     schema: platform

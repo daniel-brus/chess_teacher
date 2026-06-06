@@ -52,6 +52,6 @@ class ClearOrphanedPipelineRunLocksStep(DeleteOldRecordsStep):
             "clear_orphaned_pipeline_run_locks",
             PipelineRunResult.get_metadata(),
             "started_at",
-            retention_period=self._MAX_TIME_TO_KEEP_LOCK,
+            retention_period=self._RETENTION_PERIOD,
             additional_where="finished_at = '1970-01-01 00:00:00+00'",
         )
