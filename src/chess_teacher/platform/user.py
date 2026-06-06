@@ -39,6 +39,8 @@ class User(TableDataClass):
     latest_pipeline_run: datetime | None = None
     cron_time: time = DEFAULT_CRON_TIME
     timezone: str = DEFAULT_TIMEZONE
+    default_light_theme_id: str | None = None
+    default_dark_theme_id: str | None = None
 
     def __post_init__(self) -> None:
         assert_valid_timezone(self.timezone)

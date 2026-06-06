@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import re
 from datetime import UTC, date, datetime
+from io import StringIO
 from pathlib import PurePosixPath
 from typing import ClassVar
 
+import chess
+import chess.pgn
 import polars as pl
 
+from chess_teacher.other.chess_com_openings import load_slug_title_lookup
 from chess_teacher.pipelines.transformations import DataFrameTransformation
 from chess_teacher.platform.account import AccountPlatform
 from chess_teacher.utils.chess_utils import Color, Reason, Result
@@ -70,18 +74,6 @@ def parse_pgn_tag(pattern: re.Pattern[str], pgn: str | None) -> str | None:
     return match.group(1) if match else None
 
 
-class CleanPGNTransformation(DataFrameTransformation):
-    """
-    Clean the PGN column by removing headers, annotations, etc.
-    Desired format: "1. e4 e5 2. Nf3 Nc6 ... etc."
-
-    Requires:
-    - the input DataFrame to contain the 'pgn' column.
-    Returns the input DataFrame with only these columns added (or updated if already present):
-    - pgn (str: the cleaned PGN)
-    """
-
-
 class FilterGamesWithPGNTransformation(DataFrameTransformation):
     """Drop rows that have no usable PGN (null, empty, or whitespace-only)."""
 
@@ -113,6 +105,107 @@ class FilterGamesWithPGNTransformation(DataFrameTransformation):
                 result.height,
             )
         return result
+
+
+class CleanPGNTransformation(DataFrameTransformation):
+    """
+    Derive ``cleaned_pgn`` from ``raw_pgn`` by removing headers, annotations, etc.
+
+    Desired format: ``1. e4 e5 2. Nf3 Nc6 ...``
+
+    Rows with no movetext after cleaning are excluded.
+
+    Requires the input DataFrame to contain the ``raw_pgn`` column.
+
+    Returns the input DataFrame with ``cleaned_pgn`` added (movetext-only).
+    """
+
+    RAW_PGN_COLUMN = "raw_pgn"
+    CLEANED_PGN_COLUMN = "cleaned_pgn"
+    _RESULT_SUFFIX_RE = re.compile(r"\s(1-0|0-1|1/2-1/2|\*)\s*$")
+    _BRACE_COMMENT_RE = re.compile(r"\{[^}]*\}")
+    _TAG_PAIR_LINE_RE = re.compile(r"^\s*\[.*\]\s*$")
+
+    @classmethod
+    def _clean_pgn(cls, pgn: str | None) -> str:
+        if not pgn or not pgn.strip():
+            return ""
+
+        movetext = cls._movetext_from_pgn_parser(pgn)
+        if movetext is not None:
+            return movetext
+
+        return cls._movetext_from_regex_fallback(pgn)
+
+    @classmethod
+    def _movetext_from_pgn_parser(cls, pgn: str) -> str | None:
+        try:
+            game = chess.pgn.read_game(StringIO(pgn))
+        except (ValueError, chess.InvalidMoveError):
+            return None
+        if game is None:
+            return None
+
+        parts: list[str] = []
+        board = game.board()
+        node: chess.pgn.Game | chess.pgn.ChildNode = game
+        while node.variations:
+            next_node = node.variation(0)
+            if next_node.move is None:
+                break
+            san = board.san(next_node.move)
+            if board.turn == chess.WHITE:
+                parts.append(f"{board.fullmove_number}. {san}")
+            else:
+                parts.append(san)
+            board.push(next_node.move)
+            node = next_node
+
+        return " ".join(parts)
+
+    @classmethod
+    def _movetext_from_regex_fallback(cls, pgn: str) -> str:
+        chunks = re.split(r"\n\s*\n", pgn, maxsplit=1)
+        body = chunks[-1] if len(chunks) > 1 else pgn
+        body = "\n".join(
+            line for line in body.splitlines() if not cls._TAG_PAIR_LINE_RE.match(line)
+        )
+        body = cls._BRACE_COMMENT_RE.sub("", body)
+        body = cls._RESULT_SUFFIX_RE.sub("", body.strip())
+        return re.sub(r"\s+", " ", body).strip()
+
+    def transform(self, df: pl.DataFrame) -> pl.DataFrame:
+        if self.RAW_PGN_COLUMN not in df.columns:
+            logger.log_and_raise(
+                TransformationError(
+                    f"Column {self.RAW_PGN_COLUMN!r} is required to clean PGN movetext."
+                )
+            )
+
+        before = df.height
+        try:
+            df = df.with_columns(
+                pl
+                .col(self.RAW_PGN_COLUMN)
+                .map_elements(self._clean_pgn, return_dtype=pl.Utf8)
+                .alias(self.CLEANED_PGN_COLUMN)
+            )
+            df = df.filter(
+                pl.col(self.CLEANED_PGN_COLUMN).is_not_null()
+                & (pl.col(self.CLEANED_PGN_COLUMN).str.strip_chars() != "")
+            )
+        except Exception as e:
+            logger.log_and_raise(TransformationError(f"Failed to clean PGN: {e}"))
+
+        dropped = before - df.height
+        if dropped:
+            logger.warning(
+                "CleanPGNTransformation: dropped %s row(s) with no movetext after clean (%s -> %s).",
+                dropped,
+                before,
+                df.height,
+            )
+        return df
 
 
 class ExtractFileMetadataTransformation(DataFrameTransformation):
@@ -278,6 +371,8 @@ class ExtractGameMetadataTransformation(DataFrameTransformation):
     - start_time (timestamp: the start time of the game (UTC))
     - end_time (timestamp: the end time of the game (UTC))
     - eco_code (str: the code of the opening)
+    - chess_com_opening_slug (str: Chess.com openings URL slug, when available)
+    - platform_opening_name (str: opening name from the platform API, when available)
     """
 
     _OUTPUT_COLUMNS = (
@@ -287,12 +382,15 @@ class ExtractGameMetadataTransformation(DataFrameTransformation):
         "start_time",
         "end_time",
         "eco_code",
+        "chess_com_opening_slug",
+        "platform_opening_name",
     )
 
     _PGN_TIME_CONTROL_RE = re.compile(r'\[TimeControl\s+"([^"]+)"\]', re.IGNORECASE)
     _PGN_UTC_DATE_RE = re.compile(r'\[UTCDate\s+"([^"]+)"\]', re.IGNORECASE)
     _PGN_UTC_TIME_RE = re.compile(r'\[UTCTime\s+"([^"]+)"\]', re.IGNORECASE)
     _PGN_ECO_RE = re.compile(r'\[ECO\s+"([^"]+)"\]', re.IGNORECASE)
+    _PGN_ECO_URL_RE = re.compile(r'\[ECOUrl\s+"([^"]+)"\]', re.IGNORECASE)
 
     _METADATA_STRUCT_DTYPE = pl.Struct({
         "variant": pl.Utf8,
@@ -301,6 +399,8 @@ class ExtractGameMetadataTransformation(DataFrameTransformation):
         "start_time": pl.Datetime(time_zone="UTC"),
         "end_time": pl.Datetime(time_zone="UTC"),
         "eco_code": pl.Utf8,
+        "chess_com_opening_slug": pl.Utf8,
+        "platform_opening_name": pl.Utf8,
     })
 
     @classmethod
@@ -350,26 +450,34 @@ class ExtractGameMetadataTransformation(DataFrameTransformation):
 
     @classmethod
     def _extract_chess_com_metadata(cls, row: dict) -> dict[str, str | datetime | None]:
-        pgn = row.get("pgn")
-        time_control = parse_pgn_tag(cls._PGN_TIME_CONTROL_RE, pgn)
+        raw_pgn = row.get("raw_pgn")
+        time_control = parse_pgn_tag(cls._PGN_TIME_CONTROL_RE, raw_pgn)
         if not time_control:
             top_level = row.get("time_control")
             time_control = str(top_level) if top_level is not None else None
         initial, increment = cls._parse_time_control(time_control)
         start_time = cls._parse_utc_start(
-            parse_pgn_tag(cls._PGN_UTC_DATE_RE, pgn),
-            parse_pgn_tag(cls._PGN_UTC_TIME_RE, pgn),
+            parse_pgn_tag(cls._PGN_UTC_DATE_RE, raw_pgn),
+            parse_pgn_tag(cls._PGN_UTC_TIME_RE, raw_pgn),
         )
         end_time_unix_s = row.get("end_time", None)
         if end_time_unix_s is None:
             logger.warning("Empty end_time for game %s.", row.get("platform_game_id"))
+        eco_url_tag = parse_pgn_tag(cls._PGN_ECO_URL_RE, raw_pgn)
+        top_level_eco = row.get("eco")
+        if not eco_url_tag and isinstance(top_level_eco, str) and "/openings/" in top_level_eco:
+            eco_url_tag = top_level_eco
         return {
             "variant": cls._normalize_variant(row.get("rules")),
             "time_control_initial": initial,
             "time_control_increment": increment,
             "start_time": start_time,
             "end_time": cls._unix_seconds_to_datetime(end_time_unix_s),
-            "eco_code": parse_pgn_tag(cls._PGN_ECO_RE, pgn),
+            "eco_code": parse_pgn_tag(cls._PGN_ECO_RE, raw_pgn),
+            "chess_com_opening_slug": ApplyChessComOpeningLookupTransformation._chess_com_opening_slug_from_eco_url(
+                eco_url_tag
+            ),
+            "platform_opening_name": None,
         }
 
     @classmethod
@@ -381,6 +489,7 @@ class ExtractGameMetadataTransformation(DataFrameTransformation):
         end_timestamp = row.get("endedAt")
         if end_timestamp is None:
             end_timestamp = row.get("lastMoveAt")
+        opening_name = opening.get("name")
         return {
             "variant": cls._normalize_variant(row.get("variant")),
             "time_control_initial": str(initial) if initial is not None else None,
@@ -388,6 +497,8 @@ class ExtractGameMetadataTransformation(DataFrameTransformation):
             "start_time": cls._unix_millis_to_datetime(row.get("createdAt")),
             "end_time": cls._unix_millis_to_datetime(end_timestamp),
             "eco_code": opening.get("eco"),
+            "chess_com_opening_slug": None,
+            "platform_opening_name": str(opening_name) if opening_name else None,
         }
 
     @classmethod
@@ -424,7 +535,7 @@ class ExtractGameMetadataTransformation(DataFrameTransformation):
         source_columns = [
             "platform",
             "rules",
-            "pgn",
+            "raw_pgn",
             "time_control",
             "end_time",
             "variant",
@@ -710,7 +821,7 @@ class ExtractPlayersAndResultTransformation(DataFrameTransformation):
                 )
             elif platform == AccountPlatform.LICHESS.value:
                 result_reason = cls._extract_lichess_result_reason(
-                    color, row.get("status"), row.get("winner"), row.get("pgn")
+                    color, row.get("status"), row.get("winner"), row.get("raw_pgn")
                 )
             else:
                 raise DataError(f"Unsupported platform for result extraction: {platform!r}.")
@@ -802,7 +913,15 @@ class ExtractPlayersAndResultTransformation(DataFrameTransformation):
             )
 
         # Extract the result and reason, for which the following columns are required:
-        required_columns = ["platform", "color", "white", "black", "status", "winner", "pgn"]
+        required_columns = [
+            "platform",
+            "color",
+            "white",
+            "black",
+            "status",
+            "winner",
+            "raw_pgn",
+        ]
         try:
             df = df.with_columns(
                 pl
@@ -826,3 +945,267 @@ class ExtractPlayersAndResultTransformation(DataFrameTransformation):
         # Return the input DataFrame with only the original columns and the output columns
         base_columns = [column for column in input_columns if column not in self._OUTPUT_COLUMNS]
         return df.select(base_columns + list(self._OUTPUT_COLUMNS))
+
+
+class DeriveOpeningTransformation(DataFrameTransformation):
+    """
+    Select the most specific opening name(s) per game from ECO candidates.
+
+    Expects one row per ``(game_id, opening candidate)`` after a join on ``eco_code``.
+    Among candidates whose ``pgn`` is a prefix of ``cleaned_pgn``, keeps every row whose
+    ``pgn`` has the maximum length for that ``game_id``.
+
+    Returns one row per ``game_id``. When several candidates tie on maximum ``pgn`` length,
+    their ``name`` values are joined into ``opening_name`` using
+    :data:`TIED_OPENING_NAMES_SEPARATOR` (sorted, deduplicated). ``opening_name`` is null
+    when no candidate matches.
+
+    ``opening_family`` is set when every tied (or single) name shares the same family:
+    the text before the first ``:`` in each name (trimmed), or the full name when there
+    is no colon.     When tied names disagree on family, ``opening_family`` is null.
+
+    Rows that already have ``opening_name`` (e.g. from Lichess ``opening.name``) are left
+    unchanged and do not use the ECO book match.
+    """
+
+    GAME_ID_COLUMN = "game_id"
+    CLEANED_PGN_COLUMN = "cleaned_pgn"
+    OPENING_PGN_COLUMN = "pgn"
+    OPENING_NAME_SOURCE_COLUMN = "name"
+    OUTPUT_COLUMN = "opening_name"
+    FAMILY_COLUMN = "opening_family"
+    TIED_OPENING_NAMES_SEPARATOR = " | "
+    _ECO_JOIN_COLUMNS = frozenset({"eco_code_id", OPENING_PGN_COLUMN, OPENING_NAME_SOURCE_COLUMN})
+
+    @classmethod
+    def split_tied_opening_names(cls, opening_name: str | None) -> list[str]:
+        """Split a stored ``opening_name`` into one or more Lichess opening names."""
+        if not opening_name:
+            return []
+        return [
+            part.strip()
+            for part in opening_name.split(cls.TIED_OPENING_NAMES_SEPARATOR)
+            if part.strip()
+        ]
+
+    @classmethod
+    def _opening_family_from_name(cls, opening_name: str | None) -> str | None:
+        """Family shared by all names in ``opening_name``; None when families disagree."""
+        parts = cls.split_tied_opening_names(opening_name)
+        if not parts:
+            return None
+
+        families: list[str] = []
+        for part in parts:
+            if ":" in part:
+                families.append(part.split(":", 1)[0].strip())
+            else:
+                families.append(part)
+
+        unique_families = list(dict.fromkeys(families))
+        if len(unique_families) == 1:
+            return unique_families[0]
+        return None
+
+    def transform(self, df: pl.DataFrame) -> pl.DataFrame:
+        required = {
+            self.GAME_ID_COLUMN,
+            self.CLEANED_PGN_COLUMN,
+            self.OPENING_PGN_COLUMN,
+            self.OPENING_NAME_SOURCE_COLUMN,
+        }
+        missing = required - set(df.columns)
+        if missing:
+            logger.log_and_raise(
+                TransformationError(f"Missing columns for opening derivation: {sorted(missing)}")
+            )
+
+        game_columns = [column for column in df.columns if column not in self._ECO_JOIN_COLUMNS]
+
+        try:
+            preset_rows: pl.DataFrame | None = None
+            derive_df = df
+            if self.OUTPUT_COLUMN in df.columns:
+                preset_rows = (
+                    df
+                    .filter(pl.col(self.OUTPUT_COLUMN).is_not_null())
+                    .select(game_columns)
+                    .unique(subset=[self.GAME_ID_COLUMN], keep="first")
+                )
+                derive_df = df.filter(pl.col(self.OUTPUT_COLUMN).is_null())
+                if derive_df.is_empty():
+                    return preset_rows
+
+            opening_by_game = (
+                derive_df
+                .with_columns(
+                    is_match=pl.col(self.CLEANED_PGN_COLUMN).str.starts_with(
+                        pl.col(self.OPENING_PGN_COLUMN)
+                    ),
+                )
+                .filter(pl.col("is_match"))
+                .with_columns(
+                    opening_length=pl.col(self.OPENING_PGN_COLUMN).str.len_chars(),
+                    max_opening_length=pl
+                    .col(self.OPENING_PGN_COLUMN)
+                    .str.len_chars()
+                    .max()
+                    .over(self.GAME_ID_COLUMN),
+                )
+                .filter(pl.col("opening_length") == pl.col("max_opening_length"))
+                .group_by(self.GAME_ID_COLUMN)
+                .agg(
+                    pl
+                    .col(self.OPENING_NAME_SOURCE_COLUMN)
+                    .drop_nulls()
+                    .unique()
+                    .sort()
+                    .implode()
+                    .list.join(self.TIED_OPENING_NAMES_SEPARATOR)
+                    .alias(self.OUTPUT_COLUMN),
+                )
+            )
+
+            base = derive_df.select(game_columns).unique(
+                subset=[self.GAME_ID_COLUMN],
+                keep="first",
+            )
+            if self.OUTPUT_COLUMN in base.columns:
+                base = base.drop(self.OUTPUT_COLUMN)
+            if self.FAMILY_COLUMN in base.columns:
+                base = base.drop(self.FAMILY_COLUMN)
+
+            derived_rows = base.join(opening_by_game, on=self.GAME_ID_COLUMN, how="left")
+            derived_rows = derived_rows.with_columns(
+                pl
+                .col(self.OUTPUT_COLUMN)
+                .map_elements(
+                    self._opening_family_from_name,
+                    return_dtype=pl.Utf8,
+                )
+                .alias(self.FAMILY_COLUMN),
+            )
+            if preset_rows is not None and preset_rows.height:
+                combined = pl.concat([preset_rows, derived_rows], how="diagonal")
+                return combined.unique(subset=[self.GAME_ID_COLUMN], keep="first")
+            return derived_rows
+        except Exception as e:
+            logger.log_and_raise(TransformationError(f"Failed to derive opening name: {e}"))
+
+
+class ApplyLichessOpeningNameTransformation(DataFrameTransformation):
+    """
+    Set ``opening_name`` from Lichess ``opening.name`` when the API provides it.
+
+    Those games skip ECO book prefix matching in :class:`DeriveOpeningTransformation`.
+    """
+
+    PLATFORM_OPENING_NAME_COLUMN = "platform_opening_name"
+    OUTPUT_COLUMN = "opening_name"
+    FAMILY_COLUMN = "opening_family"
+
+    def transform(self, df: pl.DataFrame) -> pl.DataFrame:
+        if self.PLATFORM_OPENING_NAME_COLUMN not in df.columns:
+            return df
+        if "platform" not in df.columns:
+            logger.log_and_raise(
+                TransformationError("Column 'platform' is required to apply Lichess opening names.")
+            )
+
+        try:
+            use_platform_name = (
+                is_lichess_expr() & pl.col(self.PLATFORM_OPENING_NAME_COLUMN).is_not_null()
+            )
+            df = df.with_columns(
+                pl
+                .when(use_platform_name)
+                .then(pl.col(self.PLATFORM_OPENING_NAME_COLUMN))
+                .otherwise(pl.lit(None).cast(pl.Utf8))
+                .alias(self.OUTPUT_COLUMN),
+            ).with_columns(
+                pl
+                .when(use_platform_name)
+                .then(
+                    pl.col(self.OUTPUT_COLUMN).map_elements(
+                        DeriveOpeningTransformation._opening_family_from_name,
+                        return_dtype=pl.Utf8,
+                    )
+                )
+                .otherwise(pl.lit(None).cast(pl.Utf8))
+                .alias(self.FAMILY_COLUMN),
+            )
+            return df.drop(self.PLATFORM_OPENING_NAME_COLUMN)
+        except Exception as e:
+            logger.log_and_raise(TransformationError(f"Failed to apply Lichess opening name: {e}"))
+
+
+class ApplyChessComOpeningLookupTransformation(DataFrameTransformation):
+    """
+    Fill ``opening_name`` and ``opening_family`` from ``other.raw_chess_com_openings``.
+
+    Uses ``chess_com_opening_slug`` to look up the Chess.com display title. Rows without
+    a slug or without a matching entry are unchanged.
+    """
+
+    SLUG_COLUMN = "chess_com_opening_slug"
+    OUTPUT_COLUMN = "opening_name"
+    FAMILY_COLUMN = "opening_family"
+    _CHESS_COM_OPENINGS_PATH = "/openings/"
+    _PGN_ECO_URL_SLUG_RE = re.compile(r'\[ECOUrl\s+"([^"]+)"\]', re.IGNORECASE)
+
+    @classmethod
+    def _chess_com_opening_slug_from_eco_url(cls, eco_url: str | None) -> str | None:
+        if not eco_url or cls._CHESS_COM_OPENINGS_PATH not in eco_url:
+            return None
+        slug = eco_url.rstrip("/").split(cls._CHESS_COM_OPENINGS_PATH, maxsplit=1)[-1]
+        return slug or None
+
+    @classmethod
+    def _chess_com_opening_slug_from_pgn(cls, pgn: str | None) -> str | None:
+        if not pgn:
+            return None
+        match = cls._PGN_ECO_URL_SLUG_RE.search(pgn)
+        return cls._chess_com_opening_slug_from_eco_url(match.group(1)) if match else None
+
+    def __init__(self, lookup: dict[str, str] | None = None) -> None:
+        self._lookup = lookup
+
+    def transform(self, df: pl.DataFrame) -> pl.DataFrame:
+        if self.SLUG_COLUMN not in df.columns:
+            return df
+
+        lookup = self._lookup if self._lookup is not None else load_slug_title_lookup()
+        if not lookup:
+            logger.warning("Chess.com opening lookup table empty; skipping slug title fill.")
+            return df
+
+        try:
+            lookup_df = pl.DataFrame({
+                self.SLUG_COLUMN: list(lookup.keys()),
+                "_lookup_opening_name": list(lookup.values()),
+            })
+            df = df.join(lookup_df, on=self.SLUG_COLUMN, how="left")
+            has_lookup = pl.col("_lookup_opening_name").is_not_null()
+            df = df.with_columns(
+                pl
+                .when(has_lookup)
+                .then(pl.col("_lookup_opening_name"))
+                .otherwise(pl.col(self.OUTPUT_COLUMN))
+                .alias(self.OUTPUT_COLUMN),
+            ).with_columns(
+                pl
+                .when(has_lookup)
+                .then(
+                    pl.col(self.OUTPUT_COLUMN).map_elements(
+                        DeriveOpeningTransformation._opening_family_from_name,
+                        return_dtype=pl.Utf8,
+                    )
+                )
+                .otherwise(pl.col(self.FAMILY_COLUMN))
+                .alias(self.FAMILY_COLUMN),
+            )
+            return df.drop("_lookup_opening_name")
+        except Exception as e:
+            logger.log_and_raise(
+                TransformationError(f"Failed to apply Chess.com opening lookup: {e}")
+            )

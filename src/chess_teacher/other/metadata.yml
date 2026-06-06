@@ -54,3 +54,23 @@ tables:
         data_type: text
         nullable: false
         comment: pgn of the opening. Unique per row.
+
+  raw_chess_com_openings:
+    schema: other
+    table: raw_chess_com_openings
+    comment: Chess.com opening slugs and display titles from chess.com/openings pages
+    primary_key:
+      - chess_com_opening_id
+    columns:
+      - name: chess_com_opening_id
+        data_type: text
+        nullable: false
+        comment: Hashed PK from slug
+      - name: slug
+        data_type: text
+        nullable: false
+        comment: Chess.com openings URL path slug
+      - name: name
+        data_type: text
+        nullable: false
+        comment: Human-readable opening title from Chess.com og:title

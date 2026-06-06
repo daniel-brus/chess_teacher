@@ -87,3 +87,32 @@ class RawEcoCode(TableDataClass):
     @classmethod
     def get_id_hash_columns(cls) -> tuple[str, ...]:
         return ("pgn",)
+
+
+@dataclass
+class RawChessComOpening(TableDataClass):
+    """Chess.com opening slug and display title."""
+
+    chess_com_opening_id: str
+    slug: str
+    name: str
+
+    @classmethod
+    def get_yaml_path(cls) -> Path:
+        return Path(__file__).parent / "metadata.yml"
+
+    @classmethod
+    def get_key(cls) -> str:
+        return "raw_chess_com_openings"
+
+    @classmethod
+    def get_id_hash_columns(cls) -> tuple[str, ...]:
+        return ("slug",)
+
+    @classmethod
+    def from_slug_and_name(cls, slug: str, name: str) -> RawChessComOpening:
+        return cls(
+            chess_com_opening_id=cls.generate_id({"slug": slug}),
+            slug=slug,
+            name=name,
+        )

@@ -139,13 +139,13 @@ class LoadToDatabaseStep(PipelineStep):
         data: pl.DataFrame,
     ) -> WriteResult:
         """Save records to the given table using the configured loading strategy."""
-        db_client.ensure_table(table_metadata)
+        db_client.ensure_metadata(table_metadata)
         try:
             table_metadata.validate_dataframe_for_load(data, log=self.logger)
         except MetadataError as e:
             self.logger.log_and_raise(e)
         self.logger.info(
-            f"[{self.name}] Schema check OK for {table_metadata.qualified_name_sql()}."
+            f"[{self.name}] Schema reconciled for {table_metadata.qualified_name_sql()}."
         )
         try:
             match self.loading_strategy:

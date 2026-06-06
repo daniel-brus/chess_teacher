@@ -19,7 +19,7 @@ tables:
         nullable: false
         comment: Account ID of the account that the game belongs to. Can be used to obtain platform and username.
 
-      - name: pgn
+      - name: raw_pgn
         data_type: text
         nullable: false
         comment: PGN of the game, as loaded from the source API.
@@ -50,6 +50,10 @@ tables:
         data_type: text
         nullable: true
         comment: ECO code of the opening (classification)
+      - name: chess_com_opening_slug
+        data_type: text
+        nullable: true
+        comment: Chess.com openings URL slug from ECOUrl (for name lookup)
 
       # Added by ExtractPlayersAndResultTransformation
       - name: color
@@ -72,3 +76,21 @@ tables:
         data_type: integer
         nullable: true
         comment: Opponent's ELO rating at the start of the game
+
+      # Added by CleanPGNTransformation
+      - name: cleaned_pgn
+        data_type: text
+        nullable: false
+        comment: Movetext-only PGN (e.g. "1. e4 e5 2. Nf3 Nc6")
+
+      # Added by DeriveOpeningTransformation
+      - name: opening_name
+        data_type: text
+        nullable: true
+        comment: >-
+          Lichess API name, else Lichess book match (tied names joined with " | "),
+          else Chess.com title from other.raw_chess_com_openings via chess_com_opening_slug.
+      - name: opening_family
+        data_type: text
+        nullable: true
+        comment: Family of the opening, derived from the opening name (e.g. "Modern Defense")

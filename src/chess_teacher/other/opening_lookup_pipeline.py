@@ -4,8 +4,9 @@ from io import StringIO
 
 import requests
 
+from chess_teacher.other.chess_com_openings import refresh_slug_title_lookup_from_database
 from chess_teacher.other.dataclasses import RawEcoCode
-from chess_teacher.pipelines.pipeline_base import Pipeline, PipelineContext
+from chess_teacher.pipelines.pipeline_base import Pipeline, PipelineContext, PipelineStep
 from chess_teacher.pipelines.pipeline_helpers import PipelineRunResult
 from chess_teacher.pipelines.pipeline_steps import (
     LoadingStrategy,
@@ -55,10 +56,33 @@ class LoadLichessEcoCodesStep(StreamToTableStep):
         return sources
 
 
-def run_load_lichess_eco_codes_pipeline() -> PipelineRunResult:
-    """Fetch lichess ECO TSV files and overwrite other.raw_eco_codes."""
+class RefreshChessComOpeningSlugsStep(PipelineStep):
+    """Scan ``raw_games`` for slugs and fetch missing titles into ``other.raw_chess_com_openings``."""
+
+    def __init__(self, *, request_delay_s: float = 0.25) -> None:
+        super().__init__(name="RefreshChessComOpeningSlugs")
+        self.request_delay_s = request_delay_s
+
+    def run(self, db_client: DatabaseClient, context: PipelineContext) -> None:
+        result = refresh_slug_title_lookup_from_database(
+            db_client,
+            request_delay_s=self.request_delay_s,
+            logger=self.logger,
+        )
+        context.progress_success(
+            f"Chess.com openings: {result.fetched} fetched, "
+            f"{result.unresolved} unresolved, "
+            f"{result.distinct_slugs} distinct slug(s)."
+        )
+
+
+def run_update_opening_lookup_tables_pipeline() -> PipelineRunResult:
+    """Refresh ``other.raw_eco_codes`` and ``other.raw_chess_com_openings``."""
     pipeline = Pipeline(
-        name="load_lichess_eco_codes",
-        steps=[LoadLichessEcoCodesStep()],
+        name="update_opening_lookup_tables",
+        steps=[
+            LoadLichessEcoCodesStep(),
+            RefreshChessComOpeningSlugsStep(),
+        ],
     )
     return pipeline.run()

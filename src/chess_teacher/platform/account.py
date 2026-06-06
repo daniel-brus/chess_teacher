@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
+from typing import Literal
 
 from chess_teacher.utils.env_utils import get_env_variable
 from chess_teacher.utils.exception_utils import ConfigError
@@ -18,17 +19,29 @@ def platform_logo_images_dir() -> Path:
     return Path(raw_dir) / "assets" / "images"
 
 
+AppLogoVariant = Literal["black", "white"]
+
+
+def app_logo_path(*, variant: AppLogoVariant = "black") -> Path:
+    """Chess Teacher wordmark SVG (black for light UI, white for dark UI)."""
+    filename = "app-logo-white.svg" if variant == "white" else "app-logo-black.svg"
+    return platform_logo_images_dir() / filename
+
+
+Appearance = Literal["light", "dark"]
+
+
 class AccountPlatform(StrEnum):
     CHESS_COM = "Chess.com"
     LICHESS = "Lichess"
 
-    def logo_path(self) -> Path:
+    def logo_path(self, *, appearance: Appearance = "light") -> Path:
         if self == AccountPlatform.CHESS_COM:
             return platform_logo_images_dir() / "chesscom_logo_pawn.svg"
-        elif self == AccountPlatform.LICHESS:
-            return platform_logo_images_dir() / "lichess.svg"
-        else:
-            raise ValueError(f"Unknown platform: {self}")
+        if self == AccountPlatform.LICHESS:
+            filename = "lichess-white.svg" if appearance == "dark" else "lichess.svg"
+            return platform_logo_images_dir() / filename
+        raise ValueError(f"Unknown platform: {self}")
 
 
 @dataclass()

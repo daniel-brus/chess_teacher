@@ -5,12 +5,15 @@ from chess_teacher.platform.users_accounts import get_accounts_for_user
 from chess_teacher.utils.db_client import get_db_client
 from chess_teacher.utils.logging_utils import get_logger
 from streamlit_utils.login import require_authenticated_user
+from streamlit_utils.page_config import configure_page
 from streamlit_utils.platform_ui import pick_one_account
 from streamlit_utils.progress_window import (
     ProgressSnapshot,
     StreamlitProgressWindow,
     render_progress_snapshot,
 )
+
+configure_page("Pipeline")
 
 db_client = get_db_client()
 logger = get_logger()

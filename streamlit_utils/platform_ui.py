@@ -2,23 +2,65 @@
 
 from __future__ import annotations
 
+import base64
+import html
 from collections.abc import Iterator
 from contextlib import contextmanager
 from enum import StrEnum
+from pathlib import Path
 from typing import Literal
 
 import streamlit as st
 
-from chess_teacher.platform.account import Account, AccountPlatform
+from chess_teacher.platform.account import Account, AccountPlatform, app_logo_path
+from streamlit_utils.theme import active_appearance
 
 _DEFAULT_ICON_FRACTION = 0.08
 
 
+def _render_image_file(path: Path, *, width: int, alt: str, centered: bool = False) -> None:
+    """Embed an image from disk (non-interactive; no ``st.image`` lightbox)."""
+    if not path.is_file():
+        return
+    encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+    suffix = path.suffix.lower()
+    mime = "image/svg+xml" if suffix == ".svg" else "image/png"
+    data_uri = f"data:{mime};base64,{encoded}"
+    alt_escaped = html.escape(alt)
+    img = (
+        f'<img src="{data_uri}" width="{width}" alt="{alt_escaped}" '
+        f'style="display:block;max-width:100%;height:auto;pointer-events:none;user-select:none;">'
+    )
+    if centered:
+        st.html(f'<div style="display:flex;justify-content:center;margin-bottom:1rem;">{img}</div>')
+    else:
+        st.html(img)
+
+
+def app_favicon_path() -> Path:
+    """Browser tab icon (white wordmark)."""
+    return app_logo_path(variant="white")
+
+
+def render_app_logo(*, width: int = 200, centered: bool = True) -> None:
+    """Chess Teacher wordmark: black on light UI, white on dark UI."""
+    appearance = active_appearance()
+    variant: Literal["black", "white"] = "white" if appearance == "dark" else "black"
+    _render_image_file(
+        app_logo_path(variant=variant),
+        width=width,
+        alt="Chess Teacher",
+        centered=centered,
+    )
+
+
 def render_platform_logo(platform: AccountPlatform, *, width: int = 22) -> None:
-    """Draw platform SVG when ``logo_path()`` exists under ``RAW_DIR``."""
-    logo = platform.logo_path()
-    if logo.is_file():
-        st.image(str(logo), width=width)
+    """Draw platform logo from ``RAW_DIR``."""
+    _render_image_file(
+        platform.logo_path(appearance=active_appearance()),
+        width=width,
+        alt=platform.value,
+    )
 
 
 @contextmanager
@@ -128,13 +170,13 @@ def pick_one_account(
                         if st.button(
                             f"{account.username}{' ✓' if is_current else ''}",
                             key=f"{key_prefix}_pick_{account.account_id}",
-                            use_container_width=True,
+                            width="stretch",
                             help=account.format_label(),
                         ):
                             st.session_state[f"{key_prefix}_selected_id"] = account.account_id
                             st.rerun()
         else:
-            st.button(change_label, disabled=True, use_container_width=True)
+            st.button(change_label, disabled=True, width="stretch")
 
     return _resolve_selected_account(accounts, key_prefix=key_prefix, default=default)
 

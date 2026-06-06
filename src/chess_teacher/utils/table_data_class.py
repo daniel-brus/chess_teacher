@@ -407,7 +407,7 @@ class TableDataClass(ABC):
         """Save the object to the database. If the object already exists, return False."""
         try:
             tablemetadata = type(self).get_metadata()
-            db_client.ensure_table(tablemetadata)
+            db_client.ensure_metadata(tablemetadata)
             data = self._to_db_record()
             result = db_client.insert([data], tablemetadata, on_conflict="nothing")
             if result.rows_inserted == 1:
@@ -435,7 +435,7 @@ class TableDataClass(ABC):
         """
         try:
             tablemetadata = type(self).get_metadata()
-            db_client.ensure_table(tablemetadata)
+            db_client.ensure_metadata(tablemetadata)
             data = self._to_db_record(
                 include_columns=include_columns,
                 exclude_columns=exclude_columns,
@@ -454,6 +454,7 @@ class TableDataClass(ABC):
     def upsert_field(self, db_client: DatabaseClient, field: str, value: Any) -> None:
         try:
             tablemetadata = type(self).get_metadata()
+            db_client.ensure_metadata(tablemetadata)
             db_client.update_where(tablemetadata, {field: value}, where=self.get_where_clause())
         except Exception as e:
             logger.log_and_raise(e)

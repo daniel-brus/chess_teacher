@@ -11,6 +11,7 @@ import streamlit as st
 from streamlit.delta_generator import DeltaGenerator
 
 from chess_teacher.pipelines.pipeline_helpers import ProgressWindow
+from streamlit_utils.layout import ingest_css
 
 _MAX_LINES = 3
 
@@ -18,19 +19,24 @@ _MAX_LINES = 3
 _PROGRESS_WINDOW_SLEEP_TIME: float = 0.67
 
 
-_CSS = """<style>
+_PROGRESS_CSS = """
 @keyframes pw-spin{to{transform:rotate(360deg)}}
-.pw-wrap{display:flex;align-items:flex-start;gap:12px;padding:10px 0;height:80px;box-sizing:border-box}
-.pw-spinner{width:16px;height:16px;border:2px solid rgba(128,128,128,0.2);border-top-color:rgba(128,128,128,0.6);border-radius:50%;animation:pw-spin 0.8s linear infinite;flex-shrink:0;margin-top:2px}
-.pw-badge{width:16px;height:16px;border-radius:50%;display:flex;align-items:center;justify-content:center;flex-shrink:0;margin-top:2px;font-size:10px;font-weight:600}
-.pw-lines{display:flex;flex-direction:column;gap:2px;flex:1;min-width:0}
-.pw-line{font-size:13px;line-height:1.5;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.pw-primary{color:var(--text-color,#111);font-weight:500}
-.pw-secondary{color:rgba(128,128,128,0.7);font-size:12px}
-.pw-success{color:#1a7f4b;font-size:12px}
+.pw-card{background:#fff;border:1px solid rgba(0,0,0,0.1);border-radius:8px;padding:10px 12px;box-shadow:0 1px 2px rgba(0,0,0,0.05);box-sizing:border-box}
+.pw-wrap{box-sizing:border-box}
+.pw-table{width:100%;border-collapse:collapse;border-spacing:0}
+.pw-table td{vertical-align:middle;padding:0}
+.pw-icon-cell{width:28px;padding-right:12px;white-space:nowrap}
+.pw-spinner{width:16px;height:16px;border:2px solid rgba(0,0,0,0.12);border-top-color:rgba(0,0,0,0.45);border-radius:50%;animation:pw-spin 0.8s linear infinite;display:inline-block;vertical-align:middle}
+.pw-badge{width:16px;height:16px;border-radius:50%;display:inline-block;vertical-align:middle;text-align:center;line-height:16px;font-size:10px;font-weight:600}
+.pw-lines-cell{min-width:0}
+.pw-lines-stack{display:block}
+.pw-line{display:block;font-size:13px;line-height:1.5;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pw-primary{color:#1f2937;font-weight:500}
+.pw-secondary{color:#6b7280;font-size:12px}
+.pw-success{color:#1a7f4b;font-size:13px;font-weight:500}
 .pw-warning{color:#b45309}
 .pw-error{color:#dc2626;font-weight:500}
-</style>"""
+"""
 
 _ICON_SPINNER = '<div class="pw-spinner"></div>'
 _ICON_SUCCESS = '<div class="pw-badge" style="background:#dcfce7;color:#1a7f4b">&#10003;</div>'
@@ -46,9 +52,32 @@ class ProgressSnapshot:
     icon_html: str
 
 
+def _inject_progress_css() -> None:
+    """Inject progress styles every rerun (Streamlit rebuilds the DOM on each rerun)."""
+    ingest_css(_PROGRESS_CSS)
+
+
+def _build_panel_html(lines: list[tuple[str, str]], icon_html: str) -> str:
+    rows = (
+        "".join(f'<span class="pw-line pw-{cls}">{html.escape(msg)}</span>' for cls, msg in lines)
+        if lines
+        else '<span class="pw-line pw-secondary">Waiting...</span>'
+    )
+
+    return (
+        '<div class="pw-card">'
+        '<div class="pw-wrap">'
+        '<table class="pw-table" role="presentation"><tr>'
+        f'<td class="pw-icon-cell">{icon_html}</td>'
+        f'<td class="pw-lines-cell"><div class="pw-lines-stack">{rows}</div></td>'
+        "</tr></table></div></div>"
+    )
+
+
 def render_progress_snapshot(snapshot: ProgressSnapshot) -> None:
     """Render a saved pipeline progress panel (survives ``st.rerun``)."""
-    _render_panel(st.empty(), list(snapshot.lines), snapshot.icon_html)
+    _inject_progress_css()
+    st.html(_build_panel_html(list(snapshot.lines), snapshot.icon_html))
 
 
 def _render_panel(
@@ -56,18 +85,11 @@ def _render_panel(
     lines: list[tuple[str, str]],
     icon_html: str,
 ) -> None:
-    rows = (
-        "".join(f'<span class="pw-line pw-{cls}">{html.escape(msg)}</span>' for cls, msg in lines)
-        if lines
-        else '<span class="pw-line pw-secondary">Waiting...</span>'
-    )
-
-    panel = f'<div class="pw-wrap">{icon_html}<div class="pw-lines">{rows}</div></div>'
-
+    panel = _build_panel_html(lines, icon_html)
     if hasattr(placeholder, "html"):
-        placeholder.html(_CSS + panel)
+        placeholder.html(panel)
     else:
-        placeholder.markdown(_CSS + panel, unsafe_allow_html=True)
+        st.markdown(panel, unsafe_allow_html=True)
 
 
 class StreamlitProgressWindow(ProgressWindow):
@@ -95,6 +117,7 @@ class StreamlitProgressWindow(ProgressWindow):
     # ------------------------------------------------------------------
 
     def __enter__(self) -> ProgressWindow:
+        _inject_progress_css()
         self._placeholder = st.empty()
         self._render()
         return self
@@ -133,10 +156,10 @@ class StreamlitProgressWindow(ProgressWindow):
         time.sleep(_PROGRESS_WINDOW_SLEEP_TIME)
 
     def success(self, message: str) -> None:
-        """Append a success message; existing lines are kept (up to max)."""
+        """Show a single success message (replaces earlier progress lines)."""
         self._final_state = "complete"
         self._icon = _ICON_SUCCESS
-        self._push("success", message)
+        self._lines = [("success", message)]
         self._render()
         time.sleep(_PROGRESS_WINDOW_SLEEP_TIME)
 

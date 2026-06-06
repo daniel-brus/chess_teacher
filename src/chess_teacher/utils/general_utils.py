@@ -108,8 +108,14 @@ def quote_literal(value: object | None) -> str:
 
 
 def generate_ident_is_literal(ident: str, literal: object | None) -> str:
+    """``col IS NULL`` or ``col = 'value'`` — for WHERE clauses."""
     if literal is None:
         return quote_ident(ident) + " IS NULL"
+    return quote_ident(ident) + " = " + quote_literal(literal)
+
+
+def generate_ident_eq_literal(ident: str, literal: object | None) -> str:
+    """``col = NULL`` or ``col = 'value'`` — for UPDATE SET / INSERT assignments."""
     return quote_ident(ident) + " = " + quote_literal(literal)
 
 

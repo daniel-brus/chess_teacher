@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from datetime import date, datetime, time
 from enum import StrEnum
@@ -11,7 +12,12 @@ from sqlalchemy import text
 
 from chess_teacher.utils.db_engine import EnrichedEngine, get_db_engine
 from chess_teacher.utils.exception_utils import DatabaseError, MetadataError
-from chess_teacher.utils.general_utils import generate_ident_is_literal, quote_ident, quote_literal
+from chess_teacher.utils.general_utils import (
+    generate_ident_eq_literal,
+    quote_ident,
+    quote_literal,
+    require_ident,
+)
 from chess_teacher.utils.logging_utils import get_logger
 from chess_teacher.utils.metadata_utils import TableMetadata
 
@@ -134,6 +140,42 @@ def _require_where(where: str | None, operation: str) -> str:
             "Use truncate_table() if you intend to affect all rows."
         )
     return where.strip()
+
+
+_PG_DATA_TYPE_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+
+
+def _require_pg_data_type(data_type: str) -> str:
+    normalized = data_type.strip().lower()
+    if not _PG_DATA_TYPE_RE.match(normalized):
+        raise ValueError(
+            f"Invalid PostgreSQL data type {data_type!r}. "
+            "Use a simple type name (e.g. text, integer, timestamptz)."
+        )
+    return normalized
+
+
+def _require_using_expression(using: str) -> str:
+    stripped = using.strip()
+    if not stripped:
+        raise ValueError("using expression must be non-empty.")
+    if ";" in stripped:
+        raise ValueError("using expression must not contain semicolons.")
+    return stripped
+
+
+def _alter_column_type_sql(
+    qualified_table: str,
+    column_name: str,
+    new_type: str,
+    *,
+    using: str | None = None,
+) -> str:
+    col_sql = quote_ident(column_name)
+    using_sql = _require_using_expression(using) if using is not None else f"{col_sql}::{new_type}"
+    return (
+        f"ALTER TABLE {qualified_table} ALTER COLUMN {col_sql} TYPE {new_type} USING {using_sql};"
+    )
 
 
 def _build_insert_sql(
@@ -521,7 +563,7 @@ class DatabaseClient:
                 )
 
             set_clause = ", ".join(
-                generate_ident_is_literal(col, val) for col, val in values.items()
+                generate_ident_eq_literal(col, val) for col, val in values.items()
             )
             sql = f"UPDATE {table.qualified_name_sql()}\nSET {set_clause}\nWHERE {where};"
             affected = self.engine.execute_write(sql, {}) if values else 0
@@ -777,12 +819,21 @@ class DatabaseClient:
         - SET/DROP DEFAULT for default mismatches
         - COMMENT ON COLUMN / TABLE for comment mismatches
 
-        Destructive operations (always raise):
-        - Extra columns in DB not present in metadata → raises SchemaDiffError
-        - Type cast failure → raises SchemaDiffError
+        Not handled (use explicit manual methods on :class:`DatabaseClient`):
+        - DROP COLUMN → :meth:`drop_column`
+        - RENAME COLUMN → :meth:`rename_column`
+        - RENAME TABLE → :meth:`rename_table`
+        - Custom or lossy type casts → :meth:`alter_column_type` (``using=...``)
+        - Primary keys, indexes, foreign keys
+        - ADD NOT NULL column on a non-empty table without a backfill plan
+
+        Aborts (does not auto-fix):
+        - Extra columns in DB not present in metadata
+        - Type cast failure at runtime
 
         Raises:
-            SchemaDiffError: if diff contains destructive changes or cast fails.
+            MetadataError: on extra columns or failed DDL.
+            DatabaseError: on connection/execution errors.
         """
         self.ensure_schema(table)
         self.ensure_table(table)
@@ -814,12 +865,7 @@ class DatabaseClient:
 
         # ALTER TYPE (try USING cast — Postgres will error if cast is invalid)
         for col_name, (expected, _actual) in diff.type_mismatches.items():
-            statements.append(
-                f"ALTER TABLE {qname} "
-                f"ALTER COLUMN {quote_ident(col_name)} "
-                f"TYPE {expected} "
-                f"USING {quote_ident(col_name)}::{expected};"
-            )
+            statements.append(_alter_column_type_sql(qname, col_name, expected, using=None))
             self.logger.info("ensure_metadata → ALTER TYPE %s.%s to %s", qname, col_name, expected)
 
         # SET/DROP NOT NULL
@@ -854,6 +900,263 @@ class DatabaseClient:
             self.engine.execute_statements(comment_stmts)
 
         self.logger.info("ensure_metadata → %s: schema reconciled", qname)
+
+    def column_names(self, table: TableMetadata) -> set[str]:
+        """Return column names for an existing table (empty set if the table is missing)."""
+        if not self.table_exists(table):
+            return set()
+        sql = """
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema = :schema
+              AND table_name = :table
+        """
+        try:
+            rows = self.engine.execute_parameterized_query(
+                sql, {"schema": table.schema_name, "table": table.table_name}
+            )
+        except Exception as e:
+            self.logger.log_and_raise(
+                DatabaseError(f"Error listing columns for {table.qualified_name_sql()}: {e}")
+            )
+        return {row["column_name"] for row in rows}
+
+    def rename_column(
+        self,
+        table: TableMetadata,
+        old_name: str,
+        new_name: str,
+    ) -> None:
+        """Rename a column. Irreversible name change only — data is preserved."""
+        require_ident(old_name, what="old column name")
+        require_ident(new_name, what="new column name")
+        if old_name == new_name:
+            return
+
+        live = self.column_names(table)
+        if not live:
+            self.logger.log_and_raise(
+                DatabaseError(f"Cannot rename column: {table.qualified_name_sql()} does not exist.")
+            )
+        if old_name not in live:
+            self.logger.log_and_raise(
+                DatabaseError(
+                    f"Cannot rename column {old_name!r} on {table.qualified_name_sql()}: "
+                    f"column not found. Present: {sorted(live)}."
+                )
+            )
+        if new_name in live:
+            self.logger.log_and_raise(
+                DatabaseError(
+                    f"Cannot rename to {new_name!r} on {table.qualified_name_sql()}: "
+                    "column already exists."
+                )
+            )
+
+        qname = table.qualified_name_sql()
+        sql = (
+            f"ALTER TABLE {qname} RENAME COLUMN {quote_ident(old_name)} TO {quote_ident(new_name)};"
+        )
+        try:
+            self.engine.execute_statements([sql])
+        except Exception as e:
+            self.logger.log_and_raise(
+                DatabaseError(f"rename_column failed on {qname} ({old_name!r} → {new_name!r}): {e}")
+            )
+        self.logger.info("rename_column → %s: %s → %s", qname, old_name, new_name)
+
+    def drop_column(
+        self,
+        table: TableMetadata,
+        column_name: str,
+        *,
+        cascade: bool = False,
+    ) -> None:
+        """Drop a column and its data. Irreversible."""
+        require_ident(column_name, what="column name")
+        live = self.column_names(table)
+        if column_name not in live:
+            self.logger.log_and_raise(
+                DatabaseError(
+                    f"Cannot drop column {column_name!r} on {table.qualified_name_sql()}: "
+                    f"column not found. Present: {sorted(live)}."
+                )
+            )
+
+        qname = table.qualified_name_sql()
+        cascade_sql = " CASCADE" if cascade else ""
+        sql = f"ALTER TABLE {qname} DROP COLUMN {quote_ident(column_name)}{cascade_sql};"
+        try:
+            self.engine.execute_statements([sql])
+        except Exception as e:
+            self.logger.log_and_raise(
+                DatabaseError(f"drop_column failed on {qname}.{column_name}: {e}")
+            )
+        self.logger.info("drop_column → %s.%s", qname, column_name)
+
+    def rename_table(self, table: TableMetadata, new_table_name: str) -> None:
+        """
+        Rename a table within its schema. Does not move it to another schema.
+        Should be used BEFORE changing the name in the metadata.yml file.
+
+        Args:
+            table: TableMetadata object of the table to rename (contains the old name)
+            new_table_name: The new name of the table.
+        """
+        require_ident(new_table_name, what="table name")
+        if new_table_name == table.table_name:
+            self.logger.warning(f"Table is already called {new_table_name}, no rename performed.")
+            return
+        if not self.table_exists(table):
+            self.logger.log_and_raise(
+                DatabaseError(f"Cannot rename table: {table.qualified_name_sql()} does not exist.")
+            )
+
+        target = TableMetadata(
+            schema_name=table.schema_name,
+            table_name=new_table_name,
+            columns=table.columns,
+            comment=table.comment,
+            primary_key=table.primary_key,
+        )
+        if self.table_exists(target):
+            self.logger.log_and_raise(
+                DatabaseError(
+                    f"Cannot rename to {target.qualified_name_sql()}: target table already exists."
+                )
+            )
+
+        qname = table.qualified_name_sql()
+        sql = f"ALTER TABLE {qname} RENAME TO {quote_ident(new_table_name)};"
+        try:
+            self.engine.execute_statements([sql])
+        except Exception as e:
+            self.logger.log_and_raise(
+                DatabaseError(
+                    f"rename_table failed ({table.table_name!r} → {new_table_name!r}): {e}"
+                )
+            )
+        self.logger.info("rename_table → %s → %s", qname, new_table_name)
+
+    def alter_column_type(
+        self,
+        table: TableMetadata,
+        column_name: str,
+        new_type: str,
+        *,
+        using: str | None = None,
+    ) -> None:
+        """Change a column's type, optionally with a custom ``USING`` expression.
+
+        When ``using`` is omitted, Postgres casts via ``column::new_type`` (same as
+        :meth:`ensure_metadata` for type mismatches).
+
+        Args:
+            using: SQL expression for the ``USING`` clause (trusted; no semicolons).
+        """
+        require_ident(column_name, what="column name")
+        pg_type = _require_pg_data_type(new_type)
+        live = self.column_names(table)
+        if column_name not in live:
+            self.logger.log_and_raise(
+                DatabaseError(
+                    f"Cannot alter type of {column_name!r} on {table.qualified_name_sql()}: "
+                    f"column not found. Present: {sorted(live)}."
+                )
+            )
+
+        qname = table.qualified_name_sql()
+        sql = _alter_column_type_sql(qname, column_name, pg_type, using=using)
+        try:
+            self.engine.execute_statements([sql])
+        except Exception as e:
+            self.logger.log_and_raise(
+                DatabaseError(f"alter_column_type failed on {qname}.{column_name} → {pg_type}: {e}")
+            )
+        self.logger.info("alter_column_type → %s.%s → %s", qname, column_name, pg_type)
+
+    def set_column_nullable(
+        self,
+        table: TableMetadata,
+        column_name: str,
+        *,
+        nullable: bool,
+    ) -> None:
+        """Set or drop NOT NULL on a column."""
+        require_ident(column_name, what="column name")
+        live = self.column_names(table)
+        if column_name not in live:
+            self.logger.log_and_raise(
+                DatabaseError(
+                    f"Cannot change nullability of {column_name!r} on "
+                    f"{table.qualified_name_sql()}: column not found."
+                )
+            )
+
+        action = "DROP NOT NULL" if nullable else "SET NOT NULL"
+        qname = table.qualified_name_sql()
+        sql = f"ALTER TABLE {qname} ALTER COLUMN {quote_ident(column_name)} {action};"
+        try:
+            self.engine.execute_statements([sql])
+        except Exception as e:
+            self.logger.log_and_raise(
+                DatabaseError(
+                    f"set_column_nullable failed on {qname}.{column_name} ({action}): {e}"
+                )
+            )
+        self.logger.info("set_column_nullable → %s.%s %s", qname, column_name, action)
+
+    def add_column(
+        self,
+        table: TableMetadata,
+        column_name: str,
+        data_type: str,
+        *,
+        nullable: bool = True,
+        default: str | int | float | bool | None = None,
+    ) -> None:
+        """Add a column to an existing table (explicit DDL).
+
+        Prefer :meth:`ensure_metadata` for columns defined in TableMetadata when a plain
+        ``ADD COLUMN`` from metadata is sufficient. Use this when you need a nullable
+        staging column before backfill (e.g. add nullable, fill, then ``SET NOT NULL``).
+        """
+        require_ident(column_name, what="column name")
+        pg_type = _require_pg_data_type(data_type)
+        live = self.column_names(table)
+        if not live:
+            self.logger.log_and_raise(
+                DatabaseError(f"Cannot add column: {table.qualified_name_sql()} does not exist.")
+            )
+        if column_name in live:
+            self.logger.log_and_raise(
+                DatabaseError(
+                    f"Cannot add column {column_name!r} on {table.qualified_name_sql()}: "
+                    "column already exists."
+                )
+            )
+
+        parts = [quote_ident(column_name), pg_type]
+        if not nullable:
+            parts.append("NOT NULL")
+        if default is not None:
+            if isinstance(default, bool):
+                default_sql = "TRUE" if default else "FALSE"
+            elif isinstance(default, int | float):
+                default_sql = str(default)
+            else:
+                default_sql = quote_literal(str(default))
+            parts.append(f"DEFAULT {default_sql}")
+
+        qname = table.qualified_name_sql()
+        sql = f"ALTER TABLE {qname} ADD COLUMN {' '.join(parts)};"
+        try:
+            self.engine.execute_statements([sql])
+        except Exception as e:
+            self.logger.log_and_raise(
+                DatabaseError(f"add_column failed on {qname}.{column_name}: {e}")
+            )
+        self.logger.info("add_column → %s.%s %s", qname, column_name, pg_type)
 
     def truncate_table(self, table: TableMetadata, *, cascade: bool = False) -> None:
         """TRUNCATE the table. Explicit, destructive — use intentionally.
