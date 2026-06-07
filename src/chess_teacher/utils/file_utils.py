@@ -6,7 +6,7 @@ from enum import StrEnum
 from pathlib import Path
 
 from chess_teacher.utils.exception_utils import FileError
-from chess_teacher.utils.logging_utils import EnhancedLogger, get_logger
+from chess_teacher.utils.logging import EnhancedLogger, get_logger
 
 
 class FileType(StrEnum):

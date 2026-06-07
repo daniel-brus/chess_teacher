@@ -1,11 +1,10 @@
-"""Buffered local log segments with optional upload to object storage."""
+"""Local log buffer paths, writer ownership, and segment rotation."""
 
 from __future__ import annotations
 
 import atexit
 import logging
 import os
-import signal
 import threading
 import time
 from datetime import UTC, datetime
@@ -15,21 +14,11 @@ from chess_teacher.utils.env_utils import get_env_variable, get_hostname
 from chess_teacher.utils.exception_utils import ConfigError
 
 LOG_STORAGE_PREFIX = "logs/python/buffer"
-_READY_SUFFIX = ".ready"
+READY_SUFFIX = ".ready"
 _ACTIVE_WRITER_LOCK = ".writer.lock"
 
 SEGMENT_INTERVAL_SECONDS = 600
 SEGMENT_MAX_BYTES = 5 * 1024 * 1024
-SHIP_INTERVAL_SECONDS = 60.0
-SHIP_SHUTDOWN_TIMEOUT_SECONDS = 20.0
-
-_shipper: LogShipper | None = None
-_segment_handler: SegmentFileHandler | None = None
-_shutdown_registered = False
-_shutdown_done = False
-_shutdown_lock = threading.Lock()
-
-_logger = logging.getLogger(__name__)
 
 
 def _require_hostname() -> str:
@@ -116,21 +105,6 @@ def get_log_buffer_dir() -> Path:
         raise ConfigError(str(e)) from e
 
 
-def log_storage_key_for_segment(segment_ready_path: Path, buffer_dir: Path) -> str:
-    """Map a local ``*.ready`` segment path to an object storage key under ``STORAGE_ROOT``."""
-    relative = segment_ready_path.relative_to(buffer_dir)
-    log_relative = Path(str(relative).removesuffix(_READY_SUFFIX))
-    return f"{LOG_STORAGE_PREFIX}/{log_relative.as_posix()}"
-
-
-def is_log_ship_enabled() -> bool:
-    """Return whether the in-process log shipper should run."""
-    explicit = get_env_variable("LOG_SHIP_ENABLED", default="")
-    if explicit == "":
-        return get_env_variable("STORAGE_BACKEND") == "s3"
-    return explicit.lower() in {"1", "true", "yes"}
-
-
 class SegmentFileHandler(logging.Handler):
     """Write JSON-lines logs to a local active file and rotate closed segments for upload."""
 
@@ -206,7 +180,7 @@ class SegmentFileHandler(logging.Handler):
             / "closed"
             / date_path
             / self.instance_id
-            / f"app-{timestamp}.log{_READY_SUFFIX}"
+            / f"app-{timestamp}.log{READY_SUFFIX}"
         )
 
     def _rotate_locked(self) -> None:
@@ -240,145 +214,3 @@ class SegmentFileHandler(logging.Handler):
         if self.owns_active_log:
             self._writer_lock.release()
         super().close()
-
-
-class LogShipper:
-    """Background uploader for closed ``*.ready`` log segments."""
-
-    def __init__(
-        self,
-        buffer_dir: Path,
-        *,
-        scan_interval_seconds: float | None = None,
-    ) -> None:
-        self.buffer_dir = Path(buffer_dir)
-        self.scan_interval_seconds = (
-            scan_interval_seconds if scan_interval_seconds is not None else SHIP_INTERVAL_SECONDS
-        )
-        self._stop = threading.Event()
-        self._thread: threading.Thread | None = None
-
-    def start(self) -> None:
-        if self._thread is not None:
-            return
-        self._thread = threading.Thread(target=self._run, name="log-shipper", daemon=True)
-        self._thread.start()
-
-    def stop(self) -> None:
-        self._stop.set()
-        if self._thread is not None:
-            self._thread.join(timeout=1.0)
-            self._thread = None
-
-    def stop_and_drain(self, timeout_seconds: float) -> None:
-        self._stop.set()
-        deadline = time.monotonic() + timeout_seconds
-        while time.monotonic() < deadline:
-            pending = self._pending_ready_paths()
-            if not pending:
-                break
-            self.scan_once()
-            if not self._pending_ready_paths():
-                break
-            time.sleep(0.1)
-        if self._thread is not None:
-            self._thread.join(timeout=max(0.0, deadline - time.monotonic()))
-            self._thread = None
-
-    def scan_once(self) -> int:
-        uploaded = 0
-        for ready_path in self._pending_ready_paths():
-            if self._upload_segment(ready_path):
-                uploaded += 1
-        return uploaded
-
-    def _pending_ready_paths(self) -> list[Path]:
-        closed_dir = self.buffer_dir / "closed"
-        if not closed_dir.exists():
-            return []
-        pending: list[Path] = []
-        for ready_path in closed_dir.rglob(f"*{_READY_SUFFIX}"):
-            pending.append(ready_path)
-        pending.sort()
-        return pending
-
-    def _upload_segment(self, ready_path: Path) -> bool:
-        try:
-            data = ready_path.read_bytes()
-            key = log_storage_key_for_segment(ready_path, self.buffer_dir)
-            from chess_teacher.utils.object_storage.factory import get_raw_storage
-
-            get_raw_storage().write_bytes(key, data, overwrite=False)
-            ready_path.unlink()
-            return True
-        except Exception:
-            _logger.warning("Failed to upload log segment %s", ready_path, exc_info=True)
-            return False
-
-    def _run(self) -> None:
-        while not self._stop.wait(self.scan_interval_seconds):
-            self.scan_once()
-
-
-def start_log_shipping(buffer_dir: Path) -> LogShipper | None:
-    """Start the background log shipper if enabled."""
-    global _shipper
-    if not is_log_ship_enabled():
-        return None
-    if _shipper is None:
-        _shipper = LogShipper(buffer_dir)
-        _shipper.start()
-    return _shipper
-
-
-def register_segment_handler(handler: SegmentFileHandler) -> None:
-    """Track the active segment handler for shutdown rotation."""
-    global _segment_handler
-    _segment_handler = handler
-
-
-def register_log_shutdown_hooks() -> None:
-    """Register process shutdown hooks once."""
-    global _shutdown_registered
-    if _shutdown_registered:
-        return
-    _shutdown_registered = True
-
-    def _handle_signal(signum: int, frame: object | None) -> None:
-        shutdown_logging()
-
-    # Streamlit and other hosts run app code off the main thread; signals are main-thread only.
-    if threading.current_thread() is threading.main_thread():
-        if hasattr(signal, "SIGTERM"):
-            signal.signal(signal.SIGTERM, _handle_signal)
-        signal.signal(signal.SIGINT, _handle_signal)
-    atexit.register(shutdown_logging)
-
-
-def shutdown_logging() -> None:
-    """Close the active segment and drain pending uploads."""
-    global _shutdown_done, _segment_handler, _shipper
-    with _shutdown_lock:
-        if _shutdown_done:
-            return
-        _shutdown_done = True
-
-        if _segment_handler is not None:
-            _segment_handler.close_active_segment()
-
-        if _shipper is not None:
-            _shipper.stop_and_drain(SHIP_SHUTDOWN_TIMEOUT_SECONDS)
-            _shipper = None
-
-
-def reset_log_shipping() -> None:
-    """Reset module state (for tests)."""
-    global _shipper, _segment_handler, _shutdown_registered, _shutdown_done
-    if _shipper is not None:
-        _shipper.stop()
-    if _segment_handler is not None:
-        _segment_handler.close()
-    _shipper = None
-    _segment_handler = None
-    _shutdown_registered = False
-    _shutdown_done = False

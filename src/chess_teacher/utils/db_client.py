@@ -18,7 +18,7 @@ from chess_teacher.utils.general_utils import (
     quote_literal,
     require_ident,
 )
-from chess_teacher.utils.logging_utils import get_logger
+from chess_teacher.utils.logging import get_logger
 from chess_teacher.utils.metadata_utils import ColumnMetadata, TableMetadata
 
 MERGE_COPY_THRESHOLD = 1000

@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Literal
 
 import streamlit as st
 
-from chess_teacher.utils.logging_utils import get_logger
+from chess_teacher.utils.logging import get_logger
 from streamlit_utils.bg_icons import generate_chessboard_svg
 
 if TYPE_CHECKING:

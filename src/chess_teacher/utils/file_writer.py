@@ -5,7 +5,7 @@ from abc import ABC, abstractmethod
 
 from chess_teacher.utils.exception_utils import FileWriteError
 from chess_teacher.utils.file_utils import FileType
-from chess_teacher.utils.logging_utils import EnhancedLogger, get_logger
+from chess_teacher.utils.logging import EnhancedLogger, get_logger
 from chess_teacher.utils.object_storage.base import ObjectStorage
 
 

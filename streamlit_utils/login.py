@@ -4,7 +4,7 @@ from chess_teacher.platform.user import User
 from chess_teacher.utils.db_client import get_db_client
 from chess_teacher.utils.exception_utils import AuthError
 from chess_teacher.utils.general_utils import get_current_datetime
-from chess_teacher.utils.logging_utils import get_logger
+from chess_teacher.utils.logging import get_logger
 from streamlit_utils.session_state import get_current_user, set_current_user, st_user_is_logged_in
 from streamlit_utils.theme import apply_app_theme
 

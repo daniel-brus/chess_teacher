@@ -26,7 +26,7 @@ def reset_raw_storage() -> None:
 
 def get_local_log_dir() -> Path:
     """Return the local filesystem directory for Python log buffering."""
-    from chess_teacher.utils.log_shipping import get_log_buffer_dir
+    from chess_teacher.utils.logging.buffer import get_log_buffer_dir
 
     return get_log_buffer_dir()
 

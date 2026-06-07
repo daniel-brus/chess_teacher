@@ -13,7 +13,7 @@ from chess_teacher.utils.file_utils import (
     validate_existing_file,
 )
 from chess_teacher.utils.files.text_stream_source import TextStreamSource
-from chess_teacher.utils.logging_utils import EnhancedLogger, get_logger
+from chess_teacher.utils.logging import EnhancedLogger, get_logger
 from chess_teacher.utils.object_storage.base import ObjectStorage
 
 

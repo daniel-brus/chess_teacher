@@ -3,7 +3,7 @@
 # Remove orphaned pipeline runs (finished_at EPOCH, started long enough ago)
 
 from chess_teacher.maintenance.main import run_maintenance
-from chess_teacher.utils.logging_utils import get_logger
+from chess_teacher.utils.logging import get_logger
 
 logger = get_logger()
 

@@ -27,7 +27,7 @@ from chess_teacher.utils.general_utils import (
     generate_ident_is_literal,
     get_current_datetime,
 )
-from chess_teacher.utils.logging_utils import EnhancedLogger, get_logger
+from chess_teacher.utils.logging import EnhancedLogger, get_logger
 from chess_teacher.utils.object_storage.base import ObjectStorage
 from chess_teacher.utils.object_storage.factory import get_raw_storage
 from chess_teacher.utils.object_storage.health import check_raw_storage_health

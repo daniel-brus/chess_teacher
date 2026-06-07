@@ -11,7 +11,7 @@ import polars as pl
 
 from chess_teacher.utils.exception_utils import MetadataError
 from chess_teacher.utils.general_utils import load_yaml, quote_ident, quote_literal, require_ident
-from chess_teacher.utils.logging_utils import get_logger
+from chess_teacher.utils.logging import get_logger
 
 logger = get_logger()
 

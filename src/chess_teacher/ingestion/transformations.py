@@ -15,7 +15,7 @@ from chess_teacher.pipelines.transformations import DataFrameTransformation
 from chess_teacher.platform.account import AccountPlatform
 from chess_teacher.utils.chess_utils import Color, Reason, Result
 from chess_teacher.utils.exception_utils import DataError, TransformationError
-from chess_teacher.utils.logging_utils import get_logger
+from chess_teacher.utils.logging import get_logger
 
 logger = get_logger()
 

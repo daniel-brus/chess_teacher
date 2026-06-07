@@ -13,7 +13,7 @@ from botocore.exceptions import ClientError  # type: ignore[import-untyped]
 
 from chess_teacher.utils.exception_utils import FileError
 from chess_teacher.utils.files.text_stream_source import TextStreamSource
-from chess_teacher.utils.logging_utils import EnhancedLogger, get_logger
+from chess_teacher.utils.logging import EnhancedLogger, get_logger
 from chess_teacher.utils.object_storage.base import ObjectStorage
 from chess_teacher.utils.object_storage.keys import key_basename
 

@@ -2,7 +2,7 @@ import streamlit as st
 
 from chess_teacher.platform.user import User
 from chess_teacher.utils.exception_utils import AuthError
-from chess_teacher.utils.logging_utils import get_logger
+from chess_teacher.utils.logging import get_logger
 
 logger = get_logger()
 

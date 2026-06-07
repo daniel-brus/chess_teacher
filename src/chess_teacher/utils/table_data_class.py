@@ -24,7 +24,7 @@ from chess_teacher.utils.general_utils import (
     generate_ident_is_literal,
     generate_idents_are_literals,
 )
-from chess_teacher.utils.logging_utils import get_logger
+from chess_teacher.utils.logging import get_logger
 from chess_teacher.utils.metadata_utils import TableMetadata
 
 if TYPE_CHECKING:

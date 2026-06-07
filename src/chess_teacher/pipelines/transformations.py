@@ -5,7 +5,7 @@ import polars as pl
 
 from chess_teacher.utils.db_client import DatabaseClient, get_db_client
 from chess_teacher.utils.exception_utils import ConfigError, TransformationError
-from chess_teacher.utils.logging_utils import get_logger
+from chess_teacher.utils.logging import get_logger
 from chess_teacher.utils.metadata_utils import ColumnMetadata
 from chess_teacher.utils.table_data_class import TableDataClass
 

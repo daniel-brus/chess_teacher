@@ -20,7 +20,7 @@ from chess_teacher.platform.users_accounts import (
     remove_all_accounts_for_user,
 )
 from chess_teacher.utils.db_client import get_db_client
-from chess_teacher.utils.logging_utils import get_logger
+from chess_teacher.utils.logging import get_logger
 from streamlit_utils.login import require_authenticated_user
 from streamlit_utils.page_config import configure_page
 from streamlit_utils.platform_ui import pick_platform, render_platform_logo

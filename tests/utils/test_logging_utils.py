@@ -1,4 +1,4 @@
-"""Unit tests for logging_utils."""
+"""Unit tests for chess_teacher.utils.logging."""
 
 import json
 import logging
@@ -9,8 +9,10 @@ from pathlib import Path
 
 import pytest
 
-from chess_teacher.utils import logging_utils
-from chess_teacher.utils.log_shipping import reset_log_shipping
+from chess_teacher.utils.logging import config as logging_config
+from chess_teacher.utils.logging import runtime
+from chess_teacher.utils.logging.formatters import ConsoleFormatter, JsonLinesFormatter
+from chess_teacher.utils.logging.runtime import reset_log_shipping
 
 
 @pytest.fixture
@@ -18,19 +20,22 @@ def reset_logging():
     """Reset logging state before each test."""
     root = logging.getLogger()
     root.handlers.clear()
-    logging_utils._logging_configured = False
+    runtime.clear_configured()
     reset_log_shipping()
     yield
     root.handlers.clear()
-    logging_utils._logging_configured = False
+    runtime.clear_configured()
     reset_log_shipping()
 
 
 @pytest.fixture
 def mock_log_dir(mocker):
-    """Mock _get_log_dir to use a temporary directory."""
+    """Mock get_log_buffer_dir to use a temporary directory."""
     temp_dir = Path(tempfile.gettempdir()) / "test_logs"
-    mocker.patch.object(logging_utils, "_get_log_dir", return_value=temp_dir)
+    mocker.patch(
+        "chess_teacher.utils.logging.buffer.get_log_buffer_dir",
+        return_value=temp_dir,
+    )
     return temp_dir
 
 
@@ -41,7 +46,7 @@ class TestConfigureLogging:
         """Test that configure_logging adds console and file handlers."""
         root = logging.getLogger()
 
-        logging_utils.configure_logging()
+        logging_config.configure_logging()
 
         # Verify handlers were added
         assert len(root.handlers) == 2  # console + file
@@ -51,11 +56,11 @@ class TestConfigureLogging:
         root = logging.getLogger()
 
         # First call
-        logging_utils.configure_logging()
+        logging_config.configure_logging()
         first_handler_count = len(root.handlers)
 
         # Second call - should not add more handlers
-        logging_utils.configure_logging()
+        logging_config.configure_logging()
         second_handler_count = len(root.handlers)
 
         assert first_handler_count == second_handler_count
@@ -69,7 +74,7 @@ class TestConfigureLogging:
         def configure_from_thread() -> None:
             try:
                 barrier.wait(timeout=5)
-                logging_utils.configure_logging()
+                logging_config.configure_logging()
             except BaseException as exc:
                 errors.append(exc)
 
@@ -86,7 +91,7 @@ class TestConfigureLogging:
         """Test configure_logging accepts custom level parameter."""
         root = logging.getLogger()
 
-        logging_utils.configure_logging(level="DEBUG")
+        logging_config.configure_logging(level="DEBUG")
 
         assert root.level == logging.DEBUG
 
@@ -94,7 +99,7 @@ class TestConfigureLogging:
         """Test configure_logging defaults to INFO level."""
         root = logging.getLogger()
 
-        logging_utils.configure_logging()
+        logging_config.configure_logging()
 
         assert root.level == logging.INFO
 
@@ -104,19 +109,19 @@ class TestGetLogger:
 
     def test_get_logger_returns_logger(self, reset_logging, mock_log_dir):
         """Test that get_logger returns a Logger instance."""
-        logger = logging_utils.get_logger("test_module")
+        logger = logging_config.get_logger("test_module")
         assert isinstance(logger, logging.Logger)
 
     def test_get_logger_auto_configures(self, reset_logging, mock_log_dir):
         """Test that get_logger triggers configuration."""
-        logging_utils.get_logger("test_module")
+        logging_config.get_logger("test_module")
 
         # Should have configured logging
-        assert logging_utils._logging_configured
+        assert runtime.is_configured()
 
     def test_get_logger_without_name_uses_caller_module(self, reset_logging, mock_log_dir):
         """Test that get_logger without name uses caller module name."""
-        logger = logging_utils.get_logger()
+        logger = logging_config.get_logger()
 
         # Should return a logger (name depends on call context)
         assert isinstance(logger, logging.Logger)
@@ -128,11 +133,14 @@ class TestJsonLinesFormatter:
     @pytest.fixture(autouse=True)
     def _mock_environment(self, mocker):
         """Mock environment variable for all tests in this class."""
-        mocker.patch.object(logging_utils, "get_env_variable", return_value="test")
+        mocker.patch(
+            "chess_teacher.utils.logging.formatters.get_env_variable",
+            return_value="test",
+        )
 
     def test_format_returns_valid_json(self):
         """Test that format returns valid JSON string."""
-        formatter = logging_utils._JsonLinesFormatter()
+        formatter = JsonLinesFormatter()
 
         # Create a mock log record
         record = logging.LogRecord(
@@ -156,7 +164,7 @@ class TestJsonLinesFormatter:
 
     def test_format_includes_timestamp(self):
         """Test that output includes timestamp."""
-        formatter = logging_utils._JsonLinesFormatter()
+        formatter = JsonLinesFormatter()
 
         record = logging.LogRecord(
             name="test",
@@ -178,7 +186,7 @@ class TestJsonLinesFormatter:
 
     def test_format_includes_all_required_fields(self):
         """Test that all required fields are present."""
-        formatter = logging_utils._JsonLinesFormatter()
+        formatter = JsonLinesFormatter()
 
         record = logging.LogRecord(
             name="my_logger",
@@ -200,7 +208,7 @@ class TestJsonLinesFormatter:
 
     def test_format_handles_exception_info(self):
         """Test that exception type and traceback are included when present."""
-        formatter = logging_utils._JsonLinesFormatter()
+        formatter = JsonLinesFormatter()
 
         try:
             raise ValueError("test error")
@@ -229,7 +237,7 @@ class TestJsonLinesFormatter:
 
     def test_format_exception_type_varies_by_exception(self):
         """Test that exc_type changes based on exception type."""
-        formatter = logging_utils._JsonLinesFormatter()
+        formatter = JsonLinesFormatter()
 
         # Test with KeyError
         try:
@@ -254,7 +262,7 @@ class TestJsonLinesFormatter:
 
     def test_format_no_exc_type_when_no_exception(self):
         """Test that exc_type is not included when there's no exception."""
-        formatter = logging_utils._JsonLinesFormatter()
+        formatter = JsonLinesFormatter()
 
         record = logging.LogRecord(
             name="test",
@@ -274,7 +282,7 @@ class TestJsonLinesFormatter:
 
     def test_format_includes_unique_log_id(self):
         """Test that each log record gets a unique log_id."""
-        formatter = logging_utils._JsonLinesFormatter()
+        formatter = JsonLinesFormatter()
 
         record1 = logging.LogRecord(
             name="test",
@@ -315,7 +323,7 @@ class TestJsonLinesFormatter:
 
     def test_format_includes_environment(self):
         """Test that environment field is included in JSON output."""
-        formatter = logging_utils._JsonLinesFormatter()
+        formatter = JsonLinesFormatter()
 
         record = logging.LogRecord(
             name="test",
@@ -335,12 +343,11 @@ class TestJsonLinesFormatter:
 
     def test_format_environment_raises_when_missing(self, mocker):
         """Test that format raises ValueError if ENVIRONMENT is not set."""
-        mocker.patch.object(
-            logging_utils,
-            "get_env_variable",
+        mocker.patch(
+            "chess_teacher.utils.logging.formatters.get_env_variable",
             side_effect=ValueError("Missing required environment variable: ENVIRONMENT"),
         )
-        formatter = logging_utils._JsonLinesFormatter()
+        formatter = JsonLinesFormatter()
 
         record = logging.LogRecord(
             name="test",
@@ -363,10 +370,10 @@ class TestSegmentFileHandler:
 
     def test_active_log_file_created(self, reset_logging, mock_log_dir):
         """Test that logging creates an active segment file under buffer/active/."""
-        from chess_teacher.utils.log_shipping import SegmentFileHandler
+        from chess_teacher.utils.logging.buffer import SegmentFileHandler
 
         root = logging.getLogger()
-        logging_utils.configure_logging(log_dir=mock_log_dir)
+        logging_config.configure_logging(log_dir=mock_log_dir)
 
         file_handler = None
         for handler in root.handlers:
@@ -384,7 +391,7 @@ class TestConsoleFormatter:
 
     def test_format_includes_timestamp(self):
         """Test console output includes timestamp."""
-        formatter = logging_utils._ConsoleFormatter()
+        formatter = ConsoleFormatter()
 
         record = logging.LogRecord(
             name="test",
@@ -403,7 +410,7 @@ class TestConsoleFormatter:
 
     def test_format_includes_level(self):
         """Test console output includes log level."""
-        formatter = logging_utils._ConsoleFormatter()
+        formatter = ConsoleFormatter()
 
         record = logging.LogRecord(
             name="test",
@@ -420,7 +427,7 @@ class TestConsoleFormatter:
 
     def test_format_includes_logger_name(self):
         """Test console output includes logger name."""
-        formatter = logging_utils._ConsoleFormatter()
+        formatter = ConsoleFormatter()
 
         record = logging.LogRecord(
             name="my_module",
@@ -437,7 +444,7 @@ class TestConsoleFormatter:
 
     def test_format_includes_message(self):
         """Test console output includes the message."""
-        formatter = logging_utils._ConsoleFormatter()
+        formatter = ConsoleFormatter()
 
         record = logging.LogRecord(
             name="test",

@@ -1,4 +1,4 @@
-"""Unit tests for log_shipping."""
+"""Unit tests for chess_teacher.utils.logging buffer and shipping."""
 
 from __future__ import annotations
 
@@ -13,13 +13,15 @@ from unittest.mock import MagicMock
 import pytest
 
 from chess_teacher.utils.exception_utils import ConfigError
-from chess_teacher.utils.log_shipping import (
+from chess_teacher.utils.logging import (
     LogBufferWriterLock,
     LogShipper,
     SegmentFileHandler,
     log_storage_key_for_segment,
+    register_segment_handler,
     reset_log_shipping,
     shutdown_logging,
+    start_log_shipping,
 )
 from chess_teacher.utils.object_storage.filesystem import FilesystemObjectStorage
 
@@ -63,7 +65,7 @@ def test_log_buffer_writer_lock_blocks_other_process(
     lock_path.parent.mkdir(parents=True)
     lock_path.write_text("424242", encoding="utf-8")
     monkeypatch.setattr(
-        "chess_teacher.utils.log_shipping._pid_is_alive",
+        "chess_teacher.utils.logging.buffer._pid_is_alive",
         lambda pid: pid == 424242,
     )
 
@@ -176,7 +178,6 @@ def test_shutdown_rotates_and_drains(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     storage, _ = raw_storage
-    from chess_teacher.utils.log_shipping import register_segment_handler, start_log_shipping
     from chess_teacher.utils.object_storage import factory
 
     monkeypatch.setattr(factory, "_raw_storage", storage)
