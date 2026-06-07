@@ -4,18 +4,15 @@ import csv
 import json
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import NamedTuple, TextIO
+from typing import TYPE_CHECKING, TextIO
 
 from chess_teacher.utils.exception_utils import FileReadError
 from chess_teacher.utils.file_utils import FileType, validate_existing_file
-from chess_teacher.utils.logging_utils import EnhancedLogger, get_logger
+from chess_teacher.utils.files.text_stream_source import TextStreamSource
+from chess_teacher.utils.logging import EnhancedLogger, get_logger
 
-
-class TextStreamSource(NamedTuple):
-    """An open text stream and optional label for errors and record metadata."""
-
-    stream: TextIO
-    source_name: str | None = None
+if TYPE_CHECKING:
+    from chess_teacher.utils.object_storage.base import ObjectStorage
 
 
 class FileLoader(ABC):
@@ -44,6 +41,11 @@ class FileLoader(ABC):
         for source in sources:
             records.extend(self.load_source(source))
         return records
+
+    def load_key(self, storage: ObjectStorage, key: str) -> list[dict]:
+        """Open a storage key and parse records."""
+        with storage.open_text(key) as source:
+            return self.load_source(source)
 
     def load_path(self, file_path: Path) -> list[dict]:
         """Validate, open, and parse a local file (convenience for path-based callers)."""

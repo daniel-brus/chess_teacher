@@ -9,7 +9,7 @@ import requests
 from chess_teacher.platform.account import Account, AccountPlatform
 from chess_teacher.utils.exception_utils import AdapterError
 from chess_teacher.utils.general_utils import get_current_datetime
-from chess_teacher.utils.logging_utils import get_logger
+from chess_teacher.utils.logging import get_logger
 
 
 class Adapter(ABC):
@@ -223,8 +223,7 @@ def _validate_year_month(kwargs: dict, launch_year: int = 0) -> tuple[int, int]:
         raise ValueError(f"'month' must be between 1 and 12, got {month}.")
     if year == now.year and month > now.month:
         raise ValueError(
-            f"Cannot request future month {year}/{month:02d} "
-            f"(current: {now.year}/{now.month:02d})."
+            f"Cannot request future month {year}/{month:02d} (current: {now.year}/{now.month:02d})."
         )
 
     return year, month

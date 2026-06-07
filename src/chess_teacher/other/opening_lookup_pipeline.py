@@ -18,8 +18,8 @@ from chess_teacher.pipelines.transformations import (
     RenameColumnsTransformation,
 )
 from chess_teacher.utils.db_client import DatabaseClient
-from chess_teacher.utils.file_loader import TextStreamSource
 from chess_teacher.utils.file_utils import FileType
+from chess_teacher.utils.files.text_stream_source import TextStreamSource
 
 
 class LoadLichessEcoCodesStep(StreamToTableStep):

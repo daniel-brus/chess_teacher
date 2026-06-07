@@ -15,7 +15,7 @@ from chess_teacher.pipelines.transformations import DataFrameTransformation
 from chess_teacher.platform.account import AccountPlatform
 from chess_teacher.utils.chess_utils import Color, Reason, Result
 from chess_teacher.utils.exception_utils import DataError, TransformationError
-from chess_teacher.utils.logging_utils import get_logger
+from chess_teacher.utils.logging import get_logger
 
 logger = get_logger()
 
@@ -122,20 +122,57 @@ class CleanPGNTransformation(DataFrameTransformation):
 
     RAW_PGN_COLUMN = "raw_pgn"
     CLEANED_PGN_COLUMN = "cleaned_pgn"
-    _RESULT_SUFFIX_RE = re.compile(r"\s(1-0|0-1|1/2-1/2|\*)\s*$")
+    _RESULT_SUFFIX_RE = re.compile(r"(?:\s|^)(1-0|0-1|1/2-1/2|\*)\s*$")
+    _ONLY_RESULT_RE = re.compile(r"^\s*(?:1-0|0-1|1/2-1/2|\*)\s*$")
     _BRACE_COMMENT_RE = re.compile(r"\{[^}]*\}")
+    _PARENTHETIC_RE = re.compile(r"\([^()]*\)")
+    _SEMICOLON_COMMENT_RE = re.compile(r";[^\n]*")
+    _NAG_RE = re.compile(r"\$\d+")
+    _BLACK_MOVE_NUMBER_RE = re.compile(r"\b\d+\.{2,3}\s*")
     _TAG_PAIR_LINE_RE = re.compile(r"^\s*\[.*\]\s*$")
+    _WHITE_MOVE_NUMBER_RE = re.compile(r"\b\d+\.\s")
+    _RAW_MOVE_HINT_RE = re.compile(
+        r"\d+\.\s*(?:[NBRQK]?[a-h]?x?[a-h][1-8]|O-O(?:-O)?)",
+        re.IGNORECASE,
+    )
 
     @classmethod
     def _clean_pgn(cls, pgn: str | None) -> str:
         if not pgn or not pgn.strip():
             return ""
 
-        movetext = cls._movetext_from_pgn_parser(pgn)
-        if movetext is not None:
+        movetext = cls._movetext_from_regex(pgn)
+        if cls._regex_movetext_is_trustworthy(pgn, movetext):
             return movetext
 
-        return cls._movetext_from_regex_fallback(pgn)
+        parser_movetext = cls._movetext_from_pgn_parser(pgn)
+        if parser_movetext is not None:
+            return parser_movetext
+
+        return movetext
+
+    @classmethod
+    def _regex_movetext_is_trustworthy(cls, pgn: str, movetext: str) -> bool:
+        """True when regex output is complete enough to skip the PGN parser."""
+        if not movetext:
+            return not cls._raw_pgn_has_movetext(pgn)
+
+        if cls._ONLY_RESULT_RE.match(movetext):
+            return False
+        if "{" in movetext or "}" in movetext or "(" in movetext or "..." in movetext:
+            return False
+        return cls._WHITE_MOVE_NUMBER_RE.search(movetext) is not None
+
+    @classmethod
+    def _raw_pgn_has_movetext(cls, pgn: str) -> bool:
+        chunks = re.split(r"\n\s*\n", pgn, maxsplit=1)
+        body = chunks[-1] if len(chunks) > 1 else pgn
+        body = "\n".join(
+            line for line in body.splitlines() if not cls._TAG_PAIR_LINE_RE.match(line)
+        )
+        body = cls._BRACE_COMMENT_RE.sub("", body)
+        body = cls._RESULT_SUFFIX_RE.sub("", body.strip())
+        return cls._RAW_MOVE_HINT_RE.search(body) is not None
 
     @classmethod
     def _movetext_from_pgn_parser(cls, pgn: str) -> str | None:
@@ -164,15 +201,26 @@ class CleanPGNTransformation(DataFrameTransformation):
         return " ".join(parts)
 
     @classmethod
-    def _movetext_from_regex_fallback(cls, pgn: str) -> str:
+    def _movetext_from_regex(cls, pgn: str) -> str:
         chunks = re.split(r"\n\s*\n", pgn, maxsplit=1)
         body = chunks[-1] if len(chunks) > 1 else pgn
         body = "\n".join(
             line for line in body.splitlines() if not cls._TAG_PAIR_LINE_RE.match(line)
         )
         body = cls._BRACE_COMMENT_RE.sub("", body)
+        while True:
+            stripped = cls._PARENTHETIC_RE.sub("", body)
+            if stripped == body:
+                break
+            body = stripped
+        body = cls._SEMICOLON_COMMENT_RE.sub("", body)
+        body = cls._NAG_RE.sub("", body)
+        body = cls._BLACK_MOVE_NUMBER_RE.sub("", body)
         body = cls._RESULT_SUFFIX_RE.sub("", body.strip())
-        return re.sub(r"\s+", " ", body).strip()
+        body = re.sub(r"\s+", " ", body).strip()
+        if cls._ONLY_RESULT_RE.match(body):
+            return ""
+        return body
 
     def transform(self, df: pl.DataFrame) -> pl.DataFrame:
         if self.RAW_PGN_COLUMN not in df.columns:

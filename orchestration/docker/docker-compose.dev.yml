@@ -22,6 +22,7 @@ services:
       POSTGRES_HOST: db
 
     volumes:
-      - ../../storage/raw:/app/storage/raw
+      # Only needed when STORAGE_BACKEND=filesystem
+      - ../../${STORAGE_ROOT}:/app/${STORAGE_ROOT}
 
     command: python scripts/maintenance.py

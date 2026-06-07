@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from chess_teacher.utils.general_utils import assert_valid_timezone
-from chess_teacher.utils.logging_utils import get_logger
+from chess_teacher.utils.logging import get_logger
 from chess_teacher.utils.table_data_class import TableDataClass
 
 DEFAULT_CRON_TIME = time(3, 0)

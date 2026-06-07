@@ -21,15 +21,15 @@ tile_light = "#F3ECDC"
 tile_dark = "#C7D8C2"
 divider = "rgba(49, 51, 63, 0.25)"
 
-[themes.light.blush]
-label = "Blush"
-tile_light = "#FDF5DF"
-tile_dark = "#EBB4DA"
+[themes.light.confetti]
+label = "Confetti"
+tile_light = "#EDF3C8"
+tile_dark = "#E0B4EB"
 divider = "rgba(58, 49, 43, 0.25)"
 
 [themes.light.coral]
 label = "Coral"
-tile_light = "#FAEEE7"
+tile_light = "#F8E6DC"
 tile_dark = "#FFB6B6"
 divider = "rgba(30, 50, 35, 0.25)"
 

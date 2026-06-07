@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-import base64
 import html
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
-from pathlib import Path
 from typing import Literal
 
 import altair as alt
@@ -17,6 +15,7 @@ import streamlit as st
 
 from chess_teacher.other.game_statistics import AccountCategoryGameCount
 from chess_teacher.platform.account import Account, AccountPlatform
+from chess_teacher.platform.raw_assets import storage_image_data_uri
 from streamlit_utils.layout import ingest_css, render_center_divider_column, three_column_row
 from streamlit_utils.theme import active_appearance, divider_rgba, divider_width_px
 
@@ -70,7 +69,7 @@ class SeriesLegendItem:
     color: str
     label: str
     platform: AccountPlatform | None
-    logo_path: Path | None
+    logo_key: str | None
     share_pct: float | None = None
 
 
@@ -79,7 +78,7 @@ class PieChartSlice:
     label: str
     value: float
     color: str
-    logo_path: Path | None = None
+    logo_key: str | None = None
     platform: AccountPlatform | None = None
 
 
@@ -214,14 +213,14 @@ def rating_legend_items(
     for row in meta.iter_rows(named=True):
         account = accounts_by_id.get(row["account_id"])
         platform = account.platform if account else None
-        logo_path = platform.logo_path(appearance=appearance) if platform else None
+        logo_key = platform.logo_key(appearance=appearance) if platform else None
         items.append(
             SeriesLegendItem(
                 series_id=row["series_id"],
                 color=colors[row["series_id"]],
                 label=row["series_label"],
                 platform=platform,
-                logo_path=logo_path,
+                logo_key=logo_key,
             )
         )
     return items
@@ -253,7 +252,7 @@ def pie_legend_items(slices: list[PieChartSlice]) -> list[SeriesLegendItem]:
             color=s.color,
             label=s.label,
             platform=s.platform,
-            logo_path=s.logo_path,
+            logo_key=s.logo_key,
             share_pct=(100.0 * s.value / total) if total > 0 else None,
         )
         for s in sorted(slices, key=lambda s: s.label)
@@ -278,15 +277,15 @@ def render_series_legend(
     icon_size = 14 if marker == "swatch" else 16
     for item in items:
         icon_html = ""
-        if item.logo_path is not None and item.logo_path.is_file():
-            encoded = base64.b64encode(item.logo_path.read_bytes()).decode("ascii")
-            data_uri = f"data:image/svg+xml;base64,{encoded}"
-            alt_text = item.platform.value if item.platform else "Platform"
-            icon_html = (
-                f'<img src="{data_uri}" width="{icon_size}" height="{icon_size}" '
-                f'alt="{html.escape(alt_text)}" '
-                f'style="vertical-align:middle;margin-right:4px;">'
-            )
+        if item.logo_key is not None:
+            data_uri = storage_image_data_uri(item.logo_key)
+            if data_uri is not None:
+                alt_text = item.platform.value if item.platform else "Platform"
+                icon_html = (
+                    f'<img src="{data_uri}" width="{icon_size}" height="{icon_size}" '
+                    f'alt="{html.escape(alt_text)}" '
+                    f'style="vertical-align:middle;margin-right:4px;">'
+                )
         if marker == "swatch":
             color_marker = (
                 f'<span style="display:inline-block;width:10px;height:10px;'
@@ -354,7 +353,7 @@ def account_category_pie_slices(
             platform=(
                 account.platform if (account := accounts_by_id.get(row.account_id)) else None
             ),
-            logo_path=(account.platform.logo_path(appearance=appearance) if account else None),
+            logo_key=(account.platform.logo_key(appearance=appearance) if account else None),
         )
         for row in sorted(counts, key=lambda row: row.series_label)
     ]

@@ -7,11 +7,10 @@ from typing import Literal
 
 import streamlit as st
 
-from streamlit_utils.platform_ui import app_favicon_path
 from streamlit_utils.theme import reset_theme_css_state
 
 APP_NAME = "Chess Teacher"
-_DEFAULT_FAVICON_FALLBACK = "♟️"
+_DEFAULT_FAVICON = "♟️"
 _DEFAULT_LAYOUT: Literal["centered", "wide"] = "centered"
 _DEFAULT_SIDEBAR: Literal["auto", "expanded", "collapsed"] = "collapsed"
 
@@ -19,8 +18,8 @@ _DEFAULT_SIDEBAR: Literal["auto", "expanded", "collapsed"] = "collapsed"
 def _resolve_page_icon(page_icon: Path | str | None) -> Path | str:
     if page_icon is not None:
         return page_icon
-    favicon = app_favicon_path()
-    return favicon if favicon.is_file() else _DEFAULT_FAVICON_FALLBACK
+    # Streamlit opens ``page_icon`` bytes with PIL; our wordmark is SVG (see render_app_logo).
+    return _DEFAULT_FAVICON
 
 
 def configure_page(

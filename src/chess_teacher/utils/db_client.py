@@ -18,8 +18,8 @@ from chess_teacher.utils.general_utils import (
     quote_literal,
     require_ident,
 )
-from chess_teacher.utils.logging_utils import get_logger
-from chess_teacher.utils.metadata_utils import TableMetadata
+from chess_teacher.utils.logging import get_logger
+from chess_teacher.utils.metadata_utils import ColumnMetadata, TableMetadata
 
 MERGE_COPY_THRESHOLD = 1000
 
@@ -153,6 +153,77 @@ def _require_pg_data_type(data_type: str) -> str:
             "Use a simple type name (e.g. text, integer, timestamptz)."
         )
     return normalized
+
+
+# Maps metadata aliases and information_schema.data_type values to one canonical form.
+_PG_DATA_TYPE_CANONICAL: dict[str, str] = {
+    "timestamptz": "timestamp with time zone",
+    "timestamp with time zone": "timestamp with time zone",
+    "timestamp": "timestamp without time zone",
+    "timestamp without time zone": "timestamp without time zone",
+    "time": "time without time zone",
+    "time without time zone": "time without time zone",
+    "timetz": "time with time zone",
+    "time with time zone": "time with time zone",
+    "varchar": "character varying",
+    "character varying": "character varying",
+    "char": "character",
+    "bpchar": "character",
+    "character": "character",
+    "bool": "boolean",
+    "boolean": "boolean",
+    "int2": "smallint",
+    "smallint": "smallint",
+    "int4": "integer",
+    "integer": "integer",
+    "int8": "bigint",
+    "bigint": "bigint",
+    "float4": "real",
+    "real": "real",
+    "float8": "double precision",
+    "double precision": "double precision",
+    "decimal": "numeric",
+    "numeric": "numeric",
+}
+
+
+def _normalize_pg_data_type_for_compare(data_type: str) -> str:
+    normalized = data_type.strip().lower()
+    return _PG_DATA_TYPE_CANONICAL.get(normalized, normalized)
+
+
+def _pg_data_types_equivalent(expected: str, actual: str) -> bool:
+    return _normalize_pg_data_type_for_compare(expected) == _normalize_pg_data_type_for_compare(
+        actual
+    )
+
+
+def _strip_pg_cast(default_expr: str) -> str:
+    """Remove trailing ``::type`` casts from a PostgreSQL default expression."""
+    expr = default_expr.strip()
+    while "::" in expr:
+        expr = expr.rsplit("::", 1)[0].strip()
+    return expr
+
+
+def _normalize_default_literal(default_expr: str) -> str:
+    """Normalize a PostgreSQL default expression to a comparable literal form."""
+    expr = _strip_pg_cast(default_expr).strip()
+    lower = expr.lower()
+    if lower in {"true", "false"}:
+        return lower
+    if len(expr) >= 2 and expr[0] == "'" and expr[-1] == "'":
+        return expr[1:-1].replace("''", "'")
+    return lower
+
+
+def _column_defaults_equivalent(col: ColumnMetadata, live_default: str | None) -> bool:
+    if col.default is None:
+        return live_default is None
+    if live_default is None:
+        return False
+    meta_expr = col._format_default_value()
+    return _normalize_default_literal(meta_expr) == _normalize_default_literal(live_default)
 
 
 def _require_using_expression(using: str) -> str:
@@ -709,16 +780,15 @@ class DatabaseClient:
                     continue  # already captured in missing_columns
                 live_col = live[name]
 
-                if col.data_type != live_col["data_type"]:
+                if not _pg_data_types_equivalent(col.data_type, live_col["data_type"]):
                     diff.type_mismatches[name] = (col.data_type, live_col["data_type"])
 
                 if col.nullable != live_col["nullable"]:
                     diff.nullable_mismatches[name] = (col.nullable, live_col["nullable"])
 
-                # Normalize default: metadata stores raw value, DB stores SQL expression
-                meta_default = str(col.default) if col.default is not None else None
                 live_default = live_col["default"]
-                if meta_default != live_default:
+                if not _column_defaults_equivalent(col, live_default):
+                    meta_default = col._format_default_value() if col.default is not None else None
                     diff.default_mismatches[name] = (meta_default, live_default)
 
                 meta_comment = col.comment

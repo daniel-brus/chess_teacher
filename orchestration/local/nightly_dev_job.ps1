@@ -7,7 +7,7 @@ $composeFiles = @(
   "-f", "orchestration/docker/docker-compose.dev.yml"
 )
 
-$logDir = Join-Path $project "storage/raw/logs/nightly_job"
+$logDir = Join-Path $project "orchestration/local/logs/nightly_job"
 New-Item -ItemType Directory -Path $logDir -Force | Out-Null
 
 $timestamp = Get-Date -Format "yyyy-MM-dd_HH-mm-ss"

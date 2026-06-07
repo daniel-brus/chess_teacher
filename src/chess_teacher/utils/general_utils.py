@@ -29,6 +29,18 @@ def generate_hash(input: str | list[str]) -> str:
     return hashlib.sha256(input_string.encode()).hexdigest()
 
 
+def build_daily_key(base_key: str, file_name: str | None = None) -> str:
+    """
+    Example:
+        ingested/account/2026/05/08
+        ingested/account/2026/05/08/file_name.jsonl
+    """
+    daily = f"{base_key}/{datetime.now(UTC).strftime('%Y/%m/%d')}"
+    if file_name is None:
+        return daily
+    return f"{daily}/{file_name}"
+
+
 def build_daily_path(base_dir: Path, file_name: str | None = None) -> Path:
     """
     Example:
