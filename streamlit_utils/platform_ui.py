@@ -2,30 +2,26 @@
 
 from __future__ import annotations
 
-import base64
 import html
 from collections.abc import Iterator
 from contextlib import contextmanager
 from enum import StrEnum
-from pathlib import Path
 from typing import Literal
 
 import streamlit as st
 
-from chess_teacher.platform.account import Account, AccountPlatform, app_logo_path
+from chess_teacher.platform.account import Account, AccountPlatform, app_logo_key
+from chess_teacher.platform.raw_assets import storage_image_data_uri
 from streamlit_utils.theme import active_appearance
 
 _DEFAULT_ICON_FRACTION = 0.08
 
 
-def _render_image_file(path: Path, *, width: int, alt: str, centered: bool = False) -> None:
-    """Embed an image from disk (non-interactive; no ``st.image`` lightbox)."""
-    if not path.is_file():
+def _render_storage_image(key: str, *, width: int, alt: str, centered: bool = False) -> None:
+    """Embed an image from raw object storage (non-interactive; no ``st.image`` lightbox)."""
+    data_uri = storage_image_data_uri(key)
+    if data_uri is None:
         return
-    encoded = base64.b64encode(path.read_bytes()).decode("ascii")
-    suffix = path.suffix.lower()
-    mime = "image/svg+xml" if suffix == ".svg" else "image/png"
-    data_uri = f"data:{mime};base64,{encoded}"
     alt_escaped = html.escape(alt)
     img = (
         f'<img src="{data_uri}" width="{width}" alt="{alt_escaped}" '
@@ -37,17 +33,12 @@ def _render_image_file(path: Path, *, width: int, alt: str, centered: bool = Fal
         st.html(img)
 
 
-def app_favicon_path() -> Path:
-    """Browser tab icon (white wordmark)."""
-    return app_logo_path(variant="white")
-
-
 def render_app_logo(*, width: int = 200, centered: bool = True) -> None:
     """Chess Teacher wordmark: black on light UI, white on dark UI."""
     appearance = active_appearance()
     variant: Literal["black", "white"] = "white" if appearance == "dark" else "black"
-    _render_image_file(
-        app_logo_path(variant=variant),
+    _render_storage_image(
+        app_logo_key(variant=variant),
         width=width,
         alt="Chess Teacher",
         centered=centered,
@@ -55,9 +46,9 @@ def render_app_logo(*, width: int = 200, centered: bool = True) -> None:
 
 
 def render_platform_logo(platform: AccountPlatform, *, width: int = 22) -> None:
-    """Draw platform logo from ``RAW_DIR``."""
-    _render_image_file(
-        platform.logo_path(appearance=active_appearance()),
+    """Draw platform logo from raw object storage."""
+    _render_storage_image(
+        platform.logo_key(appearance=active_appearance()),
         width=width,
         alt=platform.value,
     )

@@ -2,19 +2,25 @@
 
 from __future__ import annotations
 
-import base64
-from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import BinaryIO
+from typing import BinaryIO, TypeGuard
 
-from chess_teacher.platform.account import AppLogoVariant, app_logo_path, platform_logo_images_dir
+from chess_teacher.platform.account import AppLogoVariant
+from chess_teacher.platform.raw_assets import (
+    asset_image_key,
+    read_asset_image,
+    storage_image_data_uri,
+)
 from chess_teacher.platform.user import User
 from chess_teacher.utils.db_client import DatabaseClient
-from chess_teacher.utils.env_utils import get_env_variable
-from chess_teacher.utils.exception_utils import ConfigError
+from chess_teacher.utils.object_storage.base import ObjectStorage
+from chess_teacher.utils.object_storage.factory import get_raw_storage
 
 _UPLOAD_PREFIX = "upload:"
 _ASSET_PREFIX = "asset:"
+_UPLOAD_STORAGE_PREFIX = "assets/profile_pictures"
+_UPLOAD_URI_SESSION_KEY = "_chess_teacher_upload_data_uri_cache"
+_PRESIGNED_URL_EXPIRES_IN = 3600
 _APP_LOGO_ASSET_FILES: dict[AppLogoVariant, str] = {
     "black": "app-logo-black.svg",
     "white": "app-logo-white.svg",
@@ -22,56 +28,37 @@ _APP_LOGO_ASSET_FILES: dict[AppLogoVariant, str] = {
 _ALLOWED_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".svg"}
 
 
-class _ProfilePictureStore(ABC):
-    @abstractmethod
-    def save(self, key: str, data: bytes) -> None: ...
+def clear_upload_image_cache(picture: str | None = None) -> None:
+    """Drop cached upload data URIs from the active Streamlit session."""
+    try:
+        import streamlit as st
+    except ImportError:
+        return
 
-    @abstractmethod
-    def read(self, key: str) -> bytes | None: ...
+    if picture is None:
+        st.session_state.pop(_UPLOAD_URI_SESSION_KEY, None)
+        return
 
-    @abstractmethod
-    def delete(self, key: str) -> None: ...
-
-
-class _FilesystemProfilePictureStore(_ProfilePictureStore):
-    def __init__(self, root: Path) -> None:
-        self._root = root
-
-    def _path(self, key: str) -> Path:
-        return self._root / key
-
-    def save(self, key: str, data: bytes) -> None:
-        self._root.mkdir(parents=True, exist_ok=True)
-        self._path(key).write_bytes(data)
-
-    def read(self, key: str) -> bytes | None:
-        path = self._path(key)
-        return path.read_bytes() if path.is_file() else None
-
-    def delete(self, key: str) -> None:
-        self._path(key).unlink(missing_ok=True)
+    cache = st.session_state.get(_UPLOAD_URI_SESSION_KEY)
+    if isinstance(cache, dict):
+        cache.pop(picture, None)
 
 
 class ProfilePictureService:
-    """App-managed profile images (disk today; inject another ``_ProfilePictureStore`` for blob)."""
+    """App-managed profile images stored in raw object storage under ``assets/profile_pictures/``."""
 
-    def __init__(self, store: _ProfilePictureStore | None = None) -> None:
-        self._store = store if store is not None else self._default_store()
+    def __init__(self, storage: ObjectStorage | None = None) -> None:
+        self._storage = storage if storage is not None else get_raw_storage()
 
-    @staticmethod
-    def _default_store() -> _ProfilePictureStore:
-        raw_dir = get_env_variable("RAW_DIR")
-        if not raw_dir:
-            raise ConfigError("RAW_DIR environment variable is not set")
-        root = Path(raw_dir) / "assets" / "profile_pictures"
-        return _FilesystemProfilePictureStore(root)
+    def _object_key(self, filename: str) -> str:
+        return ObjectStorage.resolve_key(_UPLOAD_STORAGE_PREFIX, filename)
 
-    def is_upload(self, picture: str | None) -> bool:
+    def is_upload(self, picture: str | None) -> TypeGuard[str]:
         if picture is None:
             return False
         return picture.startswith(_UPLOAD_PREFIX)
 
-    def is_asset(self, picture: str | None) -> bool:
+    def is_asset(self, picture: str | None) -> TypeGuard[str]:
         if picture is None:
             return False
         return picture.startswith(_ASSET_PREFIX)
@@ -91,11 +78,10 @@ class ProfilePictureService:
         return picture is not None and picture.startswith(("http://", "https://"))
 
     def app_logo_picture_ref(self, *, variant: AppLogoVariant) -> str:
-        """Stable ``User.picture`` value pointing at a bundled wordmark under ``assets/images``."""
+        """Stable ``User.picture`` value pointing at a wordmark under ``assets/images``."""
         filename = _APP_LOGO_ASSET_FILES[variant]
-        path = app_logo_path(variant=variant)
-        if not path.is_file():
-            raise FileNotFoundError(f"App logo not found: {path}")
+        if read_asset_image(filename) is None:
+            raise FileNotFoundError(f"App logo not found: {asset_image_key(filename)}")
         return f"{_ASSET_PREFIX}{filename}"
 
     def picture_img_src(self, picture: str | None) -> str | None:
@@ -117,14 +103,15 @@ class ProfilePictureService:
         """Persist upload; return URL value for ``User.picture``."""
         suffix = self._normalize_upload_suffix(original_filename)
         key = f"{user_id}{suffix}"
-        self._store.save(key, data)
+        self._storage.write_bytes(self._object_key(key), data, overwrite=True)
         return f"{_UPLOAD_PREFIX}{key}"
 
     def delete(self, picture: str | None) -> None:
         """Remove a user upload copy; bundled assets and remote URLs are left untouched."""
         if not self.is_upload(picture):
             return
-        self._store.delete(self._upload_object_key(picture))  # type: ignore[arg-type]
+        clear_upload_image_cache(picture)
+        self._storage.delete(self._object_key(self._upload_object_key(picture)))
 
     def _asset_filename(self, picture: str) -> str:
         if not self.is_asset(picture):
@@ -134,19 +121,11 @@ class ProfilePictureService:
             raise ValueError(f"Unknown asset picture: {filename!r}")
         return filename
 
-    def _read_asset_bytes(self, picture: str | None) -> bytes | None:
+    def _asset_data_uri(self, picture: str | None) -> str | None:
         if not self.is_asset(picture):
             return None
-        path = platform_logo_images_dir() / self._asset_filename(picture)  # type: ignore[arg-type]
-        return path.read_bytes() if path.is_file() else None
-
-    def _asset_data_uri(self, picture: str | None) -> str | None:
-        data = self._read_asset_bytes(picture)
-        if data is None:
-            return None
-        filename = self._asset_filename(picture)  # type: ignore[arg-type]
-        encoded = base64.b64encode(data).decode("ascii")
-        return f"data:{self._mime_type_for_key(filename)};base64,{encoded}"
+        filename = self._asset_filename(picture)
+        return storage_image_data_uri(asset_image_key(filename))
 
     def _upload_object_key(self, picture: str) -> str:
         if picture.startswith(_UPLOAD_PREFIX):
@@ -160,38 +139,59 @@ class ProfilePictureService:
             raise ValueError(f"Unsupported image type: {suffix or '(none)'}")
         return ".jpg" if suffix == ".jpeg" else suffix
 
-    @staticmethod
-    def _mime_type_for_key(key: str) -> str:
-        suffix = Path(key).suffix.lower()
-        if suffix == ".png":
-            return "image/png"
-        if suffix in {".jpg", ".jpeg"}:
-            return "image/jpeg"
-        if suffix == ".webp":
-            return "image/webp"
-        if suffix == ".gif":
-            return "image/gif"
-        if suffix == ".svg":
-            return "image/svg+xml"
-        return "application/octet-stream"
-
     def _read_upload_bytes(self, picture: str | None) -> bytes | None:
         if not self.is_upload(picture):
             return None
-        return self._store.read(self._upload_object_key(picture))  # type: ignore[arg-type]
+        return self._storage.read_bytes(self._object_key(self._upload_object_key(picture)))
+
+    def _session_upload_data_uri(self, picture: str) -> str | None:
+        try:
+            import streamlit as st
+        except ImportError:
+            return None
+
+        cache = st.session_state.get(_UPLOAD_URI_SESSION_KEY)
+        if isinstance(cache, dict):
+            cached = cache.get(picture)
+            if isinstance(cached, str):
+                return cached
+        return None
+
+    def _store_session_upload_data_uri(self, picture: str, data_uri: str) -> None:
+        try:
+            import streamlit as st
+        except ImportError:
+            return
+
+        cache = st.session_state.setdefault(_UPLOAD_URI_SESSION_KEY, {})
+        if isinstance(cache, dict):
+            cache[picture] = data_uri
 
     def _upload_data_uri(self, picture: str | None) -> str | None:
+        if not self.is_upload(picture):
+            return None
+
+        cached = self._session_upload_data_uri(picture)
+        if cached is not None:
+            return cached
+
         data = self._read_upload_bytes(picture)
         if data is None:
             return None
-        key = self._upload_object_key(picture)  # type: ignore[arg-type]
-        encoded = base64.b64encode(data).decode("ascii")
-        return f"data:{self._mime_type_for_key(key)};base64,{encoded}"
+
+        from chess_teacher.platform.raw_assets import bytes_to_data_uri, mime_type_for_key
+
+        key = self._upload_object_key(picture)
+        data_uri = bytes_to_data_uri(data, mime_type_for_key(key))
+        self._store_session_upload_data_uri(picture, data_uri)
+        return data_uri
 
     def _resolve_upload_url(self, picture: str | None) -> str | None:
-        """Public URL for an upload (``None`` until a blob CDN is wired)."""
-        _ = picture
-        return None
+        """Presigned HTTPS URL for an upload when the storage backend supports it."""
+        if not self.is_upload(picture):
+            return None
+        key = self._object_key(self._upload_object_key(picture))
+        return self._storage.presigned_get_url(key, expires_in=_PRESIGNED_URL_EXPIRES_IN)
 
 
 profile_pictures = ProfilePictureService()
@@ -212,12 +212,14 @@ def replace_user_profile_picture(
 ) -> User:
     """Replace the user's avatar with an uploaded image; persist to storage and DB."""
     upload_bytes = _read_upload_data(data)
+    clear_upload_image_cache(user.picture)
     profile_pictures.delete(user.picture)
     picture_url = profile_pictures.save(
         user_id=user.user_id,
         data=upload_bytes,
         original_filename=original_filename,
     )
+    clear_upload_image_cache(picture_url)
     user.upsert_field(db_client, "picture", picture_url)
     user.picture = picture_url
     return user
@@ -230,6 +232,7 @@ def replace_user_profile_picture_with_app_logo(
     variant: AppLogoVariant,
 ) -> User:
     """Point the user's avatar at a bundled black/white wordmark (no copy into uploads)."""
+    clear_upload_image_cache(user.picture)
     profile_pictures.delete(user.picture)
     picture_ref = profile_pictures.app_logo_picture_ref(variant=variant)
     user.upsert_field(db_client, "picture", picture_ref)

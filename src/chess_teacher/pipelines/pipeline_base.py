@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
@@ -16,13 +16,21 @@ from chess_teacher.pipelines.pipeline_helpers import (
     StepResult,
 )
 from chess_teacher.utils.db_client import DatabaseClient, get_db_client
-from chess_teacher.utils.exception_utils import DatabaseError, PipelineError, PipelineLockError
+from chess_teacher.utils.exception_utils import (
+    DatabaseError,
+    FileError,
+    PipelineError,
+    PipelineLockError,
+)
 from chess_teacher.utils.general_utils import (
     as_utc,
     generate_ident_is_literal,
     get_current_datetime,
 )
 from chess_teacher.utils.logging_utils import EnhancedLogger, get_logger
+from chess_teacher.utils.object_storage.base import ObjectStorage
+from chess_teacher.utils.object_storage.factory import get_raw_storage
+from chess_teacher.utils.object_storage.health import check_raw_storage_health
 
 # Sentinel value for finished_at column to signal an active (locked) run.
 _LOCK_EPOCH: datetime = datetime(1970, 1, 1, tzinfo=UTC)
@@ -44,6 +52,7 @@ class PipelineContext:
     user_id: str | None = None
     account_id: str | None = None
     progress_window: ProgressWindow | None = None
+    loaded_storage_keys: list[str] = field(default_factory=list)
 
     def progress_next(self, message: str) -> None:
         if self.progress_window is not None:
@@ -194,6 +203,7 @@ class Pipeline:
         user_id: str | None = None,
         account_id: str | None = None,
         db_client: DatabaseClient | None = None,
+        storage: ObjectStorage | None = None,
         lock_timeout_hours: float = _DEFAULT_LOCK_TIMEOUT_HOURS,
         logger: EnhancedLogger | None = None,
         progress_window: ProgressWindow | None = None,
@@ -205,6 +215,7 @@ class Pipeline:
         self.context.progress_clear()  # Clear any previous progress messages
         self.steps = steps
         self.db_client = db_client or get_db_client()
+        self._storage = storage
         self.lock_timeout_hours = lock_timeout_hours
         self.logger = logger or get_logger()
         self._run_id: str | None = None
@@ -327,6 +338,8 @@ class Pipeline:
         """Checks and setup before any step runs."""
         self._check_db_connection()
         self.context.progress_pop()
+        self._check_storage_connection()
+        self.context.progress_pop()
         self._acquire_lock(started_at)
         self.context.progress_pop()
 
@@ -448,6 +461,21 @@ class Pipeline:
         except Exception as e:
             self.logger.log_and_raise(
                 DatabaseError(f"[Pipeline:{self.name}] DB unreachable before run: {e}")
+            )
+
+    def _check_storage_connection(self) -> None:
+        """Verify raw object storage is reachable before starting."""
+        self.context.progress_next("Checking raw storage connection...")
+        try:
+            check_raw_storage_health(
+                self._storage if self._storage is not None else get_raw_storage()
+            )
+            self.logger.info(f"[Pipeline:{self.name}] Raw storage connection OK.")
+            self.context.progress_pop()
+            self.context.progress_success("Raw storage connection OK.")
+        except Exception as e:
+            self.logger.log_and_raise(
+                FileError(f"[Pipeline:{self.name}] Raw storage unreachable before run: {e}")
             )
 
     def _save_run_result(self, result: PipelineRunResult) -> None:

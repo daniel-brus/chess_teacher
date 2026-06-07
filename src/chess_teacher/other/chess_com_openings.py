@@ -122,7 +122,7 @@ def refresh_missing_slug_titles(
     """
     Fetch Chess.com titles for slugs missing from ``other.raw_chess_com_openings``.
 
-    Existing rows are left unchanged. Newly resolved titles are inserted.
+    Existing rows are left unchanged. Newly resolved titles are upserted.
     """
     log = logger or get_logger()
     lookup = load_slug_title_lookup(db_client)
@@ -163,7 +163,7 @@ def refresh_missing_slug_titles(
             time.sleep(request_delay_s)
 
     if new_records:
-        db_client.insert(new_records, metadata, on_conflict="nothing")
+        db_client.merge(new_records, metadata)
 
     unresolved = len(missing_slugs) - fetched
     log.info(

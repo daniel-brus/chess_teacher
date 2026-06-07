@@ -16,10 +16,9 @@ _logging_configured = False
 
 def _get_log_dir() -> Path:
     """Get the log directory path from env or default."""
-    base = get_env_variable("RAW_DIR")
-    if not base:
-        raise ConfigError("Missing env var to configure log_dir: RAW_DIR")
-    return Path(base + "/logs/python")
+    from chess_teacher.utils.object_storage.factory import get_local_log_dir
+
+    return get_local_log_dir()
 
 
 class _JsonLinesFormatter(logging.Formatter):

@@ -14,6 +14,7 @@ sys.path.insert(0, str(project_root))
 
 # chess_teacher configures logging at import time (needs RAW_DIR + ENVIRONMENT)
 os.environ.setdefault("RAW_DIR", str(Path(tempfile.gettempdir()) / "chess_teacher_test"))
+os.environ.setdefault("STORAGE_BACKEND", "filesystem")
 os.environ.setdefault("ENVIRONMENT", "test")
 
 

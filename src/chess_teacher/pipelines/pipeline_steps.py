@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from enum import StrEnum
-from pathlib import Path
 from typing import ClassVar
 from uuid import uuid4
 
@@ -17,10 +16,13 @@ from chess_teacher.pipelines.transformations import (
 )
 from chess_teacher.utils.db_client import DatabaseClient, MergeStrategy, WriteResult
 from chess_teacher.utils.exception_utils import MetadataError
-from chess_teacher.utils.file_loader import FileLoader, FileLoaderFactory, TextStreamSource
-from chess_teacher.utils.file_utils import FileType, discover_files, move_file
+from chess_teacher.utils.file_loader import FileLoader, FileLoaderFactory
+from chess_teacher.utils.file_utils import FileType
+from chess_teacher.utils.files.text_stream_source import TextStreamSource
 from chess_teacher.utils.general_utils import get_current_datetime
 from chess_teacher.utils.metadata_utils import TableMetadata
+from chess_teacher.utils.object_storage.base import ObjectStorage
+from chess_teacher.utils.object_storage.factory import get_raw_storage
 from chess_teacher.utils.table_data_class import TableDataClass
 
 
@@ -212,19 +214,16 @@ class TransformStep(LoadToDatabaseStep):
 
 class StorageToTableStep(LoadToDatabaseStep):
     """
-    Load data from storage into a table.
+    Load data from object storage into a table.
 
     Args:
-        storage_path: Path to load from. Interpretation depends on ``recursive``:
-            - ``recursive=False``: must be a single file (e.g. ``data/file.jsonl``).
-            - ``recursive=True``: must be a directory; all matching files under it
-              (including subdirectories) are loaded and concatenated.
+        storage_path: Key prefix to load from. Interpretation depends on ``recursive``:
+            - ``recursive=False``: must be a single object key (e.g. ``data/file.jsonl``).
+            - ``recursive=True``: all matching objects under the prefix are loaded.
         file_type: File format to load (also used as the required suffix, e.g. ``.jsonl``).
-        quarantine_path: When set, files that fail to load or whose batch fails to save
-            are moved here, preserving relative paths under ``storage_path`` (same layout
-            as archive). Successfully saved files are left in place (use a follow-up
-            archive step to move them to backup storage).
-        glob_pattern: Optional regex applied to each candidate path (POSIX form).
+        quarantine_path: When set, objects that fail to load or whose batch fails to save
+            are moved here, preserving relative paths under ``storage_path``.
+        glob_pattern: Optional regex applied to each candidate key (POSIX form).
     """
 
     PRE_LOAD_TRANSFORMATIONS: ClassVar[list[DataFrameTransformation]] = [
@@ -241,7 +240,8 @@ class StorageToTableStep(LoadToDatabaseStep):
         *,
         recursive: bool = True,
         glob_pattern: str | None = None,
-        quarantine_path: str | Path | None = None,
+        quarantine_path: str | None = None,
+        storage: ObjectStorage | None = None,
         loading_strategy: LoadingStrategy,
         merge_strategy: MergeStrategy | None = None,
         cascade: bool | None = None,
@@ -256,13 +256,17 @@ class StorageToTableStep(LoadToDatabaseStep):
             cascade=cascade,
             match_condition=match_condition,
         )
-        self.storage_path = storage_path
+        self.storage_path = storage_path.strip("/")
         self.recursive = recursive
         self.glob_pattern = glob_pattern
-        self.quarantine_path = Path(quarantine_path) if quarantine_path is not None else None
+        self.quarantine_path = quarantine_path.strip("/") if quarantine_path else None
+        self._storage = storage
         self.file_type = file_type
         self.file_loader: FileLoader = FileLoaderFactory.get_loader(file_type, logger=self.logger)
-        self._loaded_paths: list[Path] = []
+        self._loaded_keys: list[str] = []
+
+    def _get_storage(self) -> ObjectStorage:
+        return self._storage if self._storage is not None else get_raw_storage()
 
     def _resolve_storage_paths(self, db_client: DatabaseClient, context: PipelineContext) -> None:
         """
@@ -274,63 +278,59 @@ class StorageToTableStep(LoadToDatabaseStep):
 
     def run(self, db_client: DatabaseClient, context: PipelineContext) -> None:
         """
-        Load, transform, and save; quarantine source files on load or save failure.
+        Load, transform, and save; quarantine source objects on load or save failure.
 
-        Per-file load failures quarantine that file only. Transform/save failures
-        quarantine all paths recorded in ``_loaded_paths``.
+        Per-object load failures quarantine that key only. Transform/save failures
+        quarantine all keys recorded in ``_loaded_keys``.
         """
         self._resolve_storage_paths(db_client, context)
-        self._loaded_paths = []
+        self._loaded_keys = []
         try:
             super().run(db_client, context)
         except Exception:
-            self._quarantine_paths(self._loaded_paths)
+            self._quarantine_keys(self._loaded_keys)
             raise
 
-    def _quarantine_destination(self, source: Path) -> Path:
-        assert self.quarantine_path is not None
-        storage_root = Path(self.storage_path)
-        if self.recursive:
-            relative = source.relative_to(storage_root)
-        else:
-            relative = Path(source.name)
-        destination = self.quarantine_path / relative
-        if not destination.exists():
-            return destination
-        return destination.with_name(f"{destination.stem}_{uuid4().hex}{destination.suffix}")
+    def _relative_key(self, source_key: str) -> str:
+        return ObjectStorage.relative_key_under(source_key, self.storage_path)
 
-    def _quarantine_paths(self, paths: list[Path]) -> None:
+    def _quarantine_destination_key(self, source_key: str) -> str:
+        assert self.quarantine_path is not None
+        relative = self._relative_key(source_key)
+        destination = ObjectStorage.resolve_key(self.quarantine_path, relative)
+        storage = self._get_storage()
+        if storage.read_bytes(destination) is not None:
+            destination = ObjectStorage.resolve_key(
+                self.quarantine_path,
+                ObjectStorage.unique_key_variant(relative, uuid4().hex),
+            )
+        return destination
+
+    def _quarantine_keys(self, keys: list[str]) -> None:
         if self.quarantine_path is None:
             return
-        for path in paths:
-            if not path.exists():
-                continue
-            destination = self._quarantine_destination(path)
+        storage = self._get_storage()
+        for key in keys:
+            destination = self._quarantine_destination_key(key)
             try:
-                move_file(
-                    path,
-                    destination,
-                    overwrite=False,
-                    mkdir=True,
-                    logger=self.logger,
-                )
-                self.logger.warning(f"[{self.name}] Quarantined {path} -> {destination}.")
+                storage.move_verified(key, destination, overwrite=False)
+                self.logger.warning(f"[{self.name}] Quarantined {key} -> {destination}.")
             except Exception as e:
-                self.logger.error(f"[{self.name}] Failed to quarantine {path}: {e}")
+                self.logger.error(f"[{self.name}] Failed to quarantine {key}: {e}")
 
     def _load_records(self, db_client: DatabaseClient, context: PipelineContext) -> pl.DataFrame:
         """Load records from storage into a Polars DataFrame."""
-        paths = discover_files(
-            Path(self.storage_path),
+        storage = self._get_storage()
+        keys = storage.list_keys(
+            self.storage_path,
             recursive=self.recursive,
             suffix=self.file_type.value,
             glob_pattern=self.glob_pattern,
-            logger=self.logger,
         )
 
-        if not paths:
+        if not keys:
             self.logger.warning(
-                f"[{self.name}] No files found at {self.storage_path} "
+                f"[{self.name}] No objects found at {self.storage_path} "
                 f"(recursive={self.recursive}, suffix=.{self.file_type.value}, "
                 f"glob_pattern={self.glob_pattern!r})."
             )
@@ -338,41 +338,36 @@ class StorageToTableStep(LoadToDatabaseStep):
             context.progress_warning("No files found to extract records from.")
             return pl.DataFrame()
 
-        file_total = len(paths)
-        context.progress_update(
-            f"Found {file_total} file {'s' if file_total != 1 else ''} to load."
-        )
+        file_total = len(keys)
+        context.progress_update(f"Found {file_total} file{'s' if file_total != 1 else ''} to load.")
         records: list[dict] = []
-        for file_index, path in enumerate(paths, start=1):
+        for file_index, key in enumerate(keys, start=1):
             context.progress_update(f"Loading file {file_index}/{file_total}...")
-            self.logger.info(f"[{self.name}] Loading {path}.")
+            self.logger.info(f"[{self.name}] Loading {key}.")
             try:
-                with path.open(encoding="utf-8-sig") as stream:
-                    source = TextStreamSource(stream, source_name=path.as_posix())
-                    file_records = self.file_loader.load_source(source)
+                file_records = self.file_loader.load_key(storage, key)
             except Exception as e:
-                self.logger.warning(f"[{self.name}] Failed to load {path}: {e}")
-                self._quarantine_paths([path])
+                self.logger.warning(f"[{self.name}] Failed to load {key}: {e}")
+                self._quarantine_keys([key])
                 continue
-            self.logger.info(f"[{self.name}] Loaded {len(file_records)} records from {path}.")
+            self.logger.info(f"[{self.name}] Loaded {len(file_records)} records from {key}.")
 
-            # add filename to records as metadata
             try:
-                source_file = path.resolve().as_posix()
                 ingestion_ts = get_current_datetime()
                 for record in file_records:
-                    record["_source_file"] = source_file
+                    record["_source_file"] = key
                     record["_ingestion_ts"] = ingestion_ts
                 records.extend(file_records)
-                self._loaded_paths.append(path)
-                self.logger.info(f"[{self.name}] Added metadata to {path}.")
+                self._loaded_keys.append(key)
+                context.loaded_storage_keys.append(key)
+                self.logger.info(f"[{self.name}] Added metadata to {key}.")
             except Exception as e:
-                self.logger.warning(f"[{self.name}] Failed to add metadata to {path}: {e}")
-                self._quarantine_paths([path])
-        self.logger.info(f"[{self.name}] Loaded {len(records)} records from {len(paths)} paths.")
+                self.logger.warning(f"[{self.name}] Failed to add metadata to {key}: {e}")
+                self._quarantine_keys([key])
+        self.logger.info(f"[{self.name}] Loaded {len(records)} records from {len(keys)} keys.")
         context.progress_update(
             f"Loaded {len(records)} record{'s' if len(records) != 1 else ''}. "
-            f"Processed {len(self._loaded_paths)}/{len(paths)} file{'s' if len(self._loaded_paths) != 1 else ''} successfully."
+            f"Processed {len(self._loaded_keys)}/{len(keys)} file{'s' if len(self._loaded_keys) != 1 else ''} successfully."
         )
 
         df = pl.DataFrame(records)

@@ -1,5 +1,4 @@
 from datetime import datetime
-from pathlib import Path
 from typing import Literal
 from uuid import uuid4
 
@@ -31,39 +30,31 @@ from chess_teacher.pipelines.transformations import (
 )
 from chess_teacher.platform.account import Account
 from chess_teacher.utils.db_client import DatabaseClient
-from chess_teacher.utils.env_utils import get_env_variable
 from chess_teacher.utils.exception_utils import (
     AdapterError,
-    ConfigError,
     DatabaseError,
     FileError,
     PipelineError,
 )
-from chess_teacher.utils.file_utils import FileType, discover_files, move_file, remove_file
+from chess_teacher.utils.file_utils import FileType
 from chess_teacher.utils.file_writer import FileWriter, FileWriterFactory
-from chess_teacher.utils.general_utils import build_daily_path, get_current_datetime
+from chess_teacher.utils.general_utils import build_daily_key, get_current_datetime
+from chess_teacher.utils.object_storage.base import ObjectStorage
+from chess_teacher.utils.object_storage.factory import get_raw_storage
 
 _INGESTION_FILE_TYPE = FileType.JSONL
 
 
-def _get_account_storage_path(
+def _get_account_storage_prefix(
     folder: Literal["ingested", "failed", "processed"], account: Account
-) -> Path:
-    """Account-level storage root (all dates under YYYY/MM/DD subdirs)."""
-    try:
-        raw_dir = get_env_variable("RAW_DIR")
-        if not raw_dir:
-            raise ConfigError("RAW_DIR environment variable is not set")
-        path = Path(raw_dir) / folder / account.account_id
-        path.mkdir(parents=True, exist_ok=True)
-        return path
-    except ValueError as e:
-        raise ConfigError(f"RAW_DIR environment variable is not set: {e}")
+) -> str:
+    """Account-level storage prefix (all dates under YYYY/MM/DD subdirs)."""
+    return ObjectStorage.resolve_key(folder, account.account_id)
 
 
-def _get_daily_ingest_path(account: Account) -> Path:
-    """Today's ingest directory where API stream writes new files."""
-    return build_daily_path(_get_account_storage_path("ingested", account))
+def _get_daily_ingest_prefix(account: Account) -> str:
+    """Today's ingest prefix where API stream writes new objects."""
+    return build_daily_key(_get_account_storage_prefix("ingested", account))
 
 
 def _fetch_account(db_client: DatabaseClient, context: PipelineContext) -> Account:
@@ -73,13 +64,17 @@ def _fetch_account(db_client: DatabaseClient, context: PipelineContext) -> Accou
 
 
 class IngestionFromAPIStreamStep(PipelineStep):
-    """Ingest data from an API stream into a storage location."""
+    """Ingest data from an API stream into object storage."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, storage: ObjectStorage | None = None) -> None:
         super().__init__(name="IngestionFromAPIStream")
+        self._storage = storage
+
+    def _get_storage(self) -> ObjectStorage:
+        return self._storage if self._storage is not None else get_raw_storage()
 
     def _generate_filename(self, account: Account) -> str:
-        """Generate the name of the output file."""
+        """Generate the name of the output object."""
         return f"{account.platform.value}_{uuid4().hex}.{_INGESTION_FILE_TYPE.value}"
 
     def _get_last_updated(self, db_client: DatabaseClient, account: Account) -> datetime | None:
@@ -104,11 +99,12 @@ class IngestionFromAPIStreamStep(PipelineStep):
 
     def run(self, db_client: DatabaseClient, context: PipelineContext) -> None:
         account = _fetch_account(db_client, context)
-        target_base_path = _get_daily_ingest_path(account)
+        storage = self._get_storage()
+        target_prefix = _get_daily_ingest_prefix(account)
         adapter = AdapterFactory.from_account(account)
         writer: FileWriter = FileWriterFactory.get_writer(_INGESTION_FILE_TYPE, logger=self.logger)
 
-        output_path = target_base_path / self._generate_filename(account)
+        output_key = ObjectStorage.resolve_key(target_prefix, self._generate_filename(account))
         since = self._get_last_updated(db_client, account)
         since_new = get_current_datetime()
 
@@ -125,8 +121,8 @@ class IngestionFromAPIStreamStep(PipelineStep):
         context.progress_update(
             f"Writing {len(records)} game{'s' if len(records) != 1 else ''} to storage..."
         )
-        writer.write(records, output_path)
-        self.logger.info(f"[{self.name}] Written to {output_path}.")
+        writer.write(records, output_key, storage)
+        self.logger.info(f"[{self.name}] Written to {output_key}.")
         self._set_last_updated(db_client, account, since_new)
         self.logger.info(f"[{self.name}] Ingestion completed.")
         context.progress_pop()
@@ -136,12 +132,13 @@ class IngestionFromAPIStreamStep(PipelineStep):
 class LoadIngestedFilesToDB(StorageToTableStep):
     """Load ingested files to the database."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, storage: ObjectStorage | None = None) -> None:
         super().__init__(
             name="LoadIngestedFilesToDB",
             storage_path="",
             file_type=_INGESTION_FILE_TYPE,
             data_class=RawGame,
+            storage=storage,
             transformations=[
                 FilterGamesWithPGNTransformation(),
                 RenameColumnsTransformation({"pgn": "raw_pgn"}),
@@ -168,20 +165,17 @@ class LoadIngestedFilesToDB(StorageToTableStep):
 
     def _resolve_storage_paths(self, db_client: DatabaseClient, context: PipelineContext) -> None:
         account = _fetch_account(db_client, context)
-        self.storage_path = str(_get_account_storage_path("ingested", account))
-        self.quarantine_path = _get_account_storage_path("failed", account)
+        self.storage_path = _get_account_storage_prefix("ingested", account)
+        self.quarantine_path = _get_account_storage_prefix("failed", account)
 
 
 class ArchiveIngestedFilesStep(PipelineStep):
     """
-    Move successfully processed ingested files from source storage to archive storage.
+    Move successfully processed ingested objects from ``ingested/`` to ``processed/``.
 
-    Intended to run after ``StorageToTableStep`` in the same pipeline so only files
-    that were loaded into the database (and not quarantined) remain under ``source_path``.
-
-    When ``recursive=True``, any remaining files under ``source_path`` are removed afterward
-    (with a warning per file, since they were not archived), then empty subdirectories
-    are deleted.
+    Lists every ``.jsonl`` object under the account's ingested prefix (not only keys
+    recorded during load) so nothing is left behind after a successful pipeline run.
+    Uses :meth:`ObjectStorage.move_verified` so the source key is gone after each move.
     """
 
     file_type: FileType = FileType.JSONL
@@ -191,99 +185,80 @@ class ArchiveIngestedFilesStep(PipelineStep):
         *,
         recursive: bool = True,
         glob_pattern: str | None = None,
+        storage: ObjectStorage | None = None,
     ) -> None:
         super().__init__(name="ArchiveIngestedFiles")
         self.recursive = recursive
         self.glob_pattern = glob_pattern
+        self._storage = storage
 
-    def _archive_destination(self, source: Path, source_path: Path, archive_path: Path) -> Path:
-        """Preserve relative layout under source_path in the archive."""
-        if self.recursive:
-            relative = source.relative_to(source_path)
-        else:
-            relative = Path(source.name)
-        destination = archive_path / relative
-        if not destination.exists():
-            return destination
-        return destination.with_name(f"{destination.stem}_{uuid4().hex}{destination.suffix}")
+    def _get_storage(self) -> ObjectStorage:
+        return self._storage if self._storage is not None else get_raw_storage()
 
-    def _remove_empty_subdirectories(self, root: Path) -> None:
-        """Remove empty subdirectories under root (deepest first). Keeps root itself."""
-        if not root.is_dir():
-            return
-        for directory in sorted(
-            (p for p in root.rglob("*") if p.is_dir()),
-            key=lambda p: len(p.parts),
-            reverse=True,
-        ):
-            try:
-                directory.rmdir()
-            except OSError:
-                pass
-
-    def _empty_source_path(self, source_path: Path) -> None:
-        """Remove all files and empty subdirectories under source_path."""
-        if not source_path.exists():
-            return
-
-        remaining = discover_files(
-            source_path,
-            recursive=True,
-            logger=self.logger,
-        )
-        if remaining:
-            self.logger.warning(
-                f"[{self.name}] Found {len(remaining)} leftover files to delete under {source_path}."
+    def _archive_destination(self, source_key: str, source_prefix: str, archive_prefix: str) -> str:
+        """Preserve relative layout under source_prefix in the archive."""
+        relative = ObjectStorage.relative_key_under(source_key, source_prefix)
+        destination = ObjectStorage.resolve_key(archive_prefix, relative)
+        storage = self._get_storage()
+        if storage.read_bytes(destination) is not None:
+            destination = ObjectStorage.resolve_key(
+                archive_prefix,
+                ObjectStorage.unique_key_variant(relative, uuid4().hex),
             )
-        for path in remaining:
-            remove_file(path, logger=self.logger)
+        return destination
 
-        self._remove_empty_subdirectories(source_path)
-        self.logger.info(
-            f"[{self.name}] Removed {len(remaining)} leftover file(s) under {source_path} and emptied subdirectories."
+    def _list_ingested_keys(self, storage: ObjectStorage, source_prefix: str) -> list[str]:
+        return storage.list_keys(
+            source_prefix,
+            recursive=self.recursive,
+            suffix=self.file_type.value,
+            glob_pattern=self.glob_pattern,
         )
 
     def run(self, db_client: DatabaseClient, context: PipelineContext) -> None:
         account = _fetch_account(db_client, context)
-        source_path = _get_account_storage_path("ingested", account)
-        archive_path = _get_account_storage_path("processed", account)
+        storage = self._get_storage()
+        source_prefix = _get_account_storage_prefix("ingested", account)
+        archive_prefix = _get_account_storage_prefix("processed", account)
 
-        paths = discover_files(
-            source_path,
-            recursive=self.recursive,
-            suffix=self.file_type.value,
-            glob_pattern=self.glob_pattern,
-            logger=self.logger,
-        )
+        keys = self._list_ingested_keys(storage, source_prefix)
+        loaded_count = len(context.loaded_storage_keys)
+        if loaded_count and loaded_count != len(keys):
+            self.logger.warning(
+                f"[{self.name}] Loaded {loaded_count} file(s) but found {len(keys)} "
+                f"under {source_prefix}; archiving all listed objects."
+            )
 
-        if not paths:
-            self.logger.info(f"[{self.name}] No files to archive under {source_path}.")
+        if not keys:
+            self.logger.info(f"[{self.name}] No objects to archive under {source_prefix}.")
             context.progress_pop()
             context.progress_warning("No ingested files to archive.")
-        else:
-            file_total = len(paths)
-            archived = 0
-            for file_index, path in enumerate(paths, start=1):
-                context.progress_update(f"Archiving file {file_index}/{file_total}: {path.name}...")
-                destination = self._archive_destination(path, source_path, archive_path)
-                try:
-                    move_file(
-                        path,
-                        destination,
-                        overwrite=False,
-                        mkdir=True,
-                        logger=self.logger,
-                    )
-                except FileError as e:
-                    self.logger.log_and_raise(
-                        FileError(f"Failed to archive {path} to {destination}: {e}")
-                    )
-                self.logger.info(f"[{self.name}] Archived {path} -> {destination}.")
-                archived += 1
+            return
 
-            self.logger.info(f"[{self.name}] Archived {archived} file(s) to {archive_path}.")
-            context.progress_pop()
-            context.progress_success(f"Archived {archived} file(s).")
+        file_total = len(keys)
+        archived = 0
 
-        if self.recursive:
-            self._empty_source_path(source_path)
+        for file_index, key in enumerate(keys, start=1):
+            label = ObjectStorage.key_basename(key)
+            context.progress_update(f"Archiving file {file_index}/{file_total}: {label}...")
+            destination = self._archive_destination(key, source_prefix, archive_prefix)
+            try:
+                storage.move_verified(key, destination, overwrite=False)
+            except FileError as e:
+                self.logger.log_and_raise(
+                    FileError(f"Failed to archive {key} to {destination}: {e}")
+                )
+            self.logger.info(f"[{self.name}] Archived {key} -> {destination}.")
+            archived += 1
+
+        leftover = self._list_ingested_keys(storage, source_prefix)
+        if leftover:
+            self.logger.warning(
+                f"[{self.name}] {len(leftover)} object(s) still under {source_prefix} "
+                f"after archive; forcing delete."
+            )
+            storage.delete_keys(leftover, missing_ok=False)
+
+        self.logger.info(f"[{self.name}] Archived {archived} object(s) to {archive_prefix}.")
+        context.progress_pop()
+        context.progress_success(f"Archived {archived} file(s).")

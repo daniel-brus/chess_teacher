@@ -4,6 +4,7 @@ import streamlit as st
 
 from chess_teacher.platform.account import Account
 from chess_teacher.platform.profile_picture import (
+    clear_upload_image_cache,
     profile_pictures,
     replace_user_profile_picture,
     replace_user_profile_picture_with_app_logo,
@@ -111,6 +112,7 @@ def _reset_profile_picture_to_provider() -> None:
         st.info("Your sign-in provider did not supply a profile picture.")
         return
 
+    clear_upload_image_cache(user.picture)
     profile_pictures.delete(user.picture)
     user.upsert_field(db_client, "picture", provider_picture)
     user.picture = provider_picture
