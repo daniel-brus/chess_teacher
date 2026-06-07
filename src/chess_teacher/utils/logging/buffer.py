@@ -9,6 +9,7 @@ import threading
 import time
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TextIO
 
 from chess_teacher.utils.env_utils import get_env_variable, get_hostname
 from chess_teacher.utils.exception_utils import ConfigError
@@ -126,7 +127,7 @@ class SegmentFileHandler(logging.Handler):
         )
         self.encoding = encoding
         self._lock = threading.Lock()
-        self._stream: object | None = None
+        self._stream: TextIO | None = None
         self._opened_at = time.monotonic()
         self.active_path = self.buffer_dir / "active" / "app.log"
         self._writer_lock = LogBufferWriterLock(self.buffer_dir)
