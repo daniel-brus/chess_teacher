@@ -4,6 +4,7 @@ import json
 import logging
 import sys
 import tempfile
+import threading
 from pathlib import Path
 
 import pytest
@@ -58,6 +59,28 @@ class TestConfigureLogging:
         second_handler_count = len(root.handlers)
 
         assert first_handler_count == second_handler_count
+
+    def test_configure_logging_is_thread_safe(self, reset_logging, mock_log_dir):
+        """Concurrent configure_logging calls should not create duplicate file handlers."""
+        root = logging.getLogger()
+        barrier = threading.Barrier(8)
+        errors: list[BaseException] = []
+
+        def configure_from_thread() -> None:
+            try:
+                barrier.wait(timeout=5)
+                logging_utils.configure_logging()
+            except BaseException as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=configure_from_thread) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+
+        assert not errors
+        assert len(root.handlers) == 2
 
     def test_configure_logging_with_custom_level(self, reset_logging, mock_log_dir):
         """Test configure_logging accepts custom level parameter."""

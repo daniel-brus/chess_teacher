@@ -41,17 +41,34 @@ def raw_storage():
     shutil.rmtree(root, ignore_errors=True)
 
 
-def test_log_buffer_writer_lock_blocks_second_handler(buffer_dir: Path) -> None:
+def test_log_buffer_writer_lock_same_process_second_handler_is_follower(buffer_dir: Path) -> None:
     first = SegmentFileHandler(buffer_dir, interval_seconds=3600, instance_id="host")
     assert first.owns_active_log
 
-    with pytest.raises(ConfigError, match="already owned"):
-        SegmentFileHandler(buffer_dir, interval_seconds=3600, instance_id="host")
+    second = SegmentFileHandler(buffer_dir, interval_seconds=3600, instance_id="host")
+    assert not second.owns_active_log
 
     first.close()
     third = SegmentFileHandler(buffer_dir, interval_seconds=3600, instance_id="host")
     assert third.owns_active_log
     third.close()
+    second.close()
+
+
+def test_log_buffer_writer_lock_blocks_other_process(
+    buffer_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lock_path = buffer_dir / "active" / ".writer.lock"
+    lock_path.parent.mkdir(parents=True)
+    lock_path.write_text("424242", encoding="utf-8")
+    monkeypatch.setattr(
+        "chess_teacher.utils.log_shipping._pid_is_alive",
+        lambda pid: pid == 424242,
+    )
+
+    with pytest.raises(ConfigError, match="already owned"):
+        SegmentFileHandler(buffer_dir, interval_seconds=3600, instance_id="host")
 
 
 def test_log_buffer_writer_lock_reclaims_stale_pid(

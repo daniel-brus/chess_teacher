@@ -65,12 +65,16 @@ class LogBufferWriterLock:
             return None
 
     def acquire(self) -> bool:
+        """Return True when this instance may write to the active log file."""
         self.lock_path.parent.mkdir(parents=True, exist_ok=True)
         if self._try_create_lock():
             self._mark_acquired()
             return True
 
         holder = self.holder_pid()
+        if holder == self.pid:
+            return False
+
         if holder is not None and _pid_is_alive(holder):
             return False
 
@@ -155,11 +159,14 @@ class SegmentFileHandler(logging.Handler):
         self.owns_active_log = self._writer_lock.acquire()
         if not self.owns_active_log:
             holder = self._writer_lock.holder_pid()
-            raise ConfigError(
-                f"Shared log buffer {self.active_path} is already owned by PID {holder}; "
-                f"this process (PID {os.getpid()}) cannot start. "
-                f"Stop the other process using LOG_BUFFER_DIR={self.buffer_dir}."
-            )
+            if holder is not None and holder != os.getpid():
+                raise ConfigError(
+                    f"Shared log buffer {self.active_path} is already owned by PID {holder}; "
+                    f"this process (PID {os.getpid()}) cannot start. "
+                    f"Stop the other process using LOG_BUFFER_DIR={self.buffer_dir}."
+                )
+            return
+
         self.active_path.parent.mkdir(parents=True, exist_ok=True)
         self._open_active_stream()
 
@@ -369,6 +376,8 @@ def reset_log_shipping() -> None:
     global _shipper, _segment_handler, _shutdown_registered, _shutdown_done
     if _shipper is not None:
         _shipper.stop()
+    if _segment_handler is not None:
+        _segment_handler.close()
     _shipper = None
     _segment_handler = None
     _shutdown_registered = False

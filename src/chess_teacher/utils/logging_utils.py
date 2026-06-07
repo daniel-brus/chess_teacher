@@ -1,6 +1,7 @@
 import inspect
 import json
 import logging
+import threading
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -18,6 +19,7 @@ from chess_teacher.utils.log_shipping import (
 )
 
 _logging_configured = False
+_configure_lock = threading.Lock()
 
 
 def _get_log_dir() -> Path:
@@ -110,36 +112,37 @@ def configure_logging(
 
     global _logging_configured
 
-    if _logging_configured and not force:
-        return
+    with _configure_lock:
+        if _logging_configured and not force:
+            return
 
-    if force:
-        reset_log_shipping()
+        if force:
+            reset_log_shipping()
 
-    logging.setLoggerClass(EnhancedLogger)
+        logging.setLoggerClass(EnhancedLogger)
 
-    resolved_level = level.upper()
-    buffer_dir = log_dir or _get_log_dir()
+        resolved_level = level.upper()
+        buffer_dir = log_dir or _get_log_dir()
 
-    root = logging.getLogger()
-    root.handlers.clear()
-    root.setLevel(resolved_level)
+        root = logging.getLogger()
+        root.handlers.clear()
+        root.setLevel(resolved_level)
 
-    console_handler = logging.StreamHandler()
-    console_handler.setLevel(resolved_level)
-    console_handler.setFormatter(_ConsoleFormatter())
-    root.addHandler(console_handler)
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(resolved_level)
+        console_handler.setFormatter(_ConsoleFormatter())
+        root.addHandler(console_handler)
 
-    file_handler = SegmentFileHandler(buffer_dir)
-    file_handler.setLevel(resolved_level)
-    file_handler.setFormatter(_JsonLinesFormatter())
-    root.addHandler(file_handler)
+        file_handler = SegmentFileHandler(buffer_dir)
+        file_handler.setLevel(resolved_level)
+        file_handler.setFormatter(_JsonLinesFormatter())
+        root.addHandler(file_handler)
 
-    register_segment_handler(file_handler)
-    start_log_shipping(buffer_dir)
-    register_log_shutdown_hooks()
+        register_segment_handler(file_handler)
+        start_log_shipping(buffer_dir)
+        register_log_shutdown_hooks()
 
-    _logging_configured = True
+        _logging_configured = True
 
 
 def get_logger(name: str | None = None) -> EnhancedLogger:
