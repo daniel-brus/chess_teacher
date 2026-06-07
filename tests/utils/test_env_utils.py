@@ -51,3 +51,15 @@ class TestGetEnvVariable:
         monkeypatch.setenv("MULTILINE_VAR", multiline_value)
         result = env_utils.get_env_variable("MULTILINE_VAR")
         assert result == multiline_value
+
+
+class TestGetHostname:
+    """Tests for get_hostname function."""
+
+    def test_get_hostname_returns_value(self, monkeypatch):
+        monkeypatch.setenv("HOSTNAME", "my-pod")
+        assert env_utils.get_hostname() == "my-pod"
+
+    def test_get_hostname_returns_none_when_missing(self, monkeypatch):
+        monkeypatch.delenv("HOSTNAME", raising=False)
+        assert env_utils.get_hostname() is None

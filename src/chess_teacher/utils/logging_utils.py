@@ -8,17 +8,21 @@ from typing import Any, ClassVar, NoReturn, cast
 
 from chess_teacher.utils.env_utils import get_env_variable
 from chess_teacher.utils.exception_utils import ConfigError
-from chess_teacher.utils.general_utils import build_daily_path
+from chess_teacher.utils.log_shipping import (
+    SegmentFileHandler,
+    get_log_buffer_dir,
+    register_log_shutdown_hooks,
+    register_segment_handler,
+    reset_log_shipping,
+    start_log_shipping,
+)
 
-# Module-level flag to track logging configuration
 _logging_configured = False
 
 
 def _get_log_dir() -> Path:
-    """Get the log directory path from env or default."""
-    from chess_teacher.utils.object_storage.factory import get_local_log_dir
-
-    return get_local_log_dir()
+    """Get the log buffer directory path from env or default."""
+    return get_log_buffer_dir()
 
 
 class _JsonLinesFormatter(logging.Formatter):
@@ -34,14 +38,10 @@ class _JsonLinesFormatter(logging.Formatter):
             "environment": get_env_variable("ENVIRONMENT"),
         }
 
-        # Exception info
         if record.exc_info:
             exc_type, exc_value, _ = record.exc_info
-
             payload["exc_type"] = exc_type.__name__ if exc_type else None
-
             payload["exc_msg"] = str(exc_value) if exc_value else None
-
             payload["traceback"] = self.formatException(record.exc_info)
 
         return json.dumps(payload, ensure_ascii=False)
@@ -51,11 +51,11 @@ class _ConsoleFormatter(logging.Formatter):
     """Simple colored console formatter."""
 
     COLORS: ClassVar[dict[str, str]] = {
-        "DEBUG": "\033[36m",  # Cyan
-        "INFO": "\033[32m",  # Green
-        "WARNING": "\033[33m",  # Yellow
-        "ERROR": "\033[31m",  # Red
-        "CRITICAL": "\033[35m",  # Magenta
+        "DEBUG": "\033[36m",
+        "INFO": "\033[32m",
+        "WARNING": "\033[33m",
+        "ERROR": "\033[31m",
+        "CRITICAL": "\033[35m",
     }
     RESET: ClassVar[str] = "\033[0m"
 
@@ -78,7 +78,9 @@ class EnhancedLogger(logging.Logger):
         level: str = "error",
         include_traceback: bool = True,
     ) -> NoReturn:
-        """Log an exception message at the specified level and then re-raise it.
+        """
+        Log an exception message at the specified level and then re-raise it.
+
         Args:
             exc: The exception to log and raise.
             message: Optional custom message, to override the exception's in the logs.
@@ -94,8 +96,8 @@ class EnhancedLogger(logging.Logger):
             self.error(f"Invalid log level: {level}. Error: {e}", exc_info=True)
             raise ConfigError(f"Invalid log level: {level}.") from e
 
-        log_fn(log_message, exc_info=include_traceback)  # log the exception message
-        raise exc  # Reraise the exception after logging
+        log_fn(log_message, exc_info=include_traceback)
+        raise exc
 
 
 def configure_logging(
@@ -104,76 +106,47 @@ def configure_logging(
     log_dir: Path | None = None,
     force: bool = False,
 ) -> None:
-    """
-    Configure application logging.
-
-    Creates:
-    - console logger
-    - JSON-lines file logger
-
-    File structure:
-        logs/YYYY/MM/DD/app.log
-    """
+    """Configure application logging with console and buffered segment file output."""
 
     global _logging_configured
 
     if _logging_configured and not force:
         return
 
-    # Register custom logger class
+    if force:
+        reset_log_shipping()
+
     logging.setLoggerClass(EnhancedLogger)
 
     resolved_level = level.upper()
-    resolved_log_dir = log_dir or _get_log_dir()
+    buffer_dir = log_dir or _get_log_dir()
 
-    # Root logger
     root = logging.getLogger()
-
     root.handlers.clear()
     root.setLevel(resolved_level)
 
-    # -------------------------------------------------------------------------
-    # Console handler
-    # -------------------------------------------------------------------------
-
     console_handler = logging.StreamHandler()
-
     console_handler.setLevel(resolved_level)
     console_handler.setFormatter(_ConsoleFormatter())
-
     root.addHandler(console_handler)
 
-    # -------------------------------------------------------------------------
-    # File handler
-    # -------------------------------------------------------------------------
-
-    log_file = build_daily_path(resolved_log_dir, "app.log")
-
-    file_handler = logging.FileHandler(
-        filename=log_file,
-        encoding="utf-8",
-    )
-
+    file_handler = SegmentFileHandler(buffer_dir)
     file_handler.setLevel(resolved_level)
     file_handler.setFormatter(_JsonLinesFormatter())
-
     root.addHandler(file_handler)
+
+    register_segment_handler(file_handler)
+    start_log_shipping(buffer_dir)
+    register_log_shutdown_hooks()
 
     _logging_configured = True
 
 
 def get_logger(name: str | None = None) -> EnhancedLogger:
-    """
-    Returns a module logger and ensures logging is configured once.
-
-    Usage:
-        logger = get_logger()
-        logger.info("Hello world")
-    """
+    """Return a module logger and ensure logging is configured once."""
 
     configure_logging()
 
-    # cast is purely mypy-hinting, custom class is already configured
     if name:
         return cast(EnhancedLogger, logging.getLogger(name))
 

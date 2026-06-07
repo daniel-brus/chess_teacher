@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from chess_teacher.utils import logging_utils
+from chess_teacher.utils.log_shipping import reset_log_shipping
 
 
 @pytest.fixture
@@ -17,10 +18,11 @@ def reset_logging():
     root = logging.getLogger()
     root.handlers.clear()
     logging_utils._logging_configured = False
+    reset_log_shipping()
     yield
-    # Cleanup after test
     root.handlers.clear()
     logging_utils._logging_configured = False
+    reset_log_shipping()
 
 
 @pytest.fixture
@@ -333,34 +335,25 @@ class TestJsonLinesFormatter:
         assert "Missing required environment variable: ENVIRONMENT" in str(exc_info.value)
 
 
-class TestDailyFileHandler:
-    """Tests for _DailyFileHandler class."""
+class TestSegmentFileHandler:
+    """Tests for SegmentFileHandler integration."""
 
-    def test_rotation_filename_creates_date_subdirectories(self, reset_logging, mock_log_dir):
-        """Test that logging creates daily log files in YYYY/MM/DD subdirectories."""
+    def test_active_log_file_created(self, reset_logging, mock_log_dir):
+        """Test that logging creates an active segment file under buffer/active/."""
+        from chess_teacher.utils.log_shipping import SegmentFileHandler
+
         root = logging.getLogger()
-
         logging_utils.configure_logging(log_dir=mock_log_dir)
 
-        # Get the file handler we just created
         file_handler = None
         for handler in root.handlers:
-            if isinstance(handler, logging.FileHandler):
+            if isinstance(handler, SegmentFileHandler):
                 file_handler = handler
                 break
 
         assert file_handler is not None
-
-        # Check that the log file was created in a date-based subdirectory
-        log_file = Path(file_handler.baseFilename)
-
-        # Should be in YYYY/MM/DD format in the path
-        assert "logs" in str(log_file)
-        assert "2026" in str(log_file)
-        assert log_file.name == "app.log"
-
-        # The log file should exist
-        assert log_file.exists()
+        assert file_handler.active_path == mock_log_dir / "active" / "app.log"
+        assert file_handler.active_path.exists()
 
 
 class TestConsoleFormatter:

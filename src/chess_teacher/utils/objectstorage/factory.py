@@ -4,8 +4,8 @@ from pathlib import Path
 
 from chess_teacher.utils.env_utils import get_env_variable
 from chess_teacher.utils.exception_utils import ConfigError
-from chess_teacher.utils.object_storage.base import ObjectStorage
-from chess_teacher.utils.object_storage.filesystem import FilesystemObjectStorage
+from chess_teacher.utils.storage.base import ObjectStorage
+from chess_teacher.utils.storage.filesystem import FilesystemObjectStorage
 
 _raw_storage: ObjectStorage | None = None
 
@@ -25,15 +25,8 @@ def reset_raw_storage() -> None:
 
 
 def get_local_log_dir() -> Path:
-    """Return the local filesystem directory for Python log buffering."""
-    from chess_teacher.utils.log_shipping import get_log_buffer_dir
-
-    return get_log_buffer_dir()
-
-
-def get_log_storage_key(relative_under_buffer: str) -> str:
-    """Build an object storage key for a path relative to the log buffer root."""
-    return ObjectStorage.resolve_key("logs/python/buffer", relative_under_buffer)
+    """Return the local filesystem directory for Python logs."""
+    return Path(get_env_variable("STORAGE_ROOT")) / "logs" / "python"
 
 
 def _create_raw_storage() -> ObjectStorage:
@@ -42,7 +35,7 @@ def _create_raw_storage() -> ObjectStorage:
         case "filesystem":
             return FilesystemObjectStorage(Path(get_env_variable("STORAGE_ROOT")))
         case "s3":
-            from chess_teacher.utils.object_storage.s3 import S3ObjectStorage
+            from chess_teacher.utils.storage.s3 import S3ObjectStorage
 
             return S3ObjectStorage(
                 bucket=get_env_variable("S3_BUCKET"),
