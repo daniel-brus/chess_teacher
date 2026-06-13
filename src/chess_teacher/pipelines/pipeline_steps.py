@@ -15,11 +15,11 @@ from chess_teacher.pipelines.transformations import (
     FilterColumnsTransformation,
 )
 from chess_teacher.utils.db_client import DatabaseClient, MergeStrategy, WriteResult
-from chess_teacher.utils.exception_utils import MetadataError
+from chess_teacher.utils.exception_utils import MetadataError, PipelineError
 from chess_teacher.utils.file_loader import FileLoader, FileLoaderFactory
 from chess_teacher.utils.file_utils import FileType
 from chess_teacher.utils.files.text_stream_source import TextStreamSource
-from chess_teacher.utils.general_utils import get_current_datetime
+from chess_teacher.utils.general_utils import generate_ident_is_literal, get_current_datetime
 from chess_teacher.utils.metadata_utils import TableMetadata
 from chess_teacher.utils.object_storage.base import ObjectStorage
 from chess_teacher.utils.object_storage.factory import get_raw_storage
@@ -118,6 +118,12 @@ class LoadToDatabaseStep(PipelineStep):
                 f"({transform_name}): {before_rows} -> {df.height} rows."
             )
 
+        if df.height == 0:
+            self.logger.info(f"[{self.name}] No rows after transformations; skipping save.")
+            context.progress_pop()
+            context.progress_success(f"No records to save to {table}.")
+            return
+
         # Save the transformed data to the target table
         context.progress_update(
             f"Saving {df.height} record{'s' if df.height != 1 else ''} to {table}..."
@@ -193,6 +199,7 @@ class TransformStep(LoadToDatabaseStep):
         merge_strategy: MergeStrategy | None = None,
         cascade: bool | None = None,
         match_condition: str | None = None,
+        source_columns: list[str] | None = None,
     ) -> None:
         super().__init__(
             name=name,
@@ -204,12 +211,47 @@ class TransformStep(LoadToDatabaseStep):
             match_condition=match_condition,
         )
         self.source_table_metadata = source_data_class.get_metadata()
+        self.source_columns = source_columns
+
+    @staticmethod
+    def _context_where_clause(
+        source_table: TableMetadata,
+        context: PipelineContext,
+    ) -> str | None:
+        source = source_table.qualified_name_sql()
+        columns = source_table.column_names()
+
+        if context.account_id is not None:
+            if "account_id" not in columns:
+                raise PipelineError(
+                    f"Cannot scope {source} by account_id: the source table does not "
+                    f"include an account_id column. Add account_id to the source table "
+                    f"metadata or run this pipeline without account_id in context."
+                )
+            return generate_ident_is_literal("account_id", context.account_id)
+
+        if context.user_id is not None:
+            if "user_id" not in columns:
+                raise PipelineError(
+                    f"Cannot scope {source} by user_id: the source table does not "
+                    f"include a user_id column. Add user_id to the source table "
+                    f"metadata or run this pipeline without user_id in context."
+                )
+            return generate_ident_is_literal("user_id", context.user_id)
+
+        return None
 
     def _load_records(self, db_client: DatabaseClient, context: PipelineContext) -> pl.DataFrame:
         """Load records from the source table into a Polars DataFrame."""
         source = self.source_table_metadata.qualified_name_sql()
         context.progress_update(f"Reading records from {source}...")
-        return db_client.read(self.source_table_metadata, as_polars=True)
+        where = self._context_where_clause(self.source_table_metadata, context)
+        return db_client.read(
+            self.source_table_metadata,
+            columns=self.source_columns,
+            where=where,
+            as_polars=True,
+        )
 
 
 class StorageToTableStep(LoadToDatabaseStep):

@@ -10,7 +10,7 @@ from chess_teacher.utils.db_client import (
     _require_pg_data_type,
     _require_using_expression,
 )
-from chess_teacher.utils.metadata_utils import ColumnMetadata
+from chess_teacher.utils.metadata_utils import ColumnMetadata, TableMetadata
 
 
 def test_require_pg_data_type_accepts_common_types() -> None:
@@ -109,3 +109,55 @@ def test_users_table_login_false_positive_columns() -> None:
         "'03:00:00'::time without time zone",
     )
     assert _column_defaults_equivalent(cols["timezone"], "'Europe/Amsterdam'::text")
+
+
+def test_create_indexes_sql_single_column() -> None:
+    table = TableMetadata._from_dict_raw({
+        "schema": "games",
+        "table": "moves",
+        "primary_key": ["move_id"],
+        "indexes": [{"name": "idx_moves_game_id", "columns": ["game_id"]}],
+        "columns": [
+            {"name": "move_id", "data_type": "text", "nullable": False},
+            {"name": "game_id", "data_type": "text", "nullable": False},
+        ],
+    })
+    assert table.indexes[0].name == "idx_moves_game_id"
+    assert table.indexes[0].columns == ("game_id",)
+    sql = table.create_indexes_sql()
+    assert len(sql) == 1
+    assert (
+        sql[0] == 'CREATE INDEX IF NOT EXISTS "idx_moves_game_id" ON "games"."moves" ("game_id");'
+    )
+
+
+def test_create_indexes_sql_composite_column() -> None:
+    table = TableMetadata._from_dict_raw({
+        "schema": "games",
+        "table": "moves",
+        "primary_key": ["move_id"],
+        "indexes": [{"name": "idx_moves_game_move", "columns": ["game_id", "move_nr"]}],
+        "columns": [
+            {"name": "move_id", "data_type": "text", "nullable": False},
+            {"name": "game_id", "data_type": "text", "nullable": False},
+            {"name": "move_nr", "data_type": "integer", "nullable": False},
+        ],
+    })
+    sql = table.create_indexes_sql()
+    assert (
+        sql[0] == 'CREATE INDEX IF NOT EXISTS "idx_moves_game_move" ON "games"."moves" '
+        '("game_id", "move_nr");'
+    )
+
+
+def test_parse_indexes_skips_primary_key_duplicate() -> None:
+    table = TableMetadata._from_dict_raw({
+        "schema": "games",
+        "table": "moves",
+        "primary_key": ["move_id"],
+        "indexes": [{"name": "idx_moves_pk", "columns": ["move_id"]}],
+        "columns": [
+            {"name": "move_id", "data_type": "text", "nullable": False},
+        ],
+    })
+    assert table.indexes == ()

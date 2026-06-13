@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from chess_teacher.ingestion.pipeline_steps import (
     ArchiveIngestedFilesStep,
+    ExtractUserMovesStep,
     IngestionFromAPIStreamStep,
     LoadIngestedFilesToDB,
 )
@@ -25,6 +26,7 @@ def run_ingestion_pipeline(
             IngestionFromAPIStreamStep(),
             LoadIngestedFilesToDB(),
             ArchiveIngestedFilesStep(),
+            ExtractUserMovesStep(),
         ],
         progress_window=progress_window,
     )

@@ -888,13 +888,15 @@ class DatabaseClient:
         - SET/DROP NOT NULL for nullable mismatches
         - SET/DROP DEFAULT for default mismatches
         - COMMENT ON COLUMN / TABLE for comment mismatches
+        - CREATE INDEX IF NOT EXISTS for indexes declared in metadata
 
         Not handled (use explicit manual methods on :class:`DatabaseClient`):
         - DROP COLUMN → :meth:`drop_column`
         - RENAME COLUMN → :meth:`rename_column`
         - RENAME TABLE → :meth:`rename_table`
         - Custom or lossy type casts → :meth:`alter_column_type` (``using=...``)
-        - Primary keys, indexes, foreign keys
+        - Primary keys, foreign keys
+        - DROP INDEX when removed from metadata
         - ADD NOT NULL column on a non-empty table without a backfill plan
 
         Aborts (does not auto-fix):
@@ -914,62 +916,85 @@ class DatabaseClient:
             self.logger.debug(
                 "ensure_metadata → %s: schema matches, nothing to do", table.qualified_name_sql()
             )
+        else:
+            # Fail fast on destructive changes
+            if diff.extra_columns:
+                raise MetadataError(
+                    f"ensure_metadata aborted — live table has extra columns not in metadata: "
+                    f"{diff.extra_columns}. Remove them manually or update TableMetadata."
+                )
+
+            statements: list[str] = []
+            qname = table.qualified_name_sql()
+            col_by_name = {c.name: c for c in table.columns}
+
+            # ADD missing columns
+            for col_name in diff.missing_columns:
+                col = col_by_name[col_name]
+                statements.append(f"ALTER TABLE {qname} ADD COLUMN {col.column_def_sql()};")
+                self.logger.info("ensure_metadata → ADD COLUMN %s.%s", qname, col_name)
+
+            # ALTER TYPE (try USING cast — Postgres will error if cast is invalid)
+            for col_name, (expected, _actual) in diff.type_mismatches.items():
+                statements.append(_alter_column_type_sql(qname, col_name, expected, using=None))
+                self.logger.info(
+                    "ensure_metadata → ALTER TYPE %s.%s to %s", qname, col_name, expected
+                )
+
+            # SET/DROP NOT NULL
+            for col_name, (expected_nullable, _) in diff.nullable_mismatches.items():
+                action = "DROP NOT NULL" if expected_nullable else "SET NOT NULL"
+                statements.append(
+                    f"ALTER TABLE {qname} ALTER COLUMN {quote_ident(col_name)} {action};"
+                )
+                self.logger.info("ensure_metadata → %s on %s.%s", action, qname, col_name)
+
+            # SET/DROP DEFAULT
+            for col_name, (expected_default, _) in diff.default_mismatches.items():
+                col = col_by_name[col_name]
+                if expected_default is None:
+                    action = "DROP DEFAULT"
+                else:
+                    action = f"SET DEFAULT {col._format_default_value()}"
+                statements.append(
+                    f"ALTER TABLE {qname} ALTER COLUMN {quote_ident(col_name)} {action};"
+                )
+                self.logger.info("ensure_metadata → %s on %s.%s", action, qname, col_name)
+
+            # Execute all ALTER statements in one transaction
+            try:
+                self.engine.execute_statements(statements)
+            except Exception as e:
+                self.logger.log_and_raise(
+                    DatabaseError(
+                        f"ensure_metadata failed while applying schema changes to {qname}: {e}"
+                    )
+                )
+
+            # Sync comments separately (COMMENT ON is not transactional in PG)
+            comment_stmts = table.comment_sql()
+            if comment_stmts:
+                self.engine.execute_statements(comment_stmts)
+
+            self.logger.info("ensure_metadata → %s: schema reconciled", qname)
+
+        self.ensure_indexes(table)
+
+    def ensure_indexes(self, table: TableMetadata) -> None:
+        """Create secondary indexes declared in metadata (idempotent)."""
+        statements = table.create_indexes_sql()
+        if not statements:
             return
-
-        # Fail fast on destructive changes
-        if diff.extra_columns:
-            raise MetadataError(
-                f"ensure_metadata aborted — live table has extra columns not in metadata: "
-                f"{diff.extra_columns}. Remove them manually or update TableMetadata."
-            )
-
-        statements: list[str] = []
         qname = table.qualified_name_sql()
-        col_by_name = {c.name: c for c in table.columns}
-
-        # ADD missing columns
-        for col_name in diff.missing_columns:
-            col = col_by_name[col_name]
-            statements.append(f"ALTER TABLE {qname} ADD COLUMN {col.column_def_sql()};")
-            self.logger.info("ensure_metadata → ADD COLUMN %s.%s", qname, col_name)
-
-        # ALTER TYPE (try USING cast — Postgres will error if cast is invalid)
-        for col_name, (expected, _actual) in diff.type_mismatches.items():
-            statements.append(_alter_column_type_sql(qname, col_name, expected, using=None))
-            self.logger.info("ensure_metadata → ALTER TYPE %s.%s to %s", qname, col_name, expected)
-
-        # SET/DROP NOT NULL
-        for col_name, (expected_nullable, _) in diff.nullable_mismatches.items():
-            action = "DROP NOT NULL" if expected_nullable else "SET NOT NULL"
-            statements.append(f"ALTER TABLE {qname} ALTER COLUMN {quote_ident(col_name)} {action};")
-            self.logger.info("ensure_metadata → %s on %s.%s", action, qname, col_name)
-
-        # SET/DROP DEFAULT
-        for col_name, (expected_default, _) in diff.default_mismatches.items():
-            col = col_by_name[col_name]
-            if expected_default is None:
-                action = "DROP DEFAULT"
-            else:
-                action = f"SET DEFAULT {col._format_default_value()}"
-            statements.append(f"ALTER TABLE {qname} ALTER COLUMN {quote_ident(col_name)} {action};")
-            self.logger.info("ensure_metadata → %s on %s.%s", action, qname, col_name)
-
-        # Execute all ALTER statements in one transaction
         try:
             self.engine.execute_statements(statements)
         except Exception as e:
             self.logger.log_and_raise(
-                DatabaseError(
-                    f"ensure_metadata failed while applying schema changes to {qname}: {e}"
-                )
+                DatabaseError(f"Error occurred while ensuring indexes for {qname}: {e}")
             )
-
-        # Sync comments separately (COMMENT ON is not transactional in PG)
-        comment_stmts = table.comment_sql()
-        if comment_stmts:
-            self.engine.execute_statements(comment_stmts)
-
-        self.logger.info("ensure_metadata → %s: schema reconciled", qname)
+        self.logger.debug(
+            "ensure_indexes → %s: %d index statement(s) applied", qname, len(statements)
+        )
 
     def column_names(self, table: TableMetadata) -> set[str]:
         """Return column names for an existing table (empty set if the table is missing)."""

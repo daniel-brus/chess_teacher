@@ -3,6 +3,11 @@ from typing import Literal
 from uuid import uuid4
 
 from chess_teacher.ingestion.adapter import AdapterFactory
+from chess_teacher.ingestion.move_extraction import (
+    ExtractUserMovesTransformation,
+    FilterGamesAlreadyInMovesTransformation,
+)
+from chess_teacher.ingestion.moves import Move
 from chess_teacher.ingestion.raw_games import RawGame
 from chess_teacher.ingestion.transformations import (
     ApplyChessComOpeningLookupTransformation,
@@ -21,6 +26,7 @@ from chess_teacher.pipelines.pipeline_steps import (
     LoadingStrategy,
     MergeStrategy,
     StorageToTableStep,
+    TransformStep,
 )
 from chess_teacher.pipelines.transformations import (
     AssertUniqueColumnsTransformation,
@@ -167,6 +173,26 @@ class LoadIngestedFilesToDB(StorageToTableStep):
         account = _fetch_account(db_client, context)
         self.storage_path = _get_account_storage_prefix("ingested", account)
         self.quarantine_path = _get_account_storage_prefix("failed", account)
+
+
+class ExtractUserMovesStep(TransformStep):
+    """Extract user moves from raw_games into games.moves for the current account."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            name="ExtractUserMoves",
+            source_data_class=RawGame,
+            target_data_class=Move,
+            source_columns=["game_id", "account_id", "cleaned_pgn", "color", "variant"],
+            transformations=[
+                FilterGamesAlreadyInMovesTransformation(),
+                ExtractUserMovesTransformation(),
+                CreateHashedIdTransformation(data_class=Move),
+                AssertUniqueColumnsTransformation("move_id", label="move_id"),
+            ],
+            loading_strategy=LoadingStrategy.MERGE,
+            merge_strategy=MergeStrategy.insert_new(),
+        )
 
 
 class ArchiveIngestedFilesStep(PipelineStep):
