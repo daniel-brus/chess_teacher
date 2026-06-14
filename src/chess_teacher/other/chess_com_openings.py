@@ -77,8 +77,10 @@ def load_slug_title_lookup(db_client: DatabaseClient | None = None) -> dict[str,
 
 def collect_distinct_slugs_from_database(db_client: DatabaseClient) -> set[str]:
     """Collect every Chess.com opening slug seen in ``raw_games``."""
-    from chess_teacher.ingestion.raw_games import RawGame
-    from chess_teacher.ingestion.transformations import ApplyChessComOpeningLookupTransformation
+    from chess_teacher.pipelines.ingestion.raw_games import RawGame
+    from chess_teacher.pipelines.ingestion.transformations import (
+        ApplyChessComOpeningLookupTransformation,
+    )
 
     metadata = RawGame.get_metadata()
     db_client.ensure_metadata(metadata)

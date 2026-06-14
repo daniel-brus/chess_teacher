@@ -7,8 +7,8 @@ from datetime import date, datetime
 
 import polars as pl
 
-from chess_teacher.ingestion.raw_games import RawGame
 from chess_teacher.other.dataclasses import TimeControlCategory
+from chess_teacher.pipelines.ingestion.raw_games import RawGame
 from chess_teacher.platform.account import Account
 from chess_teacher.utils.chess_utils import Color, Result
 from chess_teacher.utils.db.client import DatabaseClient

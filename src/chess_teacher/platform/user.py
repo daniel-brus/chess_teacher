@@ -7,13 +7,13 @@ from pathlib import Path
 from typing import Any, BinaryIO, Self
 from zoneinfo import ZoneInfo
 
-from chess_teacher.pipelines.pipeline_helpers import PipelineRunResult
 from chess_teacher.platform.account import AppLogoVariant
 from chess_teacher.platform.profile_picture import clear_upload_image_cache, profile_pictures
 from chess_teacher.utils.db.client import DatabaseClient
 from chess_teacher.utils.exception_utils import DatabaseError
 from chess_teacher.utils.general_utils import assert_valid_timezone, get_current_datetime
 from chess_teacher.utils.logging import get_logger
+from chess_teacher.utils.pipeline_utils.pipeline_helpers import PipelineRunResult
 from chess_teacher.utils.table_data_class import TableDataClass
 
 DEFAULT_CRON_TIME = time(3, 0)

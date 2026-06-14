@@ -1,14 +1,14 @@
 from __future__ import annotations
 
-from chess_teacher.ingestion.pipeline_steps import (
+from chess_teacher.pipelines.ingestion.pipeline_steps import (
     ArchiveIngestedFilesStep,
     ExtractUserMovesStep,
     IngestionFromAPIStreamStep,
     LoadIngestedFilesToDB,
 )
-from chess_teacher.pipelines.pipeline_base import Pipeline
-from chess_teacher.pipelines.pipeline_helpers import PipelineRunResult, ProgressWindow
 from chess_teacher.platform.account import Account
+from chess_teacher.utils.pipeline_utils.pipeline_base import Pipeline
+from chess_teacher.utils.pipeline_utils.pipeline_helpers import PipelineRunResult, ProgressWindow
 
 
 def run_ingestion_pipeline(

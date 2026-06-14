@@ -3,13 +3,13 @@ from unittest.mock import MagicMock
 import chess
 import polars as pl
 
-from chess_teacher.ingestion.move_extraction import (
+from chess_teacher.pipelines.ingestion.move_extraction import (
     ExtractUserMovesTransformation,
     FilterGamesAlreadyInMovesTransformation,
     extract_user_moves,
     tokenize_cleaned_movetext,
 )
-from chess_teacher.ingestion.moves import Move
+from chess_teacher.pipelines.ingestion.moves import Move
 from chess_teacher.utils.chess_utils import Color
 
 SAMPLE_PGN = "1. e4 e5 2. Nf3 Nc6 3. d3"

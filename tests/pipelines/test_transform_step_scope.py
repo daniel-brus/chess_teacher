@@ -1,10 +1,10 @@
 import pytest
 
-from chess_teacher.ingestion.raw_games import RawGame
-from chess_teacher.pipelines.pipeline_base import PipelineContext
-from chess_teacher.pipelines.pipeline_steps import TransformStep
+from chess_teacher.pipelines.ingestion.raw_games import RawGame
 from chess_teacher.utils.exception_utils import PipelineError
 from chess_teacher.utils.metadata_utils import ColumnMetadata, TableMetadata
+from chess_teacher.utils.pipeline_utils.pipeline_base import PipelineContext
+from chess_teacher.utils.pipeline_utils.pipeline_steps import TransformStep
 
 
 def test_context_where_clause_filters_by_account_id() -> None:

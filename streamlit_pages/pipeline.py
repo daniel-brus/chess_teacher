@@ -1,9 +1,10 @@
 import streamlit as st
 
+from chess_teacher.pipelines.runner import run_pipeline
 from chess_teacher.platform.users_accounts import get_accounts_for_user
-from chess_teacher.runner import latest_successful_run_id, run_pipeline
 from chess_teacher.utils.db.client import get_db_client
 from chess_teacher.utils.logging import get_logger
+from chess_teacher.utils.pipeline_utils.pipeline_helpers import aggregate_pipeline_run_results
 from streamlit_utils.login import require_authenticated_user
 from streamlit_utils.page_config import configure_page
 from streamlit_utils.progress_window import (
@@ -67,9 +68,12 @@ if should_run:
     with StreamlitProgressWindow() as progress:
         try:
             results = run_pipeline(user, db_client, progress_window=progress)
-            run_id = latest_successful_run_id(results)
-            if run_id is not None:
-                updated_user = user.update_latest_pipeline_run(db_client, run_id)
+            aggregated = aggregate_pipeline_run_results(results)
+            if aggregated.latest_successful_run_id is not None:
+                updated_user = user.update_latest_pipeline_run(
+                    db_client,
+                    aggregated.latest_successful_run_id,
+                )
                 set_current_user(updated_user)
         except Exception:
             logger.error("Pipeline failed from Streamlit page.")

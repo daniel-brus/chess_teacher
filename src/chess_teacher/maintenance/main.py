@@ -1,5 +1,5 @@
 from chess_teacher.maintenance.pipeline_steps import ClearOrphanedPipelineRunLocksStep
-from chess_teacher.pipelines.pipeline_base import Pipeline
+from chess_teacher.utils.pipeline_utils.pipeline_base import Pipeline
 
 
 def run_maintenance() -> None:

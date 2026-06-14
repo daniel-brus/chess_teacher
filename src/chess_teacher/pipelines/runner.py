@@ -2,17 +2,16 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 
-from chess_teacher.ingestion.main import run_ingestion_pipeline
-from chess_teacher.pipelines.pipeline_helpers import (
-    PipelineResult,
-    PipelineRunResult,
-    ProgressWindow,
-)
+from chess_teacher.pipelines.ingestion.main import run_ingestion_pipeline
 from chess_teacher.platform.account import Account
 from chess_teacher.platform.user import User
 from chess_teacher.platform.users_accounts import get_accounts_for_user
 from chess_teacher.utils.db.client import DatabaseClient
 from chess_teacher.utils.logging import get_logger
+from chess_teacher.utils.pipeline_utils.pipeline_helpers import (
+    PipelineRunResult,
+    ProgressWindow,
+)
 
 logger = get_logger()
 
@@ -99,14 +98,3 @@ def run_pipeline(
         max_account_workers=max_account_workers,
         progress_window=progress_window,
     ).run()
-
-
-def latest_successful_run_id(results: list[PipelineRunResult]) -> str | None:
-    successful = [
-        result
-        for result in results
-        if result.result in {PipelineResult.SUCCESS, PipelineResult.PARTIAL}
-    ]
-    if not successful:
-        return None
-    return max(successful, key=lambda result: result.finished_at).run_id

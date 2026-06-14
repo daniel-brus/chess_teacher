@@ -2,14 +2,15 @@ from datetime import datetime
 from typing import Literal
 from uuid import uuid4
 
-from chess_teacher.ingestion.adapter import AdapterFactory
-from chess_teacher.ingestion.move_extraction import (
+from chess_teacher.other.dataclasses import RawEcoCode
+from chess_teacher.pipelines.ingestion.adapter import AdapterFactory
+from chess_teacher.pipelines.ingestion.move_extraction import (
     ExtractUserMovesTransformation,
     FilterGamesAlreadyInMovesTransformation,
 )
-from chess_teacher.ingestion.moves import Move
-from chess_teacher.ingestion.raw_games import RawGame
-from chess_teacher.ingestion.transformations import (
+from chess_teacher.pipelines.ingestion.moves import Move
+from chess_teacher.pipelines.ingestion.raw_games import RawGame
+from chess_teacher.pipelines.ingestion.transformations import (
     ApplyChessComOpeningLookupTransformation,
     ApplyLichessOpeningNameTransformation,
     CleanPGNTransformation,
@@ -19,20 +20,6 @@ from chess_teacher.ingestion.transformations import (
     ExtractPlatformGameIdTransformation,
     ExtractPlayersAndResultTransformation,
     FilterGamesWithPGNTransformation,
-)
-from chess_teacher.other.dataclasses import RawEcoCode
-from chess_teacher.pipelines.pipeline_base import PipelineContext, PipelineStep
-from chess_teacher.pipelines.pipeline_steps import (
-    LoadingStrategy,
-    MergeStrategy,
-    StorageToTableStep,
-    TransformStep,
-)
-from chess_teacher.pipelines.transformations import (
-    AssertUniqueColumnsTransformation,
-    CreateHashedIdTransformation,
-    JoinWithTableTransformation,
-    RenameColumnsTransformation,
 )
 from chess_teacher.platform.account import Account
 from chess_teacher.utils.db.client import DatabaseClient
@@ -47,6 +34,19 @@ from chess_teacher.utils.files.file_writer import FileWriter, FileWriterFactory
 from chess_teacher.utils.general_utils import build_daily_key, get_current_datetime
 from chess_teacher.utils.object_storage.base import ObjectStorage
 from chess_teacher.utils.object_storage.factory import get_raw_storage
+from chess_teacher.utils.pipeline_utils.pipeline_base import PipelineContext, PipelineStep
+from chess_teacher.utils.pipeline_utils.pipeline_steps import (
+    LoadingStrategy,
+    MergeStrategy,
+    StorageToTableStep,
+    TransformStep,
+)
+from chess_teacher.utils.pipeline_utils.transformations import (
+    AssertUniqueColumnsTransformation,
+    CreateHashedIdTransformation,
+    JoinWithTableTransformation,
+    RenameColumnsTransformation,
+)
 
 _INGESTION_FILE_TYPE = FileType.JSONL
 

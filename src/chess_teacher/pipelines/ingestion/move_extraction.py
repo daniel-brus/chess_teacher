@@ -4,16 +4,16 @@ from typing import Any
 
 import polars as pl
 
-from chess_teacher.ingestion.move_extraction_core import (
+from chess_teacher.pipelines.ingestion.move_extraction_core import (
     extract_user_moves,  # re-exported for tests
 )
-from chess_teacher.ingestion.moves import Move
-from chess_teacher.pipelines.transformations import DataFrameTransformation
+from chess_teacher.pipelines.ingestion.moves import Move
 from chess_teacher.utils.chess_utils import Color
 from chess_teacher.utils.db.client import DatabaseClient, get_db_client
 from chess_teacher.utils.exception_utils import TransformationError
 from chess_teacher.utils.general_utils import generate_ident_is_literal, quote_ident
 from chess_teacher.utils.logging import get_logger
+from chess_teacher.utils.pipeline_utils.transformations import DataFrameTransformation
 
 logger = get_logger()
 

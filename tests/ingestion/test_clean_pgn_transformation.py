@@ -1,4 +1,4 @@
-from chess_teacher.ingestion.transformations import (
+from chess_teacher.pipelines.ingestion.transformations import (
     ApplyChessComOpeningLookupTransformation,
     CleanPGNTransformation,
 )

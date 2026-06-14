@@ -11,11 +11,11 @@ import chess.pgn
 import polars as pl
 
 from chess_teacher.other.chess_com_openings import load_slug_title_lookup
-from chess_teacher.pipelines.transformations import DataFrameTransformation
 from chess_teacher.platform.account import AccountPlatform
 from chess_teacher.utils.chess_utils import Color, Reason, Result
 from chess_teacher.utils.exception_utils import DataError, TransformationError
 from chess_teacher.utils.logging import get_logger
+from chess_teacher.utils.pipeline_utils.transformations import DataFrameTransformation
 
 logger = get_logger()
 

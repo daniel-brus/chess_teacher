@@ -7,13 +7,6 @@ from uuid import uuid4
 
 import polars as pl
 
-from chess_teacher.pipelines.pipeline_base import PipelineContext, PipelineStep
-from chess_teacher.pipelines.transformations import (
-    CastDataTypeTransformation,
-    CastToDatetimeTransformation,
-    DataFrameTransformation,
-    FilterColumnsTransformation,
-)
 from chess_teacher.utils.db.client import DatabaseClient, MergeStrategy, WriteResult
 from chess_teacher.utils.exception_utils import MetadataError, PipelineError
 from chess_teacher.utils.files.file_loader import FileLoader, FileLoaderFactory
@@ -22,6 +15,13 @@ from chess_teacher.utils.general_utils import generate_ident_is_literal, get_cur
 from chess_teacher.utils.metadata_utils import TableMetadata
 from chess_teacher.utils.object_storage.base import ObjectStorage
 from chess_teacher.utils.object_storage.factory import get_raw_storage
+from chess_teacher.utils.pipeline_utils.pipeline_base import PipelineContext, PipelineStep
+from chess_teacher.utils.pipeline_utils.transformations import (
+    CastDataTypeTransformation,
+    CastToDatetimeTransformation,
+    DataFrameTransformation,
+    FilterColumnsTransformation,
+)
 from chess_teacher.utils.table_data_class import TableDataClass
 
 
