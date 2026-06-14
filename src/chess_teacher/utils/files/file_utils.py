@@ -4,9 +4,17 @@ import re
 import shutil
 from enum import StrEnum
 from pathlib import Path
+from typing import NamedTuple, TextIO
 
 from chess_teacher.utils.exception_utils import FileError
 from chess_teacher.utils.logging import EnhancedLogger, get_logger
+
+
+class TextStreamSource(NamedTuple):
+    """An open text stream and optional label for errors and record metadata."""
+
+    stream: TextIO
+    source_name: str | None = None
 
 
 class FileType(StrEnum):

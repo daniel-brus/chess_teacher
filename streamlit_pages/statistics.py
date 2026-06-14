@@ -21,7 +21,7 @@ from chess_teacher.other.game_statistics import (
 from chess_teacher.platform.account import Account
 from chess_teacher.platform.users_accounts import get_accounts_for_user
 from chess_teacher.utils.chess_utils import Color, Result
-from chess_teacher.utils.db_client import get_db_client
+from chess_teacher.utils.db.client import get_db_client
 from streamlit_utils.charts import (
     account_category_pie_slices,
     apply_divider_matched_axis_config,

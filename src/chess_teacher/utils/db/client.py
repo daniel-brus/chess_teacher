@@ -10,7 +10,7 @@ from uuid import uuid4
 import polars as pl
 from sqlalchemy import text
 
-from chess_teacher.utils.db_engine import EnrichedEngine, get_db_engine
+from chess_teacher.utils.db.engine import EnrichedEngine, get_db_engine
 from chess_teacher.utils.exception_utils import DatabaseError, MetadataError
 from chess_teacher.utils.general_utils import (
     generate_ident_eq_literal,

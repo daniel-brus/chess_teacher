@@ -7,18 +7,18 @@ from pathlib import Path
 
 import pytest
 
-from chess_teacher.platform.raw_assets import (
+from chess_teacher.utils.exception_utils import FileError
+from chess_teacher.utils.files.file_loader import FileLoaderFactory
+from chess_teacher.utils.files.file_utils import FileType
+from chess_teacher.utils.files.file_writer import FileWriterFactory
+from chess_teacher.utils.object_storage.filesystem import FilesystemObjectStorage
+from chess_teacher.utils.object_storage.health import check_raw_storage_health
+from chess_teacher.utils.object_storage.images import (
     asset_image_key,
     clear_storage_image_data_uri_cache,
     read_asset_image,
     storage_image_data_uri,
 )
-from chess_teacher.utils.exception_utils import FileError
-from chess_teacher.utils.file_loader import FileLoaderFactory
-from chess_teacher.utils.file_utils import FileType
-from chess_teacher.utils.file_writer import FileWriterFactory
-from chess_teacher.utils.object_storage.filesystem import FilesystemObjectStorage
-from chess_teacher.utils.object_storage.health import check_raw_storage_health
 
 
 @pytest.fixture

@@ -7,8 +7,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, TextIO
 
 from chess_teacher.utils.exception_utils import FileReadError
-from chess_teacher.utils.file_utils import FileType, validate_existing_file
-from chess_teacher.utils.files.text_stream_source import TextStreamSource
+from chess_teacher.utils.files.file_utils import FileType, TextStreamSource, validate_existing_file
 from chess_teacher.utils.logging import EnhancedLogger, get_logger
 
 if TYPE_CHECKING:

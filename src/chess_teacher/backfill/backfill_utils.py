@@ -4,7 +4,7 @@ from typing import Any, Literal, cast
 from uuid import uuid4
 
 from chess_teacher.platform.account import Account
-from chess_teacher.utils.db_client import DatabaseClient
+from chess_teacher.utils.db.client import DatabaseClient
 from chess_teacher.utils.exception_utils import FileError
 from chess_teacher.utils.logging import EnhancedLogger, get_logger
 from chess_teacher.utils.object_storage.base import ObjectStorage

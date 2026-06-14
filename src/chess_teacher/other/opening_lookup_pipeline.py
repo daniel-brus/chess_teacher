@@ -17,9 +17,8 @@ from chess_teacher.pipelines.transformations import (
     CreateHashedIdTransformation,
     RenameColumnsTransformation,
 )
-from chess_teacher.utils.db_client import DatabaseClient
-from chess_teacher.utils.file_utils import FileType
-from chess_teacher.utils.files.text_stream_source import TextStreamSource
+from chess_teacher.utils.db.client import DatabaseClient
+from chess_teacher.utils.files.file_utils import FileType, TextStreamSource
 
 
 class LoadLichessEcoCodesStep(StreamToTableStep):

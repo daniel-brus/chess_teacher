@@ -64,21 +64,21 @@ tables:
         comment: Timestamp of most recent login
 
       - name: latest_pipeline_run
-        data_type: timestamptz
+        data_type: text
         nullable: true
-        comment: Timestamp of most recent pipeline run. Used to prevent multiple runs in 24hs.
+        comment: run_id of the most recent successful/partial pipeline run. Used for cooldown and status display.
 
       - name: cron_time
         data_type: time
         nullable: false
         default: "03:00:00"
-        comment: Time at which the daily cron job for a user is executed.
+        comment: Time at which the daily cron job for a user is executed (in the user's timezone).
 
       - name: timezone
         data_type: text
         nullable: false
         default: "Europe/Amsterdam"
-        comment: Timezone applicable to the cron_time.
+        comment: Timezone applicable to the cron_time (e.g. Europe/Amsterdam).
 
       - name: default_light_theme_id
         data_type: text

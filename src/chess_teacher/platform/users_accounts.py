@@ -5,7 +5,7 @@ from pathlib import Path
 
 from chess_teacher.platform.account import Account
 from chess_teacher.platform.user import User
-from chess_teacher.utils.db_client import DatabaseClient
+from chess_teacher.utils.db.client import DatabaseClient
 from chess_teacher.utils.exception_utils import DatabaseError
 from chess_teacher.utils.general_utils import generate_ident_is_literal
 from chess_teacher.utils.logging import get_logger

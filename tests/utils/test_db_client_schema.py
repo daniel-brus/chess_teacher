@@ -1,7 +1,7 @@
 import pytest
 
 from chess_teacher.platform.user import User
-from chess_teacher.utils.db_client import (
+from chess_teacher.utils.db.client import (
     _alter_column_type_sql,
     _column_defaults_equivalent,
     _normalize_default_literal,
@@ -96,10 +96,7 @@ def test_users_table_login_false_positive_columns() -> None:
         cols["latest_login"].data_type,
         "timestamp with time zone",
     )
-    assert _pg_data_types_equivalent(
-        cols["latest_pipeline_run"].data_type,
-        "timestamp with time zone",
-    )
+    assert _pg_data_types_equivalent(cols["latest_pipeline_run"].data_type, "text")
     assert _pg_data_types_equivalent(cols["cron_time"].data_type, "time without time zone")
 
     assert _column_defaults_equivalent(cols["email_verified"], "false")

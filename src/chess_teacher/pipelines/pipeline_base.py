@@ -15,7 +15,7 @@ from chess_teacher.pipelines.pipeline_helpers import (
     ProgressWindow,
     StepResult,
 )
-from chess_teacher.utils.db_client import DatabaseClient, get_db_client
+from chess_teacher.utils.db.client import DatabaseClient, get_db_client
 from chess_teacher.utils.exception_utils import (
     DatabaseError,
     FileError,

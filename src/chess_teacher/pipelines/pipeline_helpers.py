@@ -10,6 +10,7 @@ from chess_teacher.utils.table_data_class import TableDataClass
 
 
 class PipelineResult(StrEnum):
+    SKIPPED = "skipped"
     SUCCESS = "success"
     FAILURE = "failure"
     PARTIAL = "partial"

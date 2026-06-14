@@ -28,7 +28,7 @@ from chess_teacher.utils.logging import get_logger
 from chess_teacher.utils.metadata_utils import TableMetadata
 
 if TYPE_CHECKING:
-    from chess_teacher.utils.db_client import DatabaseClient, WriteResult
+    from chess_teacher.utils.db.client import DatabaseClient, WriteResult
 
 logger = get_logger()
 

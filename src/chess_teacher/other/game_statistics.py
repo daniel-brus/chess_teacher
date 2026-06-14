@@ -11,7 +11,7 @@ from chess_teacher.ingestion.raw_games import RawGame
 from chess_teacher.other.dataclasses import TimeControlCategory
 from chess_teacher.platform.account import Account
 from chess_teacher.utils.chess_utils import Color, Result
-from chess_teacher.utils.db_client import DatabaseClient
+from chess_teacher.utils.db.client import DatabaseClient
 from chess_teacher.utils.general_utils import quote_ident, quote_literal
 
 _GAME_COLUMNS = [

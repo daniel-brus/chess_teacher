@@ -2,6 +2,7 @@ import base64
 import mimetypes
 from datetime import datetime
 from typing import Any, Literal
+from zoneinfo import available_timezones
 
 import streamlit as st
 from streamlit.runtime.uploaded_file_manager import UploadedFile
@@ -10,8 +11,11 @@ from chess_teacher.platform.account import Account
 from chess_teacher.platform.profile_picture import (
     clear_upload_image_cache,
     profile_pictures,
-    replace_user_profile_picture,
-    replace_user_profile_picture_with_app_logo,
+)
+from chess_teacher.platform.user import (
+    cron_time_option_index,
+    dispatch_cron_time_options,
+    format_cron_time_label,
 )
 from chess_teacher.platform.users_accounts import (
     add_account,
@@ -19,7 +23,8 @@ from chess_teacher.platform.users_accounts import (
     remove_account,
     remove_all_accounts_for_user,
 )
-from chess_teacher.utils.db_client import get_db_client
+from chess_teacher.utils.db.client import get_db_client
+from chess_teacher.utils.general_utils import assert_valid_timezone
 from chess_teacher.utils.logging import get_logger
 from streamlit_utils.login import require_authenticated_user
 from streamlit_utils.page_config import configure_page
@@ -100,8 +105,7 @@ def _apply_profile_picture_choice(
     if kind == "upload":
         if upload is None:
             raise ValueError("Upload dialog requires a file.")
-        updated_user = replace_user_profile_picture(
-            user,
+        updated_user = user.replace_profile_picture(
             db_client,
             data=upload.getvalue(),
             original_filename=upload.name,
@@ -113,8 +117,7 @@ def _apply_profile_picture_choice(
     if kind == "logo":
         variant = choice["variant"]
         try:
-            updated_user = replace_user_profile_picture_with_app_logo(
-                user,
+            updated_user = user.replace_profile_picture_with_app_logo(
                 db_client,
                 variant=variant,
             )
@@ -244,7 +247,18 @@ def _show_logo_profile_preset(variant: Literal["black", "white"]) -> None:
             st.rerun()
 
 
-def _show_profile_picture_tab() -> None:
+def _show_profile_tab() -> None:
+    with st.form("profile_name_form"):
+        display_name = st.text_input("Display name", value=user.name or "")
+        if st.form_submit_button("Save display name"):
+            name_value = display_name.strip() or None
+            if name_value != user.name:
+                updated_user = user.update_name(db_client, name_value)
+                set_current_user(updated_user)
+            st.success("Display name saved.")
+            st.rerun()
+
+    st.divider()
     st.caption("Your current avatar is shown in the sidebar.")
 
     upload = st.file_uploader(
@@ -322,8 +336,78 @@ def _format_latest_ingestion(value: datetime | None) -> str:
     return value.strftime("%d %b %Y, %H:%M UTC")
 
 
+def _format_pipeline_timestamp(value: datetime) -> str:
+    return value.strftime("%d %b %Y, %H:%M UTC")
+
+
+def _format_pipeline_result(result: str) -> str:
+    return result.replace("_", " ").title()
+
+
+_TIMEZONE_OPTIONS = sorted(available_timezones())
+
+
+_CRON_TIME_OPTIONS = dispatch_cron_time_options()
+
+
+def _show_schedule_tab() -> None:
+    latest_run = user.get_latest_pipeline_run(db_client)
+    st.markdown("**Latest pipeline run**")
+    if latest_run is None:
+        if user.latest_pipeline_run is None:
+            st.caption("No pipeline run recorded yet.")
+        else:
+            st.caption("Latest run could not be loaded (stale reference).")
+    else:
+        st.write(f"**Result:** {_format_pipeline_result(latest_run.result.value)}")
+        st.write(f"**Finished:** {_format_pipeline_timestamp(latest_run.finished_at)}")
+        st.write(f"**Started:** {_format_pipeline_timestamp(latest_run.started_at)}")
+
+    st.divider()
+
+    timezone_index = (
+        _TIMEZONE_OPTIONS.index(user.timezone)
+        if user.timezone in _TIMEZONE_OPTIONS
+        else _TIMEZONE_OPTIONS.index("UTC")
+    )
+
+    with st.form("schedule_form"):
+        st.caption("Daily automatic ingestion schedule.")
+        cron_time = st.selectbox(
+            "Daily run time",
+            options=_CRON_TIME_OPTIONS,
+            index=cron_time_option_index(user.cron_time),
+            format_func=format_cron_time_label,
+            help=(
+                "Automatic ingestion runs once per day in a 30-minute window starting "
+                "at this time (your timezone below), aligned with the dispatcher schedule."
+            ),
+        )
+        timezone = st.selectbox(
+            "Timezone",
+            options=_TIMEZONE_OPTIONS,
+            index=timezone_index,
+            help="Applies to the daily run time above.",
+        )
+        if st.form_submit_button("Save"):
+            try:
+                assert_valid_timezone(timezone)
+            except ValueError as e:
+                st.error(str(e))
+                return
+
+            updated_user = user
+            if cron_time != user.cron_time:
+                updated_user = updated_user.update_cron_time(db_client, cron_time)
+            if timezone != user.timezone:
+                updated_user = updated_user.update_timezone(db_client, timezone)
+            set_current_user(updated_user)
+            st.success("Schedule saved.")
+            st.rerun()
+
+
 def _show_account_list(accounts_list: list[Account]) -> None:
-    column_widths = [1, 3, 4, 2]
+    column_widths = [1.5, 3, 4, 2]
     header_cols = st.columns(column_widths)
     header_cols[0].markdown("**Platform**")
     header_cols[1].markdown("**Username**")
@@ -351,15 +435,19 @@ def _safe_remove_user():
         force_logout()
 
 
-profile_tab, accounts_tab, appearance_tab, danger_tab = st.tabs([
-    "Profile picture",
+profile_tab, schedule_tab, accounts_tab, appearance_tab, danger_tab = st.tabs([
+    "Profile",
+    "Schedule",
     "Platform accounts",
     "Appearance",
     "Delete account",
 ])
 
 with profile_tab:
-    _show_profile_picture_tab()
+    _show_profile_tab()
+
+with schedule_tab:
+    _show_schedule_tab()
 
 with accounts_tab:
     accounts = get_accounts_for_user(user, db_client)

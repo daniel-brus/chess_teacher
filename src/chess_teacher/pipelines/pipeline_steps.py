@@ -14,11 +14,10 @@ from chess_teacher.pipelines.transformations import (
     DataFrameTransformation,
     FilterColumnsTransformation,
 )
-from chess_teacher.utils.db_client import DatabaseClient, MergeStrategy, WriteResult
+from chess_teacher.utils.db.client import DatabaseClient, MergeStrategy, WriteResult
 from chess_teacher.utils.exception_utils import MetadataError, PipelineError
-from chess_teacher.utils.file_loader import FileLoader, FileLoaderFactory
-from chess_teacher.utils.file_utils import FileType
-from chess_teacher.utils.files.text_stream_source import TextStreamSource
+from chess_teacher.utils.files.file_loader import FileLoader, FileLoaderFactory
+from chess_teacher.utils.files.file_utils import FileType, TextStreamSource
 from chess_teacher.utils.general_utils import generate_ident_is_literal, get_current_datetime
 from chess_teacher.utils.metadata_utils import TableMetadata
 from chess_teacher.utils.object_storage.base import ObjectStorage

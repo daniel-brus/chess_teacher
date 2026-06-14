@@ -5,7 +5,7 @@ from threading import Event, Lock, Thread
 from typing import Any
 
 from chess_teacher.pipelines.pipeline_base import Pipeline, PipelineContext, PipelineStep
-from chess_teacher.utils.db_client import WriteResult, WriteStrategy
+from chess_teacher.utils.db.client import WriteResult, WriteStrategy
 from chess_teacher.utils.exception_utils import PipelineError
 from chess_teacher.utils.metadata_utils import TableMetadata
 

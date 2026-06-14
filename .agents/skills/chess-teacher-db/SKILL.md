@@ -94,4 +94,4 @@ Prefer the script. If needed, set `os.environ["ENVIRONMENT"] = "AGENT"` **before
 
 ## API reference
 
-Read/introspection methods only: `src/chess_teacher/utils/db_client.py`.
+Read/introspection methods only: `src/chess_teacher/utils/db/client.py`.

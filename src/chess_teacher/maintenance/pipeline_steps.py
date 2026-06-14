@@ -5,7 +5,7 @@ from chess_teacher.pipelines.pipeline_base import (
     PipelineRunResult,
     PipelineStep,
 )
-from chess_teacher.utils.db_client import DatabaseClient
+from chess_teacher.utils.db.client import DatabaseClient
 from chess_teacher.utils.general_utils import get_current_datetime
 from chess_teacher.utils.metadata_utils import TableMetadata
 

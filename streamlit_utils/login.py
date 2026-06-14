@@ -1,7 +1,7 @@
 import streamlit as st
 
 from chess_teacher.platform.user import User
-from chess_teacher.utils.db_client import get_db_client
+from chess_teacher.utils.db.client import get_db_client
 from chess_teacher.utils.exception_utils import AuthError
 from chess_teacher.utils.general_utils import get_current_datetime
 from chess_teacher.utils.logging import get_logger

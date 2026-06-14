@@ -3,18 +3,16 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import BinaryIO, TypeGuard
+from typing import TypeGuard
 
 from chess_teacher.platform.account import AppLogoVariant
-from chess_teacher.platform.raw_assets import (
+from chess_teacher.utils.object_storage.base import ObjectStorage
+from chess_teacher.utils.object_storage.factory import get_raw_storage
+from chess_teacher.utils.object_storage.images import (
     asset_image_key,
     read_asset_image,
     storage_image_data_uri,
 )
-from chess_teacher.platform.user import User
-from chess_teacher.utils.db_client import DatabaseClient
-from chess_teacher.utils.object_storage.base import ObjectStorage
-from chess_teacher.utils.object_storage.factory import get_raw_storage
 
 _UPLOAD_PREFIX = "upload:"
 _ASSET_PREFIX = "asset:"
@@ -179,7 +177,7 @@ class ProfilePictureService:
         if data is None:
             return None
 
-        from chess_teacher.platform.raw_assets import bytes_to_data_uri, mime_type_for_key
+        from chess_teacher.utils.object_storage.images import bytes_to_data_uri, mime_type_for_key
 
         key = self._upload_object_key(picture)
         data_uri = bytes_to_data_uri(data, mime_type_for_key(key))
@@ -195,46 +193,3 @@ class ProfilePictureService:
 
 
 profile_pictures = ProfilePictureService()
-
-
-def _read_upload_data(data: bytes | BinaryIO) -> bytes:
-    if isinstance(data, bytes):
-        return data
-    return data.read()
-
-
-def replace_user_profile_picture(
-    user: User,
-    db_client: DatabaseClient,
-    *,
-    data: bytes | BinaryIO,
-    original_filename: str,
-) -> User:
-    """Replace the user's avatar with an uploaded image; persist to storage and DB."""
-    upload_bytes = _read_upload_data(data)
-    clear_upload_image_cache(user.picture)
-    profile_pictures.delete(user.picture)
-    picture_url = profile_pictures.save(
-        user_id=user.user_id,
-        data=upload_bytes,
-        original_filename=original_filename,
-    )
-    clear_upload_image_cache(picture_url)
-    user.upsert_field(db_client, "picture", picture_url)
-    user.picture = picture_url
-    return user
-
-
-def replace_user_profile_picture_with_app_logo(
-    user: User,
-    db_client: DatabaseClient,
-    *,
-    variant: AppLogoVariant,
-) -> User:
-    """Point the user's avatar at a bundled black/white wordmark (no copy into uploads)."""
-    clear_upload_image_cache(user.picture)
-    profile_pictures.delete(user.picture)
-    picture_ref = profile_pictures.app_logo_picture_ref(variant=variant)
-    user.upsert_field(db_client, "picture", picture_ref)
-    user.picture = picture_ref
-    return user

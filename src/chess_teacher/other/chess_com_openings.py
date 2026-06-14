@@ -14,7 +14,7 @@ from chess_teacher.other.dataclasses import RawChessComOpening
 from chess_teacher.utils.logging import EnhancedLogger, get_logger
 
 if TYPE_CHECKING:
-    from chess_teacher.utils.db_client import DatabaseClient
+    from chess_teacher.utils.db.client import DatabaseClient
 
 logger = get_logger()
 
@@ -66,7 +66,7 @@ def fetch_chess_com_opening_title(
 
 def load_slug_title_lookup(db_client: DatabaseClient | None = None) -> dict[str, str]:
     """Load slug → opening title map from ``other.raw_chess_com_openings``."""
-    from chess_teacher.utils.db_client import get_db_client
+    from chess_teacher.utils.db.client import get_db_client
 
     client = db_client or get_db_client()
     metadata = RawChessComOpening.get_metadata()

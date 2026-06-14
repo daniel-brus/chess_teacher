@@ -15,6 +15,7 @@ RUN pip install .
 
 # Copy scripts and app-files
 COPY scripts/ ./scripts/
+COPY orchestration/k8s/job/ ./orchestration/k8s/job/
 COPY streamlit_app.py .
 COPY streamlit_utils/ ./streamlit_utils/
 COPY streamlit_pages/ ./streamlit_pages/

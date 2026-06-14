@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: chess-teacher-config
+  namespace: chess-teacher
+data:
+  # Postgres runs outside the cluster (Docker Compose on the host).
+  # Minikube on Windows/macOS: host.minikube.internal
+  # Linux Minikube: often 192.168.49.1 or the host gateway from `minikube ssh -- route -n get 1`
+  POSTGRES_HOST: host.minikube.internal
+  ENVIRONMENT: DEV
+  K8S_NAMESPACE: chess-teacher
+  # Replaced by orchestration/k8s/apply.ps1 from DOCKERHUB_USERNAME in .env
+  PIPELINE_JOB_IMAGE: IMAGE_PLACEHOLDER
+  IMAGE_PULL_POLICY: IMAGE_PULL_POLICY_PLACEHOLDER

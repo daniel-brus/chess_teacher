@@ -35,15 +35,15 @@ from chess_teacher.pipelines.transformations import (
     RenameColumnsTransformation,
 )
 from chess_teacher.platform.account import Account
-from chess_teacher.utils.db_client import DatabaseClient
+from chess_teacher.utils.db.client import DatabaseClient
 from chess_teacher.utils.exception_utils import (
     AdapterError,
     DatabaseError,
     FileError,
     PipelineError,
 )
-from chess_teacher.utils.file_utils import FileType
-from chess_teacher.utils.file_writer import FileWriter, FileWriterFactory
+from chess_teacher.utils.files.file_utils import FileType
+from chess_teacher.utils.files.file_writer import FileWriter, FileWriterFactory
 from chess_teacher.utils.general_utils import build_daily_key, get_current_datetime
 from chess_teacher.utils.object_storage.base import ObjectStorage
 from chess_teacher.utils.object_storage.factory import get_raw_storage
