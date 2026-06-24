@@ -7,11 +7,11 @@ from datetime import date, datetime
 
 import polars as pl
 
-from chess_teacher.ingestion.raw_games import RawGame
 from chess_teacher.other.dataclasses import TimeControlCategory
+from chess_teacher.pipelines.preprocessing.games import Game
 from chess_teacher.platform.account import Account
 from chess_teacher.utils.chess_utils import Color, Result
-from chess_teacher.utils.db_client import DatabaseClient
+from chess_teacher.utils.db.client import DatabaseClient
 from chess_teacher.utils.general_utils import quote_ident, quote_literal
 
 _GAME_COLUMNS = [
@@ -93,11 +93,11 @@ def load_games_for_accounts(
     db_client: DatabaseClient,
     account_ids: Sequence[str],
 ) -> pl.DataFrame:
-    db_client.ensure_table(RawGame.get_metadata())
+    db_client.ensure_table(Game.get_metadata())
     if not account_ids:
         return pl.DataFrame()
     games = db_client.read(
-        RawGame.get_metadata(),
+        Game.get_metadata(),
         columns=_GAME_COLUMNS,
         where=_where_account_ids(account_ids),
         order_by="start_time DESC NULLS LAST",

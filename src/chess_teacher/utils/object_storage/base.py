@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 from contextlib import AbstractContextManager
 
 from chess_teacher.utils.exception_utils import FileError
-from chess_teacher.utils.files.text_stream_source import TextStreamSource
+from chess_teacher.utils.files.file_utils import TextStreamSource
 from chess_teacher.utils.object_storage.keys import (
     key_basename,
     relative_key_under,

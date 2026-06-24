@@ -1,0 +1,32 @@
+tables:
+  raw_games:
+    schema: games
+    table: raw_games
+    comment: Slim platform JSON payloads loaded at ingestion
+    primary_key:
+      - game_id
+    columns:
+      - name: game_id
+        data_type: text
+        nullable: false
+        comment: Game ID in the database
+      - name: platform_game_id
+        data_type: text
+        nullable: false
+        comment: Game ID on the platform
+      - name: account_id
+        data_type: text
+        nullable: false
+        comment: Account ID of the account that the game belongs to
+      - name: raw_response
+        data_type: text
+        nullable: false
+        comment: Full platform record as JSON (minus pipeline-only load fields)
+      - name: source_file
+        data_type: text
+        nullable: false
+        comment: Object storage key the record was loaded from
+      - name: ingested_at
+        data_type: timestamptz
+        nullable: false
+        comment: Timestamp when the record was loaded into raw_games

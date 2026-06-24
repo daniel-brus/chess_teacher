@@ -5,14 +5,14 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from chess_teacher.utils.exception_utils import FileError
-from chess_teacher.utils.file_utils import (
+from chess_teacher.utils.files.file_utils import (
+    TextStreamSource,
     discover_files,
     ensure_destination_parent,
     move_file,
     remove_file,
     validate_existing_file,
 )
-from chess_teacher.utils.files.text_stream_source import TextStreamSource
 from chess_teacher.utils.logging import EnhancedLogger, get_logger
 from chess_teacher.utils.object_storage.base import ObjectStorage
 

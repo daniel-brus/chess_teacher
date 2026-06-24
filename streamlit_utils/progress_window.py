@@ -10,7 +10,7 @@ from types import TracebackType
 import streamlit as st
 from streamlit.delta_generator import DeltaGenerator
 
-from chess_teacher.pipelines.pipeline_helpers import ProgressWindow
+from chess_teacher.utils.pipeline_utils.pipeline_helpers import ProgressWindow
 from streamlit_utils.layout import ingest_css
 
 _MAX_LINES = 3

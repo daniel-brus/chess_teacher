@@ -1,6 +1,6 @@
 import polars as pl
 
-from chess_teacher.ingestion.transformations import (
+from chess_teacher.pipelines.preprocessing.transformations import (
     ApplyChessComOpeningLookupTransformation,
     ApplyLichessOpeningNameTransformation,
     DeriveOpeningTransformation,

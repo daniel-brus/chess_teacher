@@ -1,15 +1,15 @@
 tables:
-  raw_games:
+  games:
     schema: games
-    table: raw_games
-    comment: Raw games data
+    table: games
+    comment: Enriched game rows derived from raw_games at preprocessing
     primary_key:
       - game_id
     columns:
       - name: game_id
         data_type: text
         nullable: false
-        comment: Game ID in the database
+        comment: Game ID in the database (same as raw_games.game_id)
       - name: platform_game_id
         data_type: text
         nullable: false
@@ -17,14 +17,13 @@ tables:
       - name: account_id
         data_type: text
         nullable: false
-        comment: Account ID of the account that the game belongs to. Can be used to obtain platform and username.
+        comment: Account ID of the account that the game belongs to
 
       - name: raw_pgn
         data_type: text
         nullable: false
-        comment: PGN of the game, as loaded from the source API.
+        comment: PGN of the game, as loaded from the source API
 
-      # Added by ExtractGameMetadataTransformation
       - name: variant
         data_type: text
         nullable: false
@@ -55,7 +54,6 @@ tables:
         nullable: true
         comment: Chess.com openings URL slug from ECOUrl (for name lookup)
 
-      # Added by ExtractPlayersAndResultTransformation
       - name: color
         data_type: text
         nullable: false
@@ -77,13 +75,11 @@ tables:
         nullable: true
         comment: Opponent's ELO rating at the start of the game
 
-      # Added by CleanPGNTransformation
       - name: cleaned_pgn
         data_type: text
         nullable: false
         comment: Movetext-only PGN (e.g. "1. e4 e5 2. Nf3 Nc6")
 
-      # Added by DeriveOpeningTransformation
       - name: opening_name
         data_type: text
         nullable: true
@@ -94,3 +90,52 @@ tables:
         data_type: text
         nullable: true
         comment: Family of the opening, derived from the opening name (e.g. "Modern Defense")
+
+  moves:
+    schema: games
+    table: moves
+    comment: User moves extracted from cleaned PGN
+    primary_key:
+      - move_id
+    indexes:
+      - name: idx_moves_game_id
+        columns: [game_id]
+      - name: idx_moves_account_id
+        columns: [account_id]
+    columns:
+      - name: move_id
+        data_type: text
+        nullable: false
+        comment: Hashed ID from game_id and move_nr
+      - name: game_id
+        data_type: text
+        nullable: false
+        comment: FK to games.games (logical, not enforced)
+      - name: account_id
+        data_type: text
+        nullable: false
+        comment: Account that owns the game (denormalized from games)
+      - name: move_nr
+        data_type: integer
+        nullable: false
+        comment: 1-based index among the user's moves in the game (used for move_id hash)
+      - name: ply
+        data_type: integer
+        nullable: false
+        comment: 1-based half-move index in the full game (1 = first move played)
+      - name: move_san
+        data_type: text
+        nullable: false
+        comment: SAN, e.g. Kd4 — human-readable, matches cleaned_pgn
+      - name: move_uci
+        data_type: text
+        nullable: false
+        comment: UCI, e.g. e2e4 — engine-friendly, computed at parse time
+      - name: fen_before
+        data_type: text
+        nullable: false
+        comment: FEN immediately before the user's move
+      - name: fen_after
+        data_type: text
+        nullable: false
+        comment: FEN immediately after the user's move

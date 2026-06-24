@@ -1,21 +1,21 @@
 from __future__ import annotations
 
+import json
 import re
-from datetime import UTC, date, datetime
+from datetime import UTC, datetime
 from io import StringIO
-from pathlib import PurePosixPath
-from typing import ClassVar
+from typing import Any, ClassVar
 
 import chess
 import chess.pgn
 import polars as pl
 
 from chess_teacher.other.chess_com_openings import load_slug_title_lookup
-from chess_teacher.pipelines.transformations import DataFrameTransformation
 from chess_teacher.platform.account import AccountPlatform
 from chess_teacher.utils.chess_utils import Color, Reason, Result
 from chess_teacher.utils.exception_utils import DataError, TransformationError
 from chess_teacher.utils.logging import get_logger
+from chess_teacher.utils.pipeline_utils.transformations import DataFrameTransformation
 
 logger = get_logger()
 
@@ -72,6 +72,54 @@ def parse_pgn_tag(pattern: re.Pattern[str], pgn: str | None) -> str | None:
         return None
     match = pattern.search(pgn)
     return match.group(1) if match else None
+
+
+_IDENTITY_COLUMNS = frozenset({
+    "game_id",
+    "platform_game_id",
+    "account_id",
+    "source_file",
+    "ingested_at",
+    "raw_response",
+})
+
+
+class ExpandRawResponseTransformation(DataFrameTransformation):
+    """Parse ``raw_response`` JSON back into flat platform record columns."""
+
+    RAW_RESPONSE_COLUMN = "raw_response"
+
+    def transform(self, df: pl.DataFrame) -> pl.DataFrame:
+        if self.RAW_RESPONSE_COLUMN not in df.columns:
+            logger.log_and_raise(
+                TransformationError(
+                    f"Column {self.RAW_RESPONSE_COLUMN!r} is required to expand raw_response."
+                )
+            )
+
+        if df.height == 0:
+            return df
+
+        rows: list[dict[str, Any]] = []
+        for row in df.iter_rows(named=True):
+            try:
+                parsed = json.loads(str(row[self.RAW_RESPONSE_COLUMN]))
+            except json.JSONDecodeError as e:
+                logger.log_and_raise(TransformationError(f"Failed to parse raw_response JSON: {e}"))
+            if not isinstance(parsed, dict):
+                logger.log_and_raise(
+                    TransformationError("raw_response JSON must decode to an object.")
+                )
+            merged = dict(parsed)
+            for column in _IDENTITY_COLUMNS:
+                if column in row and row[column] is not None:
+                    merged[column] = row[column]
+            rows.append(merged)
+
+        try:
+            return pl.DataFrame(rows)
+        except Exception as e:
+            logger.log_and_raise(TransformationError(f"Failed to expand raw_response: {e}"))
 
 
 class FilterGamesWithPGNTransformation(DataFrameTransformation):
@@ -252,157 +300,6 @@ class CleanPGNTransformation(DataFrameTransformation):
                 dropped,
                 before,
                 df.height,
-            )
-        return df
-
-
-class ExtractFileMetadataTransformation(DataFrameTransformation):
-    """
-    Extract ingestion file metadata from ``_source_file`` paths.
-
-    Expected layout:
-        .../ingested/{account_id}/{YYYY}/{MM}/{DD}/{platform}_{batch_id}.jsonl
-    """
-
-    SOURCE_FILE_COLUMN = "_source_file"
-    INGESTED_FOLDER = "ingested"
-    _SOURCE_FILE_PATH_RE = re.compile(
-        rf"(?:^|.*/){re.escape(INGESTED_FOLDER)}"
-        r"/(?P<account_id>[^/]+)/(?P<year>\d{4})/(?P<month>\d{2})/(?P<day>\d{2})/(?P<file_name>[^/]+)$"
-    )
-
-    @staticmethod
-    def _empty_metadata() -> dict[str, str | date | None]:
-        return {
-            "account_id": None,
-            "ingestion_date": None,
-            "file_name": None,
-        }
-
-    @classmethod
-    def _parse_source_file_path(cls, source_file: str) -> dict[str, str | date | None]:
-        """Parse account_id, ingestion_date, file_name from a _source_file path."""
-        if not source_file:
-            return cls._empty_metadata()
-
-        normalized = source_file.replace("\\", "/")
-        match = cls._SOURCE_FILE_PATH_RE.search(normalized)
-        if match is None:
-            return cls._parse_source_file_path_fallback(normalized)
-
-        file_name = match.group("file_name")
-        return {
-            "account_id": match.group("account_id"),
-            "ingestion_date": date(
-                int(match.group("year")),
-                int(match.group("month")),
-                int(match.group("day")),
-            ),
-            "file_name": file_name,
-        }
-
-    @classmethod
-    def _parse_source_file_path_fallback(cls, normalized: str) -> dict[str, str | date | None]:
-        """Fallback parser using path parts when the regex does not match."""
-        parts = PurePosixPath(normalized).parts
-        try:
-            ingested_idx = parts.index(cls.INGESTED_FOLDER)
-        except ValueError:
-            return cls._empty_metadata()
-
-        tail = parts[ingested_idx + 1 :]
-        if len(tail) < 5:
-            file_name = tail[-1] if tail else None
-            return {
-                "account_id": tail[0] if tail else None,
-                "ingestion_date": None,
-                "file_name": file_name,
-            }
-
-        account_id, year, month, day, file_name = tail[0], tail[1], tail[2], tail[3], tail[4]
-        ingestion_date: date | None = None
-        if len(year) == 4 and year.isdigit() and month.isdigit() and day.isdigit():
-            ingestion_date = date(int(year), int(month), int(day))
-
-        return {
-            "account_id": account_id,
-            "ingestion_date": ingestion_date,
-            "file_name": file_name,
-        }
-
-    def transform(self, df: pl.DataFrame) -> pl.DataFrame:
-        if self.SOURCE_FILE_COLUMN not in df.columns:
-            logger.log_and_raise(
-                TransformationError(
-                    f"Column {self.SOURCE_FILE_COLUMN!r} is required for file metadata extraction."
-                )
-            )
-
-        try:
-            result = df.with_columns(
-                pl
-                .col(self.SOURCE_FILE_COLUMN)
-                .map_elements(
-                    self._parse_source_file_path,
-                    return_dtype=pl.Struct({
-                        "account_id": pl.Utf8,
-                        "ingestion_date": pl.Date,
-                        "file_name": pl.Utf8,
-                    }),
-                )
-                .alias("_file_metadata")
-            ).unnest("_file_metadata")
-        except Exception as e:
-            logger.log_and_raise(TransformationError(f"Failed to extract file metadata: {e}"))
-
-        unparsed = result.filter(pl.col("account_id").is_null()).height
-        if unparsed:
-            logger.warning(
-                "ExtractFileMetadataTransformation: %s row(s) could not be parsed from %s.",
-                unparsed,
-                self.SOURCE_FILE_COLUMN,
-            )
-
-        return result
-
-
-class ExtractPlatformGameIdTransformation(DataFrameTransformation):
-    """
-    Extract the platform game ID from the loaded record.
-    Requires:
-    - the input DataFrame to contain the 'platform' column.
-    Returns the input DataFrame with only these columns added (or updated if already present):
-    - platform_game_id (str: the game ID on the platform)
-    """
-
-    def transform(self, df: pl.DataFrame) -> pl.DataFrame:
-        """If the platform is Chess.com, the platform game ID is the "uuid" field in the record.
-        If the platform is Lichess, the platform game ID is the "id" field in the record.
-        """
-        if "platform" not in df.columns:
-            logger.log_and_raise(
-                TransformationError(
-                    "Column 'platform' is required for platform game ID extraction."
-                )
-            )
-        column_names = set(df.columns)
-        branches: list[tuple[pl.Expr, pl.Expr]] = []
-        if "uuid" in column_names:
-            branches.append((is_chess_com_expr(), pl.col("uuid")))
-        if "id" in column_names:
-            branches.append((is_lichess_expr(), pl.col("id")))
-
-        try:
-            df = df.with_columns(
-                platform_game_id=chain_when(branches, default=pl.lit(None).cast(pl.Utf8))
-            )
-        except Exception as e:
-            logger.log_and_raise(TransformationError(f"Failed to extract platform game ID: {e}"))
-
-        failed_rows = df.filter(pl.col("platform_game_id").is_null()).height
-        if failed_rows:
-            logger.log_and_raise(
-                DataError(f"Failed to extract platform game ID for {failed_rows} rows.")
             )
         return df
 

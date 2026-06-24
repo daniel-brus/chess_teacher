@@ -1,0 +1,61 @@
+# Pipeline worker Job template (single source of truth).
+#
+# scripts/dispatcher.py loads this file and substitutes REPLACE_* placeholders.
+# Manual smoke test: replace placeholders, then kubectl apply -f this file.
+#
+#   kubectl delete job pipeline-manual-example -n chess-teacher --ignore-not-found
+#   kubectl apply -f orchestration/k8s/job/pipeline.yaml
+#   kubectl logs -n chess-teacher job/pipeline-manual-example -f
+#
+# Placeholders:
+#   REPLACE_JOB_NAME            — unique Job name (dispatcher generates per run)
+#   REPLACE_USER_ID             — user_id from the users table
+#   REPLACE_WORK_ITEM           — dedup label hash (dispatcher generates per user)
+#   REPLACE_PIPELINE_JOB_IMAGE  — container image (from configmap PIPELINE_JOB_IMAGE)
+#   REPLACE_IMAGE_PULL_POLICY   — IfNotPresent or Always (from configmap IMAGE_PULL_POLICY)
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: REPLACE_JOB_NAME
+  namespace: chess-teacher
+  labels:
+    app: chess-teacher
+    chess-teacher.io/job-type: pipeline
+    chess-teacher.io/work-item: REPLACE_WORK_ITEM
+spec:
+  backoffLimit: 1
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app: chess-teacher
+        chess-teacher.io/job-type: pipeline
+        chess-teacher.io/work-item: REPLACE_WORK_ITEM
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: pipeline
+          image: REPLACE_PIPELINE_JOB_IMAGE
+          imagePullPolicy: REPLACE_IMAGE_PULL_POLICY
+          command: ["python", "scripts/pipeline.py"]
+          args:
+            - --user-id
+            - REPLACE_USER_ID
+          envFrom:
+            - secretRef:
+                name: chess-teacher-env
+          env:
+            - name: POSTGRES_HOST
+              valueFrom:
+                configMapKeyRef:
+                  name: chess-teacher-config
+                  key: POSTGRES_HOST
+            - name: ENVIRONMENT
+              valueFrom:
+                configMapKeyRef:
+                  name: chess-teacher-config
+                  key: ENVIRONMENT
+            - name: HOSTNAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name

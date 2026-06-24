@@ -3,8 +3,9 @@ from typing import Literal
 
 import polars as pl
 
-from chess_teacher.utils.db_client import DatabaseClient, get_db_client
+from chess_teacher.utils.db.client import DatabaseClient, get_db_client
 from chess_teacher.utils.exception_utils import ConfigError, TransformationError
+from chess_teacher.utils.general_utils import quote_ident
 from chess_teacher.utils.logging import get_logger
 from chess_teacher.utils.metadata_utils import ColumnMetadata
 from chess_teacher.utils.table_data_class import TableDataClass
@@ -19,6 +20,92 @@ class DataFrameTransformation(ABC):
     def transform(self, df: pl.DataFrame) -> pl.DataFrame:
         """Transform the DataFrame."""
         pass
+
+
+class IncrementalFilterTransformation(DataFrameTransformation):
+    """
+    Drop rows whose ``source_column`` value already exists in the target table's ``on`` column.
+
+    When ``on`` is ``None``, no rows are filtered and a warning is logged.
+    Target lookup can be scoped via :meth:`set_scope_where` (typically from ``PipelineContext``).
+    """
+
+    def __init__(
+        self,
+        *,
+        target_data_class: type[TableDataClass],
+        on: str | None,
+        source_column: str | None = None,
+        db_client: DatabaseClient | None = None,
+    ) -> None:
+        self.target_metadata = target_data_class.get_metadata()
+        self.on = on
+        self.source_column = source_column if source_column is not None else on
+        self.db_client = db_client
+        self.scope_where: str | None = None
+
+    def set_scope_where(self, where: str | None) -> None:
+        """Limit the target lookup to rows matching this SQL ``WHERE`` clause (without ``WHERE``)."""
+        self.scope_where = where
+
+    def _existing_values(self) -> set[str]:
+        db_client = self.db_client or get_db_client()
+        if not db_client.table_exists(self.target_metadata):
+            return set()
+
+        target_columns = set(self.target_metadata.column_names())
+        if self.on not in target_columns:
+            logger.log_and_raise(
+                TransformationError(
+                    f"Column {self.on!r} not found in target table "
+                    f"{self.target_metadata.qualified_name_sql()}."
+                )
+            )
+
+        where_sql = f" WHERE {self.scope_where}" if self.scope_where else ""
+        sql = (
+            f"SELECT DISTINCT {quote_ident(self.on)} "
+            f"FROM {self.target_metadata.qualified_name_sql()}"
+            f"{where_sql};"
+        )
+        rows = db_client.engine.execute_parameterized_query(sql, {})
+        return {str(row[self.on]) for row in rows}
+
+    def transform(self, df: pl.DataFrame) -> pl.DataFrame:
+        if self.on is None:
+            logger.warning(
+                "IncrementalFilterTransformation: 'on' not configured; skipping incremental filter."
+            )
+            return df
+
+        if self.source_column not in df.columns:
+            logger.log_and_raise(
+                TransformationError(
+                    f"Column {self.source_column!r} is required for incremental filtering."
+                )
+            )
+
+        if df.height == 0:
+            return df
+
+        existing_values = self._existing_values()
+        if not existing_values:
+            return df
+
+        before = df.height
+        result = df.filter(~pl.col(self.source_column).is_in(existing_values))
+        skipped = before - result.height
+        if skipped:
+            logger.info(
+                "IncrementalFilterTransformation skipped %d row(s) already present "
+                "in %s on column %r (%d -> %d).",
+                skipped,
+                self.target_metadata.qualified_name_sql(),
+                self.on,
+                before,
+                result.height,
+            )
+        return result
 
 
 class CreateHashedIdTransformation(DataFrameTransformation):

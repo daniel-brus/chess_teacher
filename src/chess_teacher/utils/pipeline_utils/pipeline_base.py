@@ -8,14 +8,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
-from chess_teacher.pipelines.pipeline_helpers import (
-    PipelineResult,
-    PipelineRunResult,
-    PipelineRunStepResult,
-    ProgressWindow,
-    StepResult,
-)
-from chess_teacher.utils.db_client import DatabaseClient, get_db_client
+from chess_teacher.utils.db.client import DatabaseClient, get_db_client
 from chess_teacher.utils.exception_utils import (
     DatabaseError,
     FileError,
@@ -31,6 +24,13 @@ from chess_teacher.utils.logging import EnhancedLogger, get_logger
 from chess_teacher.utils.object_storage.base import ObjectStorage
 from chess_teacher.utils.object_storage.factory import get_raw_storage
 from chess_teacher.utils.object_storage.health import check_raw_storage_health
+from chess_teacher.utils.pipeline_utils.pipeline_helpers import (
+    PipelineResult,
+    PipelineRunResult,
+    PipelineRunStepResult,
+    ProgressWindow,
+    StepResult,
+)
 
 # Sentinel value for finished_at column to signal an active (locked) run.
 _LOCK_EPOCH: datetime = datetime(1970, 1, 1, tzinfo=UTC)

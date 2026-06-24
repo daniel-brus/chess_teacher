@@ -6,7 +6,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Literal
 
-from chess_teacher.platform.raw_assets import asset_image_key
+from chess_teacher.utils.object_storage.images import asset_image_key
 from chess_teacher.utils.table_data_class import TableDataClass
 
 AppLogoVariant = Literal["black", "white"]

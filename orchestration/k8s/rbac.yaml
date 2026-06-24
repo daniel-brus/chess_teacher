@@ -1,0 +1,29 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: chess-teacher-dispatcher
+  namespace: chess-teacher
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: chess-teacher-dispatcher
+  namespace: chess-teacher
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: chess-teacher-dispatcher
+  namespace: chess-teacher
+subjects:
+  - kind: ServiceAccount
+    name: chess-teacher-dispatcher
+    namespace: chess-teacher
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: chess-teacher-dispatcher

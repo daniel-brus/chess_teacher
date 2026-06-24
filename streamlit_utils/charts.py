@@ -15,7 +15,7 @@ import streamlit as st
 
 from chess_teacher.other.game_statistics import AccountCategoryGameCount
 from chess_teacher.platform.account import Account, AccountPlatform
-from chess_teacher.platform.raw_assets import storage_image_data_uri
+from chess_teacher.utils.object_storage.images import storage_image_data_uri
 from streamlit_utils.layout import ingest_css, render_center_divider_column, three_column_row
 from streamlit_utils.theme import active_appearance, divider_rgba, divider_width_px
 

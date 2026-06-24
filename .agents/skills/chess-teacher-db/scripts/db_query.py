@@ -17,7 +17,7 @@ from typing import Any
 
 import yaml
 
-from chess_teacher.utils.db_client import get_db_client
+from chess_teacher.utils.db.client import get_db_client
 from chess_teacher.utils.general_utils import quote_ident
 from chess_teacher.utils.metadata_utils import TableMetadata
 

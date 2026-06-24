@@ -1,4 +1,4 @@
-"""Static image assets stored in raw object storage under ``assets/images/``."""
+"""Image helpers for raw object storage (keys, MIME types, data URIs)."""
 
 from __future__ import annotations
 

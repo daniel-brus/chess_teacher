@@ -6,20 +6,19 @@ import requests
 
 from chess_teacher.other.chess_com_openings import refresh_slug_title_lookup_from_database
 from chess_teacher.other.dataclasses import RawEcoCode
-from chess_teacher.pipelines.pipeline_base import Pipeline, PipelineContext, PipelineStep
-from chess_teacher.pipelines.pipeline_helpers import PipelineRunResult
-from chess_teacher.pipelines.pipeline_steps import (
+from chess_teacher.utils.db.client import DatabaseClient
+from chess_teacher.utils.files.file_utils import FileType, TextStreamSource
+from chess_teacher.utils.pipeline_utils.pipeline_base import Pipeline, PipelineContext, PipelineStep
+from chess_teacher.utils.pipeline_utils.pipeline_helpers import PipelineRunResult
+from chess_teacher.utils.pipeline_utils.pipeline_steps import (
     LoadingStrategy,
     StreamToTableStep,
 )
-from chess_teacher.pipelines.transformations import (
+from chess_teacher.utils.pipeline_utils.transformations import (
     AssertUniqueColumnsTransformation,
     CreateHashedIdTransformation,
     RenameColumnsTransformation,
 )
-from chess_teacher.utils.db_client import DatabaseClient
-from chess_teacher.utils.file_utils import FileType
-from chess_teacher.utils.files.text_stream_source import TextStreamSource
 
 
 class LoadLichessEcoCodesStep(StreamToTableStep):
@@ -57,7 +56,7 @@ class LoadLichessEcoCodesStep(StreamToTableStep):
 
 
 class RefreshChessComOpeningSlugsStep(PipelineStep):
-    """Scan ``raw_games`` for slugs and fetch missing titles into ``other.raw_chess_com_openings``."""
+    """Scan ``games.games`` for slugs and fetch missing titles into ``other.raw_chess_com_openings``."""
 
     def __init__(self, *, request_delay_s: float = 0.25) -> None:
         super().__init__(name="RefreshChessComOpeningSlugs")

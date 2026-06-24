@@ -14,7 +14,7 @@ from chess_teacher.other.dataclasses import RawChessComOpening
 from chess_teacher.utils.logging import EnhancedLogger, get_logger
 
 if TYPE_CHECKING:
-    from chess_teacher.utils.db_client import DatabaseClient
+    from chess_teacher.utils.db.client import DatabaseClient
 
 logger = get_logger()
 
@@ -66,7 +66,7 @@ def fetch_chess_com_opening_title(
 
 def load_slug_title_lookup(db_client: DatabaseClient | None = None) -> dict[str, str]:
     """Load slug → opening title map from ``other.raw_chess_com_openings``."""
-    from chess_teacher.utils.db_client import get_db_client
+    from chess_teacher.utils.db.client import get_db_client
 
     client = db_client or get_db_client()
     metadata = RawChessComOpening.get_metadata()
@@ -76,11 +76,13 @@ def load_slug_title_lookup(db_client: DatabaseClient | None = None) -> dict[str,
 
 
 def collect_distinct_slugs_from_database(db_client: DatabaseClient) -> set[str]:
-    """Collect every Chess.com opening slug seen in ``raw_games``."""
-    from chess_teacher.ingestion.raw_games import RawGame
-    from chess_teacher.ingestion.transformations import ApplyChessComOpeningLookupTransformation
+    """Collect every Chess.com opening slug seen in ``games.games``."""
+    from chess_teacher.pipelines.preprocessing.games import Game
+    from chess_teacher.pipelines.preprocessing.transformations import (
+        ApplyChessComOpeningLookupTransformation,
+    )
 
-    metadata = RawGame.get_metadata()
+    metadata = Game.get_metadata()
     db_client.ensure_metadata(metadata)
 
     slugs: set[str] = set()
@@ -186,11 +188,11 @@ def refresh_slug_title_lookup_from_database(
     request_delay_s: float = _DEFAULT_FETCH_DELAY_S,
     logger: EnhancedLogger | None = None,
 ) -> SlugLookupRefreshResult:
-    """Scan ``raw_games`` for slugs and refresh missing entries in the lookup table."""
+    """Scan ``games.games`` for slugs and refresh missing entries in the lookup table."""
     slugs = collect_distinct_slugs_from_database(db_client)
     if not slugs:
         log = logger or get_logger()
-        log.info("No Chess.com opening slugs found in raw_games.")
+        log.info("No Chess.com opening slugs found in games.")
         return SlugLookupRefreshResult(
             distinct_slugs=0,
             already_cached=0,

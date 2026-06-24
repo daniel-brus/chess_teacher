@@ -1,23 +1,23 @@
 from __future__ import annotations
 
-from typing import Any, Literal, cast
+from collections.abc import Sequence
+from typing import Literal
 from uuid import uuid4
 
+from chess_teacher.pipelines.ingestion.raw_games import RawGame
+from chess_teacher.pipelines.preprocessing.games import Game
+from chess_teacher.pipelines.preprocessing.moves import Move
 from chess_teacher.platform.account import Account
-from chess_teacher.utils.db_client import DatabaseClient
+from chess_teacher.platform.user import User
+from chess_teacher.utils.db.client import DatabaseClient
 from chess_teacher.utils.exception_utils import FileError
+from chess_teacher.utils.general_utils import quote_ident, quote_literal
 from chess_teacher.utils.logging import EnhancedLogger, get_logger
 from chess_teacher.utils.object_storage.base import ObjectStorage
 from chess_teacher.utils.object_storage.factory import get_raw_storage
 
 _SOURCE_FOLDERS: tuple[Literal["processed", "failed"], ...] = ("processed", "failed")
 _INGESTED_FOLDER: Literal["ingested"] = "ingested"
-
-
-def fetch_all_accounts(db_client: DatabaseClient) -> list[Account]:
-    """Load every row from the accounts table."""
-    rows = cast(list[dict[str, Any]], db_client.read(Account.get_metadata()))
-    return [Account.from_dict(row) for row in rows]
 
 
 def _account_folder_prefix(
@@ -104,7 +104,7 @@ def move_processed_and_failed_to_ingested_for_all_accounts(
     without error (see the single-account function).
     """
     log = logger or get_logger()
-    accounts = fetch_all_accounts(db_client)
+    accounts = Account.fetch_all_from_db(db_client)
     log.info(f"Backfill move starting for {len(accounts)} account(s)")
 
     for account in accounts:
@@ -118,46 +118,43 @@ def move_processed_and_failed_to_ingested_for_all_accounts(
     log.info(f"Backfill move finished for {len(accounts)} account(s)")
 
 
-def archive_ingested_to_processed(
-    account_id: str,
-    *,
-    storage: ObjectStorage | None = None,
-    logger: EnhancedLogger | None = None,
-) -> int:
-    """Move all ``.jsonl`` objects from ``ingested/{account_id}`` to ``processed/{account_id}``.
+def _where_account_ids(account_ids: Sequence[str]) -> str:
+    if not account_ids:
+        return "FALSE"
+    in_list = ", ".join(quote_literal(account_id) for account_id in account_ids)
+    return f"{quote_ident('account_id')} IN ({in_list})"
 
-    Uses :meth:`ObjectStorage.move_verified` and force-deletes any keys that still remain.
-    Returns the number of objects archived. Safe to run when data is already in the DB.
+
+def clear_user_game_tables(
+    db_client: DatabaseClient,
+    user_id: str,
+    *,
+    logger: EnhancedLogger | None = None,
+) -> None:
+    """
+    Delete all ``raw_games``, ``games``, and ``moves`` rows for the user's linked accounts.
+
+    Accounts with no rows are skipped without error.
     """
     log = logger or get_logger()
-    store = storage if storage is not None else get_raw_storage()
-    source_prefix = _account_folder_prefix("ingested", account_id)
-    archive_prefix = _account_folder_prefix("processed", account_id)
+    user = User.fetch_from_db(db_client, id=user_id)
+    accounts = user.get_linked_accounts(db_client)
+    account_ids = [account.account_id for account in accounts]
 
-    keys = store.list_keys(source_prefix, recursive=True, suffix="jsonl")
-    if not keys:
-        log.info(f"No ingested objects to archive under {source_prefix}")
-        return 0
+    if not account_ids:
+        log.info(f"No linked accounts for user {user_id}; nothing to clear")
+        return
 
-    archived = 0
-    for source_key in keys:
-        relative = ObjectStorage.relative_key_under(source_key, source_prefix)
-        destination = ObjectStorage.resolve_key(archive_prefix, relative)
-        if store.read_bytes(destination) is not None:
-            destination = ObjectStorage.resolve_key(
-                archive_prefix,
-                ObjectStorage.unique_key_variant(relative, uuid4().hex),
-            )
-        store.move_verified(source_key, destination, overwrite=False)
-        log.info(f"Backfill archived {source_key} -> {destination}")
-        archived += 1
+    where = _where_account_ids(account_ids)
+    deleted_total = 0
+    for data_class in (Move, Game, RawGame):
+        table = data_class.get_metadata()
+        db_client.ensure_metadata(table)
+        deleted = db_client.delete_where(table, where=where)
+        log.info(f"Cleared {deleted} row(s) from {table.qualified_name_sql()} for user {user_id}")
+        deleted_total += deleted
 
-    leftover = store.list_keys(source_prefix, recursive=True, suffix="jsonl")
-    if leftover:
-        log.warning(
-            f"{len(leftover)} object(s) still under {source_prefix} after archive; forcing delete."
-        )
-        store.delete_keys(leftover, missing_ok=False)
-
-    log.info(f"Backfill archived {archived} object(s) for account {account_id}")
-    return archived
+    log.info(
+        f"Cleared {deleted_total} game-table row(s) across {len(account_ids)} account(s) "
+        f"for user {user_id}"
+    )

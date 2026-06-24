@@ -1,13 +1,13 @@
 from datetime import timedelta
 
-from chess_teacher.pipelines.pipeline_base import (
+from chess_teacher.utils.db.client import DatabaseClient
+from chess_teacher.utils.general_utils import get_current_datetime
+from chess_teacher.utils.metadata_utils import TableMetadata
+from chess_teacher.utils.pipeline_utils.pipeline_base import (
     PipelineContext,
     PipelineRunResult,
     PipelineStep,
 )
-from chess_teacher.utils.db_client import DatabaseClient
-from chess_teacher.utils.general_utils import get_current_datetime
-from chess_teacher.utils.metadata_utils import TableMetadata
 
 
 class DeleteOldRecordsStep(PipelineStep):

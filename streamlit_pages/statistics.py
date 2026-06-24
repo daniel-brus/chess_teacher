@@ -19,9 +19,8 @@ from chess_teacher.other.game_statistics import (
     with_time_control_class,
 )
 from chess_teacher.platform.account import Account
-from chess_teacher.platform.users_accounts import get_accounts_for_user
 from chess_teacher.utils.chess_utils import Color, Result
-from chess_teacher.utils.db_client import get_db_client
+from chess_teacher.utils.db.client import get_db_client
 from streamlit_utils.charts import (
     account_category_pie_slices,
     apply_divider_matched_axis_config,
@@ -61,7 +60,7 @@ _RESULT_CHART_COLORS = {
 _COLOR_OPTIONS = list(Color)
 user = require_authenticated_user()
 db_client = get_db_client()
-accounts = get_accounts_for_user(user, db_client)
+accounts = user.get_linked_accounts(db_client)
 
 st.title("Game statistics")
 st.caption("Summary from ingested games across your linked platform accounts.")

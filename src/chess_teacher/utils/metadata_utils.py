@@ -145,6 +145,68 @@ class ColumnMetadata:
         return quote_literal(str(self.default))
 
 
+@dataclass(frozen=True)
+class IndexMetadata:
+    name: str
+    columns: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        name = require_ident(self.name.strip().lower(), what="index name")
+        object.__setattr__(self, "name", name)
+        if not self.columns:
+            logger.log_and_raise(MetadataError("Index must declare at least one column."))
+        normalized_columns = tuple(
+            require_ident(column.strip().lower(), what="index column").lower()
+            for column in self.columns
+        )
+        object.__setattr__(self, "columns", normalized_columns)
+
+    @staticmethod
+    def from_dict(raw: dict[str, Any]) -> IndexMetadata:
+        name = raw.get("name", "")
+        columns_raw = raw.get("columns") or []
+        if isinstance(columns_raw, str):
+            columns_list: list[str] = [columns_raw]
+        elif isinstance(columns_raw, list):
+            columns_list = [str(column) for column in columns_raw]
+        else:
+            columns_list = []
+        return IndexMetadata(name=str(name), columns=tuple(columns_list))
+
+
+def _parse_indexes_from_raw(
+    raw: dict[str, Any],
+    *,
+    column_names: set[str],
+    primary_key: tuple[str, ...],
+) -> tuple[IndexMetadata, ...]:
+    indexes_raw = raw.get("indexes") or []
+    if not indexes_raw:
+        return ()
+    if not isinstance(indexes_raw, list):
+        raise MetadataError("'indexes' must be a list when present")
+
+    parsed: list[IndexMetadata] = []
+    for entry in indexes_raw:
+        if not isinstance(entry, dict):
+            raise MetadataError("Each index entry must be a mapping/object")
+        index = IndexMetadata.from_dict(entry)
+        missing = [column for column in index.columns if column not in column_names]
+        if missing:
+            raise MetadataError(
+                f"Index {index.name!r} references columns not present in table: {missing}"
+            )
+        if tuple(index.columns) == primary_key:
+            logger.warning(
+                "Skipping index %r: columns %s match primary_key (Postgres already indexes PK).",
+                index.name,
+                list(index.columns),
+            )
+            continue
+        parsed.append(index)
+    return tuple(parsed)
+
+
 @dataclass(frozen=True, init=False)
 class TableMetadata:
     schema_name: str
@@ -152,6 +214,7 @@ class TableMetadata:
     columns: tuple[ColumnMetadata, ...]
     comment: str | None = None
     primary_key: tuple[str, ...] = field(default_factory=tuple)
+    indexes: tuple[IndexMetadata, ...] = field(default_factory=tuple)
 
     def __init__(
         self,
@@ -162,6 +225,7 @@ class TableMetadata:
         columns: tuple[ColumnMetadata, ...] | None = None,
         comment: str | None = None,
         primary_key: tuple[str, ...] | None = None,
+        indexes: tuple[IndexMetadata, ...] | None = None,
         yaml_path: str | Path | None = None,
     ):
         """Initialize TableMetadata.
@@ -183,6 +247,7 @@ class TableMetadata:
             object.__setattr__(self, "columns", loaded.columns)
             object.__setattr__(self, "comment", loaded.comment)
             object.__setattr__(self, "primary_key", loaded.primary_key)
+            object.__setattr__(self, "indexes", loaded.indexes)
         # Mode 2: Direct initialization
         else:
             if schema_name is None or table_name is None or columns is None:
@@ -196,6 +261,7 @@ class TableMetadata:
             object.__setattr__(self, "columns", columns)
             object.__setattr__(self, "comment", comment)
             object.__setattr__(self, "primary_key", primary_key or ())
+            object.__setattr__(self, "indexes", indexes or ())
 
     @staticmethod
     def _load_from_yaml_by_key(key: str, path: str | Path) -> TableMetadata:
@@ -283,6 +349,13 @@ class TableMetadata:
         else:
             columns = tuple(parsed_columns)
 
+        column_names = {column.name for column in columns}
+        indexes = _parse_indexes_from_raw(
+            raw,
+            column_names=column_names,
+            primary_key=primary_key,
+        )
+
         # Create without using __init__
         obj = object.__new__(TableMetadata)
         object.__setattr__(obj, "schema_name", schema_name)
@@ -290,6 +363,7 @@ class TableMetadata:
         object.__setattr__(obj, "columns", columns)
         object.__setattr__(obj, "comment", comment)
         object.__setattr__(obj, "primary_key", primary_key)
+        object.__setattr__(obj, "indexes", indexes)
         return obj
 
     def column_names(self) -> set[str]:
@@ -372,6 +446,14 @@ class TableMetadata:
 
         ine = "IF NOT EXISTS " if if_not_exists else ""
         return f"CREATE TABLE {ine}{self.qualified_name_sql()} (\n  {cols_sql}\n);"
+
+    def create_indexes_sql(self) -> list[str]:
+        qname = self.qualified_name_sql()
+        return [
+            f"CREATE INDEX IF NOT EXISTS {quote_ident(index.name)} ON {qname} "
+            f"({', '.join(quote_ident(column) for column in index.columns)});"
+            for index in self.indexes
+        ]
 
     def create_schema_sql(self, *, if_not_exists: bool = True) -> str:
         ine = "IF NOT EXISTS " if if_not_exists else ""

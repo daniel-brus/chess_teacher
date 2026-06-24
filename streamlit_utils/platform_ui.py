@@ -11,7 +11,7 @@ from typing import Literal
 import streamlit as st
 
 from chess_teacher.platform.account import Account, AccountPlatform, app_logo_key
-from chess_teacher.platform.raw_assets import storage_image_data_uri
+from chess_teacher.utils.object_storage.images import storage_image_data_uri
 from streamlit_utils.theme import active_appearance
 
 _DEFAULT_ICON_FRACTION = 0.08
