@@ -41,7 +41,7 @@ class IncrementalFilterTransformation(DataFrameTransformation):
         self.target_metadata = target_data_class.get_metadata()
         self.on = on
         self.source_column = source_column if source_column is not None else on
-        self.db_client = db_client or get_db_client()
+        self.db_client = db_client
         self.scope_where: str | None = None
 
     def set_scope_where(self, where: str | None) -> None:
@@ -49,7 +49,8 @@ class IncrementalFilterTransformation(DataFrameTransformation):
         self.scope_where = where
 
     def _existing_values(self) -> set[str]:
-        if not self.db_client.table_exists(self.target_metadata):
+        db_client = self.db_client or get_db_client()
+        if not db_client.table_exists(self.target_metadata):
             return set()
 
         target_columns = set(self.target_metadata.column_names())
@@ -67,7 +68,7 @@ class IncrementalFilterTransformation(DataFrameTransformation):
             f"FROM {self.target_metadata.qualified_name_sql()}"
             f"{where_sql};"
         )
-        rows = self.db_client.engine.execute_parameterized_query(sql, {})
+        rows = db_client.engine.execute_parameterized_query(sql, {})
         return {str(row[self.on]) for row in rows}
 
     def transform(self, df: pl.DataFrame) -> pl.DataFrame:
