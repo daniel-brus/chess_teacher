@@ -2,50 +2,46 @@ from datetime import datetime
 from typing import Literal
 from uuid import uuid4
 
-from chess_teacher.other.dataclasses import RawEcoCode
+import polars as pl
+
 from chess_teacher.pipelines.ingestion.adapter import AdapterFactory
-from chess_teacher.pipelines.ingestion.move_extraction import (
-    ExtractUserMovesTransformation,
-    FilterGamesAlreadyInMovesTransformation,
-)
-from chess_teacher.pipelines.ingestion.moves import Move
 from chess_teacher.pipelines.ingestion.raw_games import RawGame
 from chess_teacher.pipelines.ingestion.transformations import (
-    ApplyChessComOpeningLookupTransformation,
-    ApplyLichessOpeningNameTransformation,
-    CleanPGNTransformation,
-    DeriveOpeningTransformation,
     ExtractFileMetadataTransformation,
-    ExtractGameMetadataTransformation,
     ExtractPlatformGameIdTransformation,
-    ExtractPlayersAndResultTransformation,
-    FilterGamesWithPGNTransformation,
+    SerializeRawResponseTransformation,
+)
+from chess_teacher.pipelines.modes import (
+    PipelineMode,
+    StorageFolder,
+    ingestion_load_merge_strategy,
+    ingestion_load_source_folders,
 )
 from chess_teacher.platform.account import Account
 from chess_teacher.utils.db.client import DatabaseClient
 from chess_teacher.utils.exception_utils import (
     AdapterError,
     DatabaseError,
-    FileError,
     PipelineError,
 )
 from chess_teacher.utils.files.file_utils import FileType
 from chess_teacher.utils.files.file_writer import FileWriter, FileWriterFactory
-from chess_teacher.utils.general_utils import build_daily_key, get_current_datetime
+from chess_teacher.utils.general_utils import (
+    build_daily_key,
+    generate_ident_is_literal,
+    get_current_datetime,
+)
 from chess_teacher.utils.object_storage.base import ObjectStorage
 from chess_teacher.utils.object_storage.factory import get_raw_storage
 from chess_teacher.utils.pipeline_utils.pipeline_base import PipelineContext, PipelineStep
 from chess_teacher.utils.pipeline_utils.pipeline_steps import (
     LoadingStrategy,
-    MergeStrategy,
+    LoadToDatabaseStep,
     StorageToTableStep,
-    TransformStep,
 )
 from chess_teacher.utils.pipeline_utils.transformations import (
-    AssertUniqueColumnsTransformation,
     CreateHashedIdTransformation,
     JoinWithTableTransformation,
-    RenameColumnsTransformation,
 )
 
 _INGESTION_FILE_TYPE = FileType.JSONL
@@ -136,9 +132,14 @@ class IngestionFromAPIStreamStep(PipelineStep):
 
 
 class LoadIngestedFilesToDB(StorageToTableStep):
-    """Load ingested files to the database."""
+    """Load JSONL objects from storage into games.raw_games and archive them by outcome."""
 
-    def __init__(self, *, storage: ObjectStorage | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        mode: PipelineMode = PipelineMode.INCREMENTAL,
+        storage: ObjectStorage | None = None,
+    ) -> None:
         super().__init__(
             name="LoadIngestedFilesToDB",
             storage_path="",
@@ -146,145 +147,167 @@ class LoadIngestedFilesToDB(StorageToTableStep):
             data_class=RawGame,
             storage=storage,
             transformations=[
-                FilterGamesWithPGNTransformation(),
-                RenameColumnsTransformation({"pgn": "raw_pgn"}),
+                SerializeRawResponseTransformation(),
                 ExtractFileMetadataTransformation(),
                 JoinWithTableTransformation(with_data_class=Account),
                 ExtractPlatformGameIdTransformation(),
                 CreateHashedIdTransformation(data_class=RawGame),
-                ExtractGameMetadataTransformation(),
-                ApplyLichessOpeningNameTransformation(),
-                ExtractPlayersAndResultTransformation(),
-                CleanPGNTransformation(),
-                JoinWithTableTransformation(
-                    with_data_class=RawEcoCode,
-                    left_on=["eco_code"],
-                    right_on=["eco_code"],
-                ),
-                DeriveOpeningTransformation(),
-                ApplyChessComOpeningLookupTransformation(),
-                AssertUniqueColumnsTransformation("game_id", label="game_id"),
             ],
             loading_strategy=LoadingStrategy.MERGE,
-            merge_strategy=MergeStrategy.upsert(),
+            merge_strategy=ingestion_load_merge_strategy(mode),
         )
+        self.mode = mode
+        self._account: Account | None = None
+        self._ingested_prefix = ""
+        self._failed_prefix = ""
+        self._processed_prefix = ""
+        self._key_source_folder: dict[str, StorageFolder] = {}
+
+    def _account_prefix(self, folder: StorageFolder) -> str:
+        assert self._account is not None
+        return _get_account_storage_prefix(folder, self._account)
 
     def _resolve_storage_paths(self, db_client: DatabaseClient, context: PipelineContext) -> None:
         account = _fetch_account(db_client, context)
-        self.storage_path = _get_account_storage_prefix("ingested", account)
-        self.quarantine_path = _get_account_storage_prefix("failed", account)
+        self._account = account
+        self._ingested_prefix = self._account_prefix("ingested")
+        self._failed_prefix = self._account_prefix("failed")
+        self._processed_prefix = self._account_prefix("processed")
+        self.storage_path = self._ingested_prefix
+        self.quarantine_path = self._failed_prefix
+        if ingestion_load_merge_strategy(self.mode).when_not_matched_by_source == "delete":
+            self.match_condition = generate_ident_is_literal("account_id", account.account_id)
 
-
-class ExtractUserMovesStep(TransformStep):
-    """Extract user moves from raw_games into games.moves for the current account."""
-
-    def __init__(self) -> None:
-        super().__init__(
-            name="ExtractUserMoves",
-            source_data_class=RawGame,
-            target_data_class=Move,
-            source_columns=["game_id", "account_id", "cleaned_pgn", "color", "variant"],
-            transformations=[
-                FilterGamesAlreadyInMovesTransformation(),
-                ExtractUserMovesTransformation(),
-                CreateHashedIdTransformation(data_class=Move),
-                AssertUniqueColumnsTransformation("move_id", label="move_id"),
-            ],
-            loading_strategy=LoadingStrategy.MERGE,
-            merge_strategy=MergeStrategy.insert_new(),
-        )
-
-
-class ArchiveIngestedFilesStep(PipelineStep):
-    """
-    Move successfully processed ingested objects from ``ingested/`` to ``processed/``.
-
-    Lists every ``.jsonl`` object under the account's ingested prefix (not only keys
-    recorded during load) so nothing is left behind after a successful pipeline run.
-    Uses :meth:`ObjectStorage.move_verified` so the source key is gone after each move.
-    """
-
-    file_type: FileType = FileType.JSONL
-
-    def __init__(
-        self,
-        *,
-        recursive: bool = True,
-        glob_pattern: str | None = None,
-        storage: ObjectStorage | None = None,
-    ) -> None:
-        super().__init__(name="ArchiveIngestedFiles")
-        self.recursive = recursive
-        self.glob_pattern = glob_pattern
-        self._storage = storage
-
-    def _get_storage(self) -> ObjectStorage:
-        return self._storage if self._storage is not None else get_raw_storage()
-
-    def _archive_destination(self, source_key: str, source_prefix: str, archive_prefix: str) -> str:
-        """Preserve relative layout under source_prefix in the archive."""
-        relative = ObjectStorage.relative_key_under(source_key, source_prefix)
-        destination = ObjectStorage.resolve_key(archive_prefix, relative)
+    def _list_source_keys(self) -> list[str]:
         storage = self._get_storage()
-        if storage.read_bytes(destination) is not None:
+        keys: list[str] = []
+        seen: set[str] = set()
+        for folder in ingestion_load_source_folders(self.mode):
+            prefix = self._account_prefix(folder)
+            folder_keys = storage.list_keys(
+                prefix,
+                recursive=self.recursive,
+                suffix=self.file_type.value,
+                glob_pattern=self.glob_pattern,
+            )
+            for key in folder_keys:
+                if key in seen:
+                    continue
+                seen.add(key)
+                keys.append(key)
+                self._key_source_folder[key] = folder
+        return keys
+
+    def _relative_under_folder(self, key: str, folder: StorageFolder) -> str:
+        return ObjectStorage.relative_key_under(key, self._account_prefix(folder))
+
+    def _destination_key(self, key: str, dest_folder: StorageFolder) -> str:
+        source_folder = self._key_source_folder[key]
+        relative = self._relative_under_folder(key, source_folder)
+        destination = ObjectStorage.resolve_key(self._account_prefix(dest_folder), relative)
+        storage = self._get_storage()
+        if destination != key and storage.read_bytes(destination) is not None:
             destination = ObjectStorage.resolve_key(
-                archive_prefix,
+                self._account_prefix(dest_folder),
                 ObjectStorage.unique_key_variant(relative, uuid4().hex),
             )
         return destination
 
-    def _list_ingested_keys(self, storage: ObjectStorage, source_prefix: str) -> list[str]:
-        return storage.list_keys(
-            source_prefix,
+    def _move_key(self, key: str, dest_folder: StorageFolder) -> None:
+        destination = self._destination_key(key, dest_folder)
+        if key == destination:
+            return
+        storage = self._get_storage()
+        try:
+            storage.move_verified(key, destination, overwrite=False)
+            self.logger.info(f"[{self.name}] Moved {key} -> {destination}.")
+            self._key_source_folder[destination] = dest_folder
+            self._key_source_folder.pop(key, None)
+        except Exception as e:
+            self.logger.error(f"[{self.name}] Failed to move {key} to {dest_folder}: {e}")
+
+    def _move_keys(self, keys: list[str], dest_folder: StorageFolder) -> None:
+        for key in keys:
+            self._move_key(key, dest_folder)
+
+    def _ensure_ingested_empty(self) -> None:
+        storage = self._get_storage()
+        leftover = storage.list_keys(
+            self._ingested_prefix,
             recursive=self.recursive,
             suffix=self.file_type.value,
             glob_pattern=self.glob_pattern,
         )
+        if not leftover:
+            return
+        self.logger.warning(
+            f"[{self.name}] {len(leftover)} object(s) still under {self._ingested_prefix}; "
+            "moving to failed."
+        )
+        for key in leftover:
+            self._key_source_folder[key] = "ingested"
+            self._move_key(key, "failed")
 
     def run(self, db_client: DatabaseClient, context: PipelineContext) -> None:
-        account = _fetch_account(db_client, context)
-        storage = self._get_storage()
-        source_prefix = _get_account_storage_prefix("ingested", account)
-        archive_prefix = _get_account_storage_prefix("processed", account)
+        self._resolve_storage_paths(db_client, context)
+        self._key_source_folder = {}
+        self._loaded_keys = []
+        try:
+            LoadToDatabaseStep.run(self, db_client, context)
+            if self._loaded_keys:
+                self._move_keys(self._loaded_keys, "processed")
+        except Exception:
+            if self._loaded_keys:
+                self._move_keys(self._loaded_keys, "failed")
+            raise
+        finally:
+            self._ensure_ingested_empty()
 
-        keys = self._list_ingested_keys(storage, source_prefix)
-        loaded_count = len(context.loaded_storage_keys)
-        if loaded_count and loaded_count != len(keys):
-            self.logger.warning(
-                f"[{self.name}] Loaded {loaded_count} file(s) but found {len(keys)} "
-                f"under {source_prefix}; archiving all listed objects."
-            )
+    def _load_records(self, db_client: DatabaseClient, context: PipelineContext) -> pl.DataFrame:
+        """Load records from configured storage folders into a Polars DataFrame."""
+        storage = self._get_storage()
+        keys = self._list_source_keys()
 
         if not keys:
-            self.logger.info(f"[{self.name}] No objects to archive under {source_prefix}.")
+            folders = ", ".join(ingestion_load_source_folders(self.mode))
+            self.logger.warning(
+                f"[{self.name}] No objects found for mode={self.mode!r} "
+                f"(folders={folders}, suffix=.{self.file_type.value})."
+            )
             context.progress_pop()
-            context.progress_warning("No ingested files to archive.")
-            return
+            context.progress_warning("No files found to extract records from.")
+            return pl.DataFrame()
 
         file_total = len(keys)
-        archived = 0
-
+        context.progress_update(f"Found {file_total} file{'s' if file_total != 1 else ''} to load.")
+        records: list[dict] = []
         for file_index, key in enumerate(keys, start=1):
-            label = ObjectStorage.key_basename(key)
-            context.progress_update(f"Archiving file {file_index}/{file_total}: {label}...")
-            destination = self._archive_destination(key, source_prefix, archive_prefix)
+            context.progress_update(f"Loading file {file_index}/{file_total}...")
+            self.logger.info(f"[{self.name}] Loading {key}.")
             try:
-                storage.move_verified(key, destination, overwrite=False)
-            except FileError as e:
-                self.logger.log_and_raise(
-                    FileError(f"Failed to archive {key} to {destination}: {e}")
-                )
-            self.logger.info(f"[{self.name}] Archived {key} -> {destination}.")
-            archived += 1
+                file_records = self.file_loader.load_key(storage, key)
+            except Exception as e:
+                self.logger.warning(f"[{self.name}] Failed to load {key}: {e}")
+                self._move_key(key, "failed")
+                continue
+            self.logger.info(f"[{self.name}] Loaded {len(file_records)} records from {key}.")
 
-        leftover = self._list_ingested_keys(storage, source_prefix)
-        if leftover:
-            self.logger.warning(
-                f"[{self.name}] {len(leftover)} object(s) still under {source_prefix} "
-                f"after archive; forcing delete."
-            )
-            storage.delete_keys(leftover, missing_ok=False)
+            try:
+                ingestion_ts = get_current_datetime()
+                for record in file_records:
+                    record["_source_file"] = key
+                    record["_ingestion_ts"] = ingestion_ts
+                records.extend(file_records)
+                self._loaded_keys.append(key)
+                context.loaded_storage_keys.append(key)
+                self.logger.info(f"[{self.name}] Added metadata to {key}.")
+            except Exception as e:
+                self.logger.warning(f"[{self.name}] Failed to add metadata to {key}: {e}")
+                self._move_key(key, "failed")
+        self.logger.info(f"[{self.name}] Loaded {len(records)} records from {len(keys)} keys.")
+        context.progress_update(
+            f"Loaded {len(records)} record{'s' if len(records) != 1 else ''}. "
+            f"Processed {len(self._loaded_keys)}/{len(keys)} file{'s' if len(self._loaded_keys) != 1 else ''} successfully."
+        )
 
-        self.logger.info(f"[{self.name}] Archived {archived} object(s) to {archive_prefix}.")
-        context.progress_pop()
-        context.progress_success(f"Archived {archived} file(s).")
+        return pl.DataFrame(records)

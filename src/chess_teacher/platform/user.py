@@ -7,11 +7,16 @@ from pathlib import Path
 from typing import Any, BinaryIO, Self
 from zoneinfo import ZoneInfo
 
-from chess_teacher.platform.account import AppLogoVariant
+from chess_teacher.platform.account import Account, AppLogoVariant
 from chess_teacher.platform.profile_picture import clear_upload_image_cache, profile_pictures
+from chess_teacher.platform.user_account import UserAccount
 from chess_teacher.utils.db.client import DatabaseClient
 from chess_teacher.utils.exception_utils import DatabaseError
-from chess_teacher.utils.general_utils import assert_valid_timezone, get_current_datetime
+from chess_teacher.utils.general_utils import (
+    assert_valid_timezone,
+    generate_ident_is_literal,
+    get_current_datetime,
+)
 from chess_teacher.utils.logging import get_logger
 from chess_teacher.utils.pipeline_utils.pipeline_helpers import PipelineRunResult
 from chess_teacher.utils.table_data_class import TableDataClass
@@ -236,3 +241,62 @@ class User(TableDataClass):
             return True
         earliest_next = latest_run.started_at + PIPELINE_RUN_COOLDOWN - PIPELINE_RUN_COOLDOWN_MARGIN
         return get_current_datetime() >= earliest_next
+
+    def get_linked_accounts(self, db_client: DatabaseClient) -> list[Account]:
+        """Fetch platform accounts linked to this user via the bridge table."""
+        db_client.ensure_table(Account.get_metadata())
+
+        br_metadata = UserAccount.get_metadata()
+        db_client.ensure_table(br_metadata)
+
+        user_accounts = db_client.read(
+            br_metadata,
+            where=generate_ident_is_literal("user_id", self.user_id),
+            order_by="account_id",
+        )
+        accounts: list[Account] = []
+        for user_account in user_accounts:
+            try:
+                accounts.append(Account.fetch_from_db(db_client, id=user_account["account_id"]))
+            except DatabaseError:
+                logger.warning(
+                    "Removing stale account link for user %s and account %s",
+                    self.user_id,
+                    user_account["account_id"],
+                )
+                UserAccount.from_dict(user_account).delete_from_db(db_client)
+        return accounts
+
+    def unlink_all_accounts(self, db_client: DatabaseClient) -> None:
+        """Delete all bridge rows for this user. Platform account rows are kept."""
+        br_metadata = UserAccount.get_metadata()
+        db_client.ensure_table(br_metadata)
+
+        user_accounts = db_client.read(
+            br_metadata,
+            where=generate_ident_is_literal("user_id", self.user_id),
+        )
+        for user_account in user_accounts:
+            UserAccount.from_dict(user_account).delete_from_db(db_client)
+
+    def link_account(self, db_client: DatabaseClient, account: Account) -> bool:
+        """Persist the account and link it to this user. Returns False if already linked."""
+        account.save_new_to_db(db_client)
+        user_account = UserAccount(
+            user_id=self.user_id,
+            account_id=account.account_id,
+        )
+        return user_account.save_new_to_db(db_client)
+
+    def unlink_account(self, db_client: DatabaseClient, account: Account) -> bool:
+        """Delete the bridge row for this user and account. The account row is kept."""
+        user_account = UserAccount(
+            user_id=self.user_id,
+            account_id=account.account_id,
+        )
+        if not db_client.exists(UserAccount.get_metadata(), user_account.get_where_clause()):
+            logger.log_and_raise(
+                DatabaseError(f"Account {account.account_id} not linked to user {self.user_id}")
+            )
+        user_account.delete_from_db(db_client)
+        return True

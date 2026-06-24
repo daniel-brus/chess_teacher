@@ -1,0 +1,141 @@
+tables:
+  games:
+    schema: games
+    table: games
+    comment: Enriched game rows derived from raw_games at preprocessing
+    primary_key:
+      - game_id
+    columns:
+      - name: game_id
+        data_type: text
+        nullable: false
+        comment: Game ID in the database (same as raw_games.game_id)
+      - name: platform_game_id
+        data_type: text
+        nullable: false
+        comment: Game ID on the platform
+      - name: account_id
+        data_type: text
+        nullable: false
+        comment: Account ID of the account that the game belongs to
+
+      - name: raw_pgn
+        data_type: text
+        nullable: false
+        comment: PGN of the game, as loaded from the source API
+
+      - name: variant
+        data_type: text
+        nullable: false
+        default: "standard"
+        comment: Variant of the game
+      - name: time_control_initial
+        data_type: integer
+        nullable: true
+        comment: Initial time control of the game (seconds)
+      - name: time_control_increment
+        data_type: integer
+        nullable: true
+        comment: Increment of the time control of the game (seconds)
+      - name: start_time
+        data_type: timestamptz
+        nullable: true
+        comment: Start time of the game
+      - name: end_time
+        data_type: timestamptz
+        nullable: true
+        comment: End time of the game
+      - name: eco_code
+        data_type: text
+        nullable: true
+        comment: ECO code of the opening (classification)
+      - name: chess_com_opening_slug
+        data_type: text
+        nullable: true
+        comment: Chess.com openings URL slug from ECOUrl (for name lookup)
+
+      - name: color
+        data_type: text
+        nullable: false
+        comment: Color of the user in the game
+      - name: result
+        data_type: text
+        nullable: false
+        comment: Result of the game from the user's perspective
+      - name: reason
+        data_type: text
+        nullable: false
+        comment: Reason for the result
+      - name: user_elo
+        data_type: integer
+        nullable: true
+        comment: User's ELO rating at the start of the game
+      - name: opponent_elo
+        data_type: integer
+        nullable: true
+        comment: Opponent's ELO rating at the start of the game
+
+      - name: cleaned_pgn
+        data_type: text
+        nullable: false
+        comment: Movetext-only PGN (e.g. "1. e4 e5 2. Nf3 Nc6")
+
+      - name: opening_name
+        data_type: text
+        nullable: true
+        comment: >-
+          Lichess API name, else Lichess book match (tied names joined with " | "),
+          else Chess.com title from other.raw_chess_com_openings via chess_com_opening_slug.
+      - name: opening_family
+        data_type: text
+        nullable: true
+        comment: Family of the opening, derived from the opening name (e.g. "Modern Defense")
+
+  moves:
+    schema: games
+    table: moves
+    comment: User moves extracted from cleaned PGN
+    primary_key:
+      - move_id
+    indexes:
+      - name: idx_moves_game_id
+        columns: [game_id]
+      - name: idx_moves_account_id
+        columns: [account_id]
+    columns:
+      - name: move_id
+        data_type: text
+        nullable: false
+        comment: Hashed ID from game_id and move_nr
+      - name: game_id
+        data_type: text
+        nullable: false
+        comment: FK to games.games (logical, not enforced)
+      - name: account_id
+        data_type: text
+        nullable: false
+        comment: Account that owns the game (denormalized from games)
+      - name: move_nr
+        data_type: integer
+        nullable: false
+        comment: 1-based index among the user's moves in the game (used for move_id hash)
+      - name: ply
+        data_type: integer
+        nullable: false
+        comment: 1-based half-move index in the full game (1 = first move played)
+      - name: move_san
+        data_type: text
+        nullable: false
+        comment: SAN, e.g. Kd4 — human-readable, matches cleaned_pgn
+      - name: move_uci
+        data_type: text
+        nullable: false
+        comment: UCI, e.g. e2e4 — engine-friendly, computed at parse time
+      - name: fen_before
+        data_type: text
+        nullable: false
+        comment: FEN immediately before the user's move
+      - name: fen_after
+        data_type: text
+        nullable: false
+        comment: FEN immediately after the user's move

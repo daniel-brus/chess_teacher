@@ -344,6 +344,32 @@ class TableDataClass(ABC):
         return cls.from_dict(result[0])
 
     @classmethod
+    def fetch_all_from_db(
+        cls,
+        db_client: DatabaseClient,
+        *,
+        where: str | None = None,
+        order_by: str | None = None,
+        limit: int | None = None,
+    ) -> list[Self]:
+        """Load rows from the table as dataclass instances."""
+        try:
+            table_metadata = cls.get_metadata()
+            db_client.ensure_table(table_metadata)
+            rows = cast(
+                list[dict[str, Any]],
+                db_client.read(
+                    table_metadata,
+                    where=where,
+                    order_by=order_by,
+                    limit=limit,
+                ),
+            )
+        except Exception as e:
+            logger.log_and_raise(e)
+        return [cls.from_dict(row) for row in rows]
+
+    @classmethod
     def exists_in_db(cls, db_client: DatabaseClient, id: str) -> bool:
         """True if exactly one row matches id; False if zero. Raises otherwise."""
         try:

@@ -17,12 +17,6 @@ from chess_teacher.platform.user import (
     dispatch_cron_time_options,
     format_cron_time_label,
 )
-from chess_teacher.platform.users_accounts import (
-    add_account,
-    get_accounts_for_user,
-    remove_account,
-    remove_all_accounts_for_user,
-)
 from chess_teacher.utils.db.client import get_db_client
 from chess_teacher.utils.general_utils import assert_valid_timezone
 from chess_teacher.utils.logging import get_logger
@@ -321,7 +315,7 @@ def _show_add_account_form() -> None:
         return
 
     account = Account.from_username_and_platform(username=username, platform=platform)
-    added = add_account(user, account, db_client)
+    added = user.link_account(db_client, account)
     if added:
         st.success(f"{platform.value}-account added.")
     else:
@@ -412,7 +406,7 @@ def _show_account_list(accounts_list: list[Account]) -> None:
     header_cols[0].markdown("**Platform**")
     header_cols[1].markdown("**Username**")
     header_cols[2].markdown("**Latest ingestion**")
-    header_cols[3].markdown("**Remove**")
+    header_cols[3].markdown("**Unlink**")
 
     for account in accounts_list:
         cols = st.columns(column_widths)
@@ -420,8 +414,8 @@ def _show_account_list(accounts_list: list[Account]) -> None:
             render_platform_logo(account.platform, width=24)
         cols[1].write(account.username)
         cols[2].write(_format_latest_ingestion(account.latest_ingestion))
-        if cols[3].button("Remove", key=f"remove_{account.account_id}"):
-            remove_account(user, account, db_client)
+        if cols[3].button("Unlink", key=f"unlink_{account.account_id}"):
+            user.unlink_account(db_client, account)
             st.success("Account unlinked.")
             st.rerun()
 
@@ -430,7 +424,7 @@ def _show_account_list(accounts_list: list[Account]) -> None:
 def _safe_remove_user():
     st.warning("Your user information will be lost forever")
     if st.button("I'm sure"):
-        remove_all_accounts_for_user(user, db_client)
+        user.unlink_all_accounts(db_client)
         user.delete_from_db(db_client)
         force_logout()
 
@@ -450,7 +444,7 @@ with schedule_tab:
     _show_schedule_tab()
 
 with accounts_tab:
-    accounts = get_accounts_for_user(user, db_client)
+    accounts = user.get_linked_accounts(db_client)
     if accounts:
         _show_account_list(accounts)
     else:

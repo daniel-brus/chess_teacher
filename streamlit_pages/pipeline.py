@@ -1,7 +1,6 @@
 import streamlit as st
 
 from chess_teacher.pipelines.runner import run_pipeline
-from chess_teacher.platform.users_accounts import get_accounts_for_user
 from chess_teacher.utils.db.client import get_db_client
 from chess_teacher.utils.logging import get_logger
 from chess_teacher.utils.pipeline_utils.pipeline_helpers import aggregate_pipeline_run_results
@@ -39,13 +38,15 @@ if st.session_state.pop(_PIPELINE_INTERRUPTED_KEY, False):
         "Previous pipeline run did not finish (you left this page). You can start a new run."
     )
 
-accounts = get_accounts_for_user(user, db_client)
+accounts = user.get_linked_accounts(db_client)
 pipeline_running = st.session_state[_PIPELINE_RUNNING_KEY]
 
 if not accounts:
     st.info("There are no platform accounts linked.")
 
-st.caption("Run ingestion for every linked account, matching the scheduled worker job.")
+st.caption(
+    "Run ingestion then preprocessing for every linked account, matching the scheduled worker job."
+)
 
 with st.form("pipeline_form"):
     submitted = st.form_submit_button(

@@ -41,9 +41,10 @@ try {
     Invoke-Kubectl @("cluster-info")
 } catch {
     throw @"
-Kubernetes API is not reachable. Start Minikube first, then retry:
-  minikube start
-  minikube status
+Kubernetes API is not reachable. Start the k3d cluster first, then retry:
+  k3d cluster start chess-teacher
+  # first time only:
+  k3d cluster create chess-teacher --kubeconfig-update-default
 "@
 }
 
@@ -91,5 +92,5 @@ foreach ($cronFile in @("nightly-maintenance.yaml", "ingestion-dispatcher.yaml")
 Write-Host ""
 Write-Host "Kubernetes orchestration applied." -ForegroundColor Green
 Write-Host ""
-Write-Host "Ensure Postgres is reachable from Minikube at the POSTGRES_HOST in configmap.yaml." -ForegroundColor Yellow
+Write-Host "Ensure Postgres is reachable from the k3d cluster at the POSTGRES_HOST in configmap.yaml." -ForegroundColor Yellow
 Write-Host "Compose Postgres must publish port $postgresPort to the host." -ForegroundColor Yellow

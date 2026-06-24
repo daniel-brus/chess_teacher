@@ -1,15 +1,12 @@
-from unittest.mock import MagicMock
-
 import chess
 import polars as pl
 
-from chess_teacher.pipelines.ingestion.move_extraction import (
+from chess_teacher.pipelines.preprocessing.move_extraction import (
     ExtractUserMovesTransformation,
-    FilterGamesAlreadyInMovesTransformation,
     extract_user_moves,
     tokenize_cleaned_movetext,
 )
-from chess_teacher.pipelines.ingestion.moves import Move
+from chess_teacher.pipelines.preprocessing.moves import Move
 from chess_teacher.utils.chess_utils import Color
 
 SAMPLE_PGN = "1. e4 e5 2. Nf3 Nc6 3. d3"
@@ -95,41 +92,3 @@ def test_extract_user_moves_transformation_includes_account_id() -> None:
     result = ExtractUserMovesTransformation().transform(df)
     assert result.height == 3
     assert result["account_id"].unique().to_list() == ["acct-1"]
-
-
-def test_filter_games_already_in_moves_skips_existing() -> None:
-    df = pl.DataFrame({
-        "game_id": ["game-1", "game-2", "game-3"],
-        "account_id": ["acct-1", "acct-1", "acct-1"],
-        "cleaned_pgn": [SAMPLE_PGN, SAMPLE_PGN, SAMPLE_PGN],
-        "color": [Color.WHITE.value, Color.WHITE.value, Color.WHITE.value],
-        "variant": ["standard", "standard", "standard"],
-    })
-    db_client = MagicMock()
-    db_client.table_exists.return_value = True
-    db_client.engine.execute_parameterized_query.return_value = [
-        {"game_id": "game-1"},
-        {"game_id": "game-2"},
-    ]
-
-    result = FilterGamesAlreadyInMovesTransformation(db_client=db_client).transform(df)
-
-    assert result.height == 1
-    assert result["game_id"].to_list() == ["game-3"]
-
-
-def test_filter_games_already_in_moves_keeps_all_when_table_missing() -> None:
-    df = pl.DataFrame({
-        "game_id": ["game-1"],
-        "account_id": ["acct-1"],
-        "cleaned_pgn": [SAMPLE_PGN],
-        "color": [Color.WHITE.value],
-        "variant": ["standard"],
-    })
-    db_client = MagicMock()
-    db_client.table_exists.return_value = False
-
-    result = FilterGamesAlreadyInMovesTransformation(db_client=db_client).transform(df)
-
-    assert result.height == 1
-    db_client.engine.execute_parameterized_query.assert_not_called()

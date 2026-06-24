@@ -17,10 +17,12 @@ from chess_teacher.utils.object_storage.base import ObjectStorage
 from chess_teacher.utils.object_storage.factory import get_raw_storage
 from chess_teacher.utils.pipeline_utils.pipeline_base import PipelineContext, PipelineStep
 from chess_teacher.utils.pipeline_utils.transformations import (
+    AssertUniqueColumnsTransformation,
     CastDataTypeTransformation,
     CastToDatetimeTransformation,
     DataFrameTransformation,
     FilterColumnsTransformation,
+    IncrementalFilterTransformation,
 )
 from chess_teacher.utils.table_data_class import TableDataClass
 
@@ -59,9 +61,17 @@ class LoadToDatabaseStep(PipelineStep):
         self.table_metadata = data_class.get_metadata()
 
         # apply metadata-dependent transformations after the user-provided transformations
-        default_transformations = [
+        default_transformations: list[DataFrameTransformation] = [
             transformation(data_class) for transformation in self.DEFAULT_TRANSFORMATIONS
         ]
+        primary_key = self.table_metadata.primary_key
+        if primary_key:
+            default_transformations.append(
+                AssertUniqueColumnsTransformation(
+                    list(primary_key),
+                    label=", ".join(primary_key),
+                )
+            )
         self.transformations = transformations + default_transformations
 
         self.loading_strategy = loading_strategy
@@ -85,6 +95,8 @@ class LoadToDatabaseStep(PipelineStep):
                 f"not_matched_by_target={merge_label.when_not_matched_by_target}, "
                 f"not_matched_by_source={merge_label.when_not_matched_by_source}."
             )
+
+        db_client.ensure_metadata(self.table_metadata)
 
         # Load records from specified source
         df = self._load_records(db_client, context)
@@ -194,23 +206,59 @@ class TransformStep(LoadToDatabaseStep):
         target_data_class: type[TableDataClass],
         transformations: list[DataFrameTransformation] = [],
         *,
+        on: str | None = None,
+        source_column: str | None = None,
         loading_strategy: LoadingStrategy,
         merge_strategy: MergeStrategy | None = None,
         cascade: bool | None = None,
         match_condition: str | None = None,
         source_columns: list[str] | None = None,
     ) -> None:
+        resolved_merge = merge_strategy or MergeStrategy.upsert()
+        if on is not None and resolved_merge.when_not_matched_by_source == "delete":
+            raise ValueError(
+                "TransformStep cannot combine an incremental filter (on=...) with "
+                "full_sync merge strategy; use on=None for full_reload mode."
+            )
+
+        self._incremental_filter = IncrementalFilterTransformation(
+            target_data_class=target_data_class,
+            on=on,
+            source_column=source_column,
+        )
         super().__init__(
             name=name,
             data_class=target_data_class,
-            transformations=transformations,
+            transformations=[self._incremental_filter, *transformations],
             loading_strategy=loading_strategy,
-            merge_strategy=merge_strategy,
+            merge_strategy=resolved_merge,
             cascade=cascade,
             match_condition=match_condition,
         )
         self.source_table_metadata = source_data_class.get_metadata()
         self.source_columns = source_columns
+        self.on = on
+        self.source_column = source_column if source_column is not None else on
+
+    def run(self, db_client: DatabaseClient, context: PipelineContext) -> None:
+        scope_where = self._optional_scope_where_clause(self.table_metadata, context)
+        self._incremental_filter.set_scope_where(scope_where)
+        if self.merge_strategy.when_not_matched_by_source == "delete":
+            self.match_condition = scope_where
+        super().run(db_client, context)
+
+    @staticmethod
+    def _optional_scope_where_clause(
+        table: TableMetadata,
+        context: PipelineContext,
+    ) -> str | None:
+        """Return a scope WHERE clause when context and table columns allow it."""
+        columns = table.column_names()
+        if context.account_id is not None and "account_id" in columns:
+            return generate_ident_is_literal("account_id", context.account_id)
+        if context.user_id is not None and "user_id" in columns:
+            return generate_ident_is_literal("user_id", context.user_id)
+        return None
 
     @staticmethod
     def _context_where_clause(
@@ -243,6 +291,11 @@ class TransformStep(LoadToDatabaseStep):
     def _load_records(self, db_client: DatabaseClient, context: PipelineContext) -> pl.DataFrame:
         """Load records from the source table into a Polars DataFrame."""
         source = self.source_table_metadata.qualified_name_sql()
+        if not db_client.table_exists(self.source_table_metadata):
+            self.logger.warning(
+                f"[{self.name}] Source table {source} does not exist; using empty frame."
+            )
+            return pl.DataFrame()
         context.progress_update(f"Reading records from {source}...")
         where = self._context_where_clause(self.source_table_metadata, context)
         return db_client.read(

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 
+from chess_teacher.pipelines.modes import PIPELINE_MODES, PipelineMode
 from chess_teacher.pipelines.runner import run_pipeline
 from chess_teacher.platform.user import User
 from chess_teacher.utils.db.client import get_db_client
@@ -14,13 +15,24 @@ logger = get_logger()
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run pipelines for one user.")
     parser.add_argument("--user-id", required=True)
+    parser.add_argument(
+        "--mode",
+        type=PipelineMode,
+        choices=PIPELINE_MODES,
+        default=PipelineMode.INCREMENTAL,
+        help=(
+            "Pipeline run mode: incremental (default), retry (re-load ingested+failed), "
+            "reprocess (re-load all storage folders + upsert), or full_reload (same folders "
+            "+ full_sync deletes in preprocessing and raw_games load)."
+        ),
+    )
     args = parser.parse_args()
 
     db_client = get_db_client()
     user = User.fetch_from_db(db_client, id=args.user_id)
 
-    logger.info("Pipeline job started for user=%s.", user.user_id)
-    results = run_pipeline(user, db_client)
+    logger.info("Pipeline job started for user=%s (mode=%s).", user.user_id, args.mode)
+    results = run_pipeline(user, db_client, mode=args.mode)
 
     aggregated = aggregate_pipeline_run_results(results)
     if aggregated.latest_successful_run_id is not None:

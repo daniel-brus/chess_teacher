@@ -56,7 +56,7 @@ class LoadLichessEcoCodesStep(StreamToTableStep):
 
 
 class RefreshChessComOpeningSlugsStep(PipelineStep):
-    """Scan ``raw_games`` for slugs and fetch missing titles into ``other.raw_chess_com_openings``."""
+    """Scan ``games.games`` for slugs and fetch missing titles into ``other.raw_chess_com_openings``."""
 
     def __init__(self, *, request_delay_s: float = 0.25) -> None:
         super().__init__(name="RefreshChessComOpeningSlugs")

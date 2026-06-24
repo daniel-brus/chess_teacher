@@ -1,7 +1,8 @@
 .PHONY: streamlit streamlit_fg db_up streamlit_docker docker_check k8s_up k8s_check k8s_dispatch
 
-# Use Docker Desktop explicitly (avoids stale minikube docker-env in the shell).
+# Use Docker Desktop explicitly (stable context for Compose and k3d).
 DOCKER_CONTEXT = desktop-linux
+K3D_CLUSTER = chess-teacher
 COMPOSE = docker --context $(DOCKER_CONTEXT) compose -f orchestration/docker/docker-compose.yml --env-file .env
 
 # New CMD window (detached from make); logs appear in that window, not here.
@@ -14,7 +15,7 @@ streamlit_fg:
 
 docker_check:
 	@echo Checking Docker Desktop...
-	cmd /c "docker --context $(DOCKER_CONTEXT) info >nul 2>&1 || (echo. & echo ERROR: Cannot reach Docker Desktop. & echo If you ran 'minikube docker-env' earlier, run: minikube docker-env --unset --shell powershell & echo Otherwise start Docker Desktop, wait until it is ready, then retry. & echo. & exit /b 1)"
+	cmd /c "docker --context $(DOCKER_CONTEXT) info >nul 2>&1 || (echo. & echo ERROR: Cannot reach Docker Desktop. & echo Start Docker Desktop, wait until it is ready, then retry. & echo. & exit /b 1)"
 
 db_up: docker_check
 	@echo Starting Postgres (Compose)...
@@ -23,18 +24,18 @@ db_up: docker_check
 streamlit_docker:
 	$(COMPOSE) --profile streamlit up -d
 
-# Optional K8s setup. Requires Docker Desktop, minikube, and kubectl on PATH.
+# Optional K8s setup. Requires Docker Desktop, k3d, and kubectl on PATH.
 k8s_check:
-	@echo Checking minikube and kubectl...
-	cmd /c "where minikube >nul 2>&1 || (echo ERROR: minikube not found on PATH.& exit /b 1)"
+	@echo Checking k3d and kubectl...
+	cmd /c "where k3d >nul 2>&1 || (echo ERROR: k3d not found on PATH.& exit /b 1)"
 	cmd /c "where kubectl >nul 2>&1 || (echo ERROR: kubectl not found on PATH.& exit /b 1)"
 
 k8s_up: k8s_check db_up
-	@echo Starting Minikube...
-	minikube start
+	@echo Ensuring k3d cluster $(K3D_CLUSTER)...
+	cmd /c "k3d cluster start $(K3D_CLUSTER) || k3d cluster create $(K3D_CLUSTER) --kubeconfig-update-default"
 	@echo Applying K8s manifests...
 	powershell -ExecutionPolicy Bypass -File orchestration/k8s/apply.ps1
-	@echo === minikube status ===
-	minikube status
+	@echo === k3d cluster ===
+	k3d cluster list
 	@echo === chess-teacher resources ===
 	kubectl get cronjobs,pods,jobs -n chess-teacher

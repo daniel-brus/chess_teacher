@@ -157,12 +157,6 @@ def create_pipeline_job(
     return job_name
 
 
-def _load_users(db_client: DatabaseClient) -> list[User]:
-    db_client.ensure_table(User.get_metadata())
-    rows = db_client.read(User.get_metadata())
-    return [User.from_dict(row) for row in rows]
-
-
 def dispatch_pipeline_jobs(
     *,
     db_client: DatabaseClient | None = None,
@@ -178,7 +172,7 @@ def dispatch_pipeline_jobs(
     k8s_namespace = namespace or get_env_variable("K8S_NAMESPACE")
     now = datetime.now(UTC)
 
-    users = _load_users(db)
+    users = User.fetch_all_from_db(db)
     active_jobs = list_active_pipeline_jobs(namespace=k8s_namespace)
 
     spawned: list[str] = []

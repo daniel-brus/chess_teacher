@@ -1,21 +1,23 @@
 from __future__ import annotations
 
+import re
+from io import StringIO
 from typing import Any
 
+import chess
+import chess.pgn
 import polars as pl
 
-from chess_teacher.pipelines.ingestion.move_extraction_core import (
-    extract_user_moves,  # re-exported for tests
-)
-from chess_teacher.pipelines.ingestion.moves import Move
 from chess_teacher.utils.chess_utils import Color
-from chess_teacher.utils.db.client import DatabaseClient, get_db_client
 from chess_teacher.utils.exception_utils import TransformationError
-from chess_teacher.utils.general_utils import generate_ident_is_literal, quote_ident
 from chess_teacher.utils.logging import get_logger
 from chess_teacher.utils.pipeline_utils.transformations import DataFrameTransformation
 
 logger = get_logger()
+
+_RESULT_SUFFIX_RE = re.compile(r"\s*(?:1-0|0-1|1/2-1/2|\*)\s*$")
+_BLACK_MOVE_NUMBER_RE = re.compile(r"\b\d+\.{2,3}\s*")
+_WHITE_MOVE_NUMBER_RE = re.compile(r"\b\d+\.\s")
 
 _MOVE_STRUCT = pl.Struct({
     "game_id": pl.Utf8,
@@ -28,7 +30,7 @@ _MOVE_STRUCT = pl.Struct({
     "fen_after": pl.Utf8,
 })
 
-_MOVE_OUTPUT_SCHEMA = {
+_MOVE_OUTPUT_SCHEMA = pl.Schema({
     "game_id": pl.Utf8,
     "account_id": pl.Utf8,
     "move_nr": pl.Int64,
@@ -37,9 +39,127 @@ _MOVE_OUTPUT_SCHEMA = {
     "move_uci": pl.Utf8,
     "fen_before": pl.Utf8,
     "fen_after": pl.Utf8,
-}
+})
 
 _GAME_INPUT_COLUMNS = ("game_id", "account_id", "cleaned_pgn", "color", "variant")
+
+
+def tokenize_cleaned_movetext(cleaned_pgn: str) -> list[str]:
+    """Split cleaned movetext into SAN tokens (no PGN parser)."""
+    body = cleaned_pgn.strip()
+    body = _RESULT_SUFFIX_RE.sub("", body).strip()
+    body = _BLACK_MOVE_NUMBER_RE.sub("", body)
+    body = _WHITE_MOVE_NUMBER_RE.sub("", body)
+    body = re.sub(r"\s+", " ", body).strip()
+    if not body:
+        return []
+    return body.split(" ")
+
+
+def _rows_from_sans(
+    *,
+    game_id: str,
+    sans: list[str],
+    user_turn: chess.Color,
+) -> list[dict[str, object]]:
+    board = chess.Board()
+    ply = 0
+    move_nr = 0
+    rows: list[dict[str, object]] = []
+
+    for san in sans:
+        ply += 1
+        if board.turn == user_turn:
+            move_nr += 1
+            fen_before = board.fen()
+            move = board.push_san(san)
+            rows.append({
+                "game_id": game_id,
+                "move_nr": move_nr,
+                "ply": ply,
+                "move_san": san,
+                "move_uci": move.uci(),
+                "fen_before": fen_before,
+                "fen_after": board.fen(),
+            })
+        else:
+            board.push_san(san)
+
+    return rows
+
+
+def _rows_from_pgn_parser(
+    *,
+    game_id: str,
+    cleaned_pgn: str,
+    user_turn: chess.Color,
+) -> list[dict[str, object]]:
+    try:
+        game = chess.pgn.read_game(StringIO(f'[Event "?"]\n\n{cleaned_pgn}'))
+    except (ValueError, chess.InvalidMoveError):
+        return []
+    if game is None:
+        return []
+
+    board = game.board()
+    node: chess.pgn.Game | chess.pgn.ChildNode = game
+    ply = 0
+    move_nr = 0
+    rows: list[dict[str, object]] = []
+
+    while node.variations:
+        ply += 1
+        next_node = node.variation(0)
+        move = next_node.move
+        if move is None:
+            break
+        if board.turn == user_turn:
+            move_nr += 1
+            fen_before = board.fen()
+            move_san = board.san(move)
+            board.push(move)
+            rows.append({
+                "game_id": game_id,
+                "move_nr": move_nr,
+                "ply": ply,
+                "move_san": move_san,
+                "move_uci": move.uci(),
+                "fen_before": fen_before,
+                "fen_after": board.fen(),
+            })
+        else:
+            board.push(move)
+        node = next_node
+
+    return rows
+
+
+def extract_user_moves(
+    *,
+    game_id: str,
+    cleaned_pgn: str,
+    color: Color,
+    variant: str = "standard",
+) -> list[dict[str, object]]:
+    """Extract one row per user move from cleaned movetext."""
+    if variant != "standard":
+        return []
+    if not cleaned_pgn or not cleaned_pgn.strip():
+        return []
+
+    user_turn = chess.WHITE if color == Color.WHITE else chess.BLACK
+    sans = tokenize_cleaned_movetext(cleaned_pgn)
+    if sans:
+        try:
+            return _rows_from_sans(game_id=game_id, sans=sans, user_turn=user_turn)
+        except (chess.InvalidMoveError, chess.IllegalMoveError, chess.AmbiguousMoveError):
+            pass
+
+    return _rows_from_pgn_parser(
+        game_id=game_id,
+        cleaned_pgn=cleaned_pgn,
+        user_turn=user_turn,
+    )
 
 
 def _moves_for_game_row(row: dict[str, Any]) -> list[dict[str, Any]]:
@@ -54,73 +174,6 @@ def _moves_for_game_row(row: dict[str, Any]) -> list[dict[str, Any]]:
     for move_row in extracted:
         move_row["account_id"] = account_id
     return extracted
-
-
-class FilterGamesAlreadyInMovesTransformation(DataFrameTransformation):
-    """Drop games that already have rows in ``games.moves`` for the same account."""
-
-    REQUIRED_COLUMNS = ("game_id", "account_id")
-
-    def __init__(
-        self,
-        *,
-        moves_data_class: type[Move] = Move,
-        db_client: DatabaseClient | None = None,
-    ) -> None:
-        self.moves_metadata = moves_data_class.get_metadata()
-        self.db_client = db_client or get_db_client()
-
-    def _existing_game_ids(self, account_id: str) -> set[str]:
-        if not self.db_client.table_exists(self.moves_metadata):
-            return set()
-
-        where = generate_ident_is_literal("account_id", account_id)
-        sql = (
-            f"SELECT DISTINCT {quote_ident('game_id')} "
-            f"FROM {self.moves_metadata.qualified_name_sql()} "
-            f"WHERE {where};"
-        )
-        rows = self.db_client.engine.execute_parameterized_query(sql, {})
-        return {str(row["game_id"]) for row in rows}
-
-    def transform(self, df: pl.DataFrame) -> pl.DataFrame:
-        for column in self.REQUIRED_COLUMNS:
-            if column not in df.columns:
-                logger.log_and_raise(
-                    TransformationError(
-                        f"Column {column!r} is required to filter games already in moves."
-                    )
-                )
-
-        if df.height == 0:
-            return df
-
-        account_ids = df["account_id"].unique().to_list()
-        if len(account_ids) != 1:
-            logger.log_and_raise(
-                TransformationError(
-                    "FilterGamesAlreadyInMovesTransformation expects a single account_id "
-                    f"per batch, got {len(account_ids)}: {account_ids}"
-                )
-            )
-
-        existing_game_ids = self._existing_game_ids(str(account_ids[0]))
-        if not existing_game_ids:
-            return df
-
-        before = df.height
-        result = df.filter(~pl.col("game_id").is_in(existing_game_ids))
-        skipped = before - result.height
-        if skipped:
-            logger.info(
-                "FilterGamesAlreadyInMovesTransformation skipped %d game(s) "
-                "already present in %s (%d -> %d).",
-                skipped,
-                self.moves_metadata.qualified_name_sql(),
-                before,
-                result.height,
-            )
-        return result
 
 
 class ExtractUserMovesTransformation(DataFrameTransformation):
@@ -190,4 +243,4 @@ class ExtractUserMovesTransformation(DataFrameTransformation):
         if result.height == 0:
             return pl.DataFrame(schema=_MOVE_OUTPUT_SCHEMA)
 
-        return result.select(list(_MOVE_OUTPUT_SCHEMA.keys())).cast(_MOVE_OUTPUT_SCHEMA)
+        return result.select(_MOVE_OUTPUT_SCHEMA.names()).cast(_MOVE_OUTPUT_SCHEMA)

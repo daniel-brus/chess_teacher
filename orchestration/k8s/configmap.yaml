@@ -5,9 +5,8 @@ metadata:
   namespace: chess-teacher
 data:
   # Postgres runs outside the cluster (Docker Compose on the host).
-  # Minikube on Windows/macOS: host.minikube.internal
-  # Linux Minikube: often 192.168.49.1 or the host gateway from `minikube ssh -- route -n get 1`
-  POSTGRES_HOST: host.minikube.internal
+  # k3d resolves the host via host.k3d.internal (added automatically on cluster create).
+  POSTGRES_HOST: host.k3d.internal
   ENVIRONMENT: DEV
   K8S_NAMESPACE: chess-teacher
   # Replaced by orchestration/k8s/apply.ps1 from DOCKERHUB_USERNAME in .env
