@@ -41,10 +41,10 @@ try {
     Invoke-Kubectl @("cluster-info")
 } catch {
     throw @"
-Kubernetes API is not reachable. Start the k3d cluster first, then retry:
-  k3d cluster start chess-teacher
-  # first time only:
-  k3d cluster create chess-teacher --kubeconfig-update-default
+Kubernetes API is not reachable. Recover the cluster first:
+  make k8s_ensure
+If that prints manual recreate steps, run them, then:
+  make k8s_up
 "@
 }
 
@@ -57,6 +57,10 @@ $image = "$dockerhub/chess_teacher:develop"
 $postgresPort = Read-DotEnvValue "POSTGRES_PORT"
 if (-not $postgresPort) {
     $postgresPort = "5432"
+}
+$appPort = Read-DotEnvValue "APP_PORT"
+if (-not $appPort) {
+    $appPort = "8501"
 }
 
 function Render-K8sManifest {
@@ -89,8 +93,28 @@ foreach ($cronFile in @("nightly-maintenance.yaml", "ingestion-dispatcher.yaml")
     Invoke-Kubectl @("apply", "-f", "-") -InputObject $manifest
 }
 
+$streamlitSecretsFile = Join-Path $project ".streamlit\secrets.toml"
+if (-not (Test-Path $streamlitSecretsFile)) {
+    throw "Missing Streamlit secrets at $streamlitSecretsFile (required for OAuth login)."
+}
+$streamlitSecretYaml = & kubectl create secret generic chess-teacher-streamlit-secrets `
+    --from-file=secrets.toml=$streamlitSecretsFile `
+    -n chess-teacher `
+    --dry-run=client -o yaml
+if ($LASTEXITCODE -ne 0) {
+    throw "kubectl failed: kubectl create secret generic chess-teacher-streamlit-secrets"
+}
+Invoke-Kubectl @("apply", "-f", "-") -InputObject $streamlitSecretYaml
+
+$streamlitPath = Join-Path $k8sDir "deployment\streamlit.yaml"
+$streamlitManifest = Render-K8sManifest (Get-Content $streamlitPath -Raw) $image "Always"
+Invoke-Kubectl @("apply", "-f", "-") -InputObject $streamlitManifest
+
 Write-Host ""
 Write-Host "Kubernetes orchestration applied." -ForegroundColor Green
 Write-Host ""
 Write-Host "Ensure Postgres is reachable from the k3d cluster at the POSTGRES_HOST in configmap.yaml." -ForegroundColor Yellow
 Write-Host "Compose Postgres must publish port $postgresPort to the host." -ForegroundColor Yellow
+Write-Host ""
+Write-Host "Streamlit (dev image): kubectl port-forward -n chess-teacher svc/streamlit ${appPort}:8501" -ForegroundColor Cyan
+Write-Host "Then open http://localhost:${appPort}" -ForegroundColor Cyan

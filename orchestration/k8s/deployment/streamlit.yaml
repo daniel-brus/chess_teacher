@@ -1,0 +1,85 @@
+# Streamlit UI (dev image). Access locally via:
+#   kubectl port-forward -n chess-teacher svc/streamlit 8501:8501
+#
+# Placeholders substituted by orchestration/k8s/apply.ps1:
+#   IMAGE_PLACEHOLDER, IMAGE_PULL_POLICY_PLACEHOLDER
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: streamlit
+  namespace: chess-teacher
+  labels:
+    app: chess-teacher
+    chess-teacher.io/component: streamlit
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: chess-teacher
+      chess-teacher.io/component: streamlit
+  template:
+    metadata:
+      labels:
+        app: chess-teacher
+        chess-teacher.io/component: streamlit
+    spec:
+      containers:
+        - name: streamlit
+          image: IMAGE_PLACEHOLDER
+          imagePullPolicy: IMAGE_PULL_POLICY_PLACEHOLDER
+          ports:
+            - containerPort: 8501
+              name: http
+          envFrom:
+            - secretRef:
+                name: chess-teacher-env
+          env:
+            - name: POSTGRES_HOST
+              valueFrom:
+                configMapKeyRef:
+                  name: chess-teacher-config
+                  key: POSTGRES_HOST
+            - name: ENVIRONMENT
+              valueFrom:
+                configMapKeyRef:
+                  name: chess-teacher-config
+                  key: ENVIRONMENT
+          volumeMounts:
+            - name: streamlit-secrets
+              mountPath: /app/.streamlit/secrets.toml
+              subPath: secrets.toml
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /_stcore/health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /_stcore/health
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20
+      volumes:
+        - name: streamlit-secrets
+          secret:
+            secretName: chess-teacher-streamlit-secrets
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: streamlit
+  namespace: chess-teacher
+  labels:
+    app: chess-teacher
+    chess-teacher.io/component: streamlit
+spec:
+  type: ClusterIP
+  selector:
+    app: chess-teacher
+    chess-teacher.io/component: streamlit
+  ports:
+    - name: http
+      port: 8501
+      targetPort: http

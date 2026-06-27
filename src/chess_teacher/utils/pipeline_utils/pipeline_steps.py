@@ -128,6 +128,12 @@ class LoadToDatabaseStep(PipelineStep):
                 f"[{self.name}] Transformation {index}/{len(self.transformations)} "
                 f"({transform_name}): {before_rows} -> {df.height} rows."
             )
+            if df.height == 0:
+                self.logger.info(
+                    f"[{self.name}] No rows remaining after {transform_name}; "
+                    "skipping remaining transformations."
+                )
+                break
 
         if df.height == 0:
             self.logger.info(f"[{self.name}] No rows after transformations; skipping save.")
