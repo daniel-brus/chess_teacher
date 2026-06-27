@@ -19,6 +19,7 @@ from chess_teacher.utils.object_storage.keys import key_basename
 
 _MULTIPART_THRESHOLD = 8 * 1024 * 1024
 _DELETE_BATCH_SIZE = 1000
+_DELETE_MISSING_CODES = frozenset({"404", "NoSuchKey", "NotFound"})
 
 
 class S3ObjectStorage(ObjectStorage):
@@ -216,21 +217,58 @@ class S3ObjectStorage(ObjectStorage):
                 return
             self.logger.log_and_raise(FileError(f"Could not delete {key}: {e}"))
 
+    def _raise_delete_objects_errors(
+        self,
+        response: dict[str, object],
+        *,
+        relative_keys: list[str],
+        full_keys: list[str],
+        missing_ok: bool,
+    ) -> None:
+        errors = response.get("Errors") or []
+        if not errors:
+            return
+
+        full_to_relative = dict(zip(full_keys, relative_keys, strict=True))
+        failures: list[str] = []
+        for err in errors:
+            if not isinstance(err, dict):
+                failures.append(str(err))
+                continue
+            code = str(err.get("Code", ""))
+            full_key = str(err.get("Key", ""))
+            relative = full_to_relative.get(full_key, self._relative_key(full_key))
+            if missing_ok and code in _DELETE_MISSING_CODES:
+                continue
+            message = err.get("Message", "")
+            failures.append(f"{relative} ({code}: {message})")
+
+        if failures:
+            self.logger.log_and_raise(FileError(f"Could not delete objects: {'; '.join(failures)}"))
+
     def delete_keys(self, keys: list[str], *, missing_ok: bool = True) -> None:
         if not keys:
             return
 
         for start in range(0, len(keys), _DELETE_BATCH_SIZE):
             chunk = keys[start : start + _DELETE_BATCH_SIZE]
+            full_keys = [self._full_key(key) for key in chunk]
             try:
-                self._client.delete_objects(
+                response = self._client.delete_objects(
                     Bucket=self.bucket,
-                    Delete={"Objects": [{"Key": self._full_key(key)} for key in chunk]},
+                    Delete={"Objects": [{"Key": full_key} for full_key in full_keys]},
                 )
             except ClientError as e:
                 if missing_ok:
                     continue
                 self.logger.log_and_raise(FileError(f"Could not delete objects: {e}"))
+
+            self._raise_delete_objects_errors(
+                response,
+                relative_keys=chunk,
+                full_keys=full_keys,
+                missing_ok=missing_ok,
+            )
 
     def presigned_get_url(self, key: str, *, expires_in: int = 3600) -> str | None:
         full_key = self._full_key(key)

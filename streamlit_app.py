@@ -4,6 +4,7 @@ import streamlit as st
 
 from streamlit_utils.login import require_authenticated_user
 from streamlit_utils.page_config import configure_page
+from streamlit_utils.page_logging import log_user_action
 from streamlit_utils.profile_ui import render_sidebar_profile
 from streamlit_utils.session_state import force_logout
 
@@ -27,6 +28,7 @@ with st.sidebar:
         st.page_link(page, width="stretch")
     with st.container(key="sidebar_logout"):
         if st.button("Logout", width="stretch"):
+            log_user_action("User logged out from Streamlit", user)
             force_logout()
 
 pg.run()

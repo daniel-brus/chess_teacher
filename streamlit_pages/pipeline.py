@@ -6,6 +6,7 @@ from chess_teacher.utils.logging import get_logger
 from chess_teacher.utils.pipeline_utils.pipeline_helpers import aggregate_pipeline_run_results
 from streamlit_utils.login import require_authenticated_user
 from streamlit_utils.page_config import configure_page
+from streamlit_utils.page_logging import log_page_view, log_user_action
 from streamlit_utils.progress_window import (
     ProgressSnapshot,
     StreamlitProgressWindow,
@@ -18,6 +19,7 @@ configure_page("Pipeline")
 db_client = get_db_client()
 logger = get_logger()
 user = require_authenticated_user()
+log_page_view("Pipeline", user)
 
 st.title("Run the pipeline")
 
@@ -34,6 +36,10 @@ if st.session_state[_PIPELINE_RUNNING_KEY] and not should_run:
     st.session_state[_PIPELINE_INTERRUPTED_KEY] = True
 
 if st.session_state.pop(_PIPELINE_INTERRUPTED_KEY, False):
+    logger.warning(
+        "Pipeline run interrupted by leaving page user_id=%s",
+        user.user_id,
+    )
     st.warning(
         "Previous pipeline run did not finish (you left this page). You can start a new run."
     )
@@ -65,11 +71,22 @@ if submitted and not pipeline_running:
 
 if should_run:
     st.session_state[_PIPELINE_RUNNING_KEY] = True
+    log_user_action(
+        "Pipeline run started from Streamlit",
+        user,
+        linked_accounts=len(accounts),
+    )
 
     with StreamlitProgressWindow() as progress:
         try:
             results = run_pipeline(user, db_client, progress_window=progress)
             aggregated = aggregate_pipeline_run_results(results)
+            log_user_action(
+                "Pipeline run finished from Streamlit",
+                user,
+                result=aggregated.result.value,
+                run_count=len(aggregated.run_results),
+            )
             if aggregated.latest_successful_run_id is not None:
                 updated_user = user.update_latest_pipeline_run(
                     db_client,
@@ -77,7 +94,7 @@ if should_run:
                 )
                 set_current_user(updated_user)
         except Exception:
-            logger.error("Pipeline failed from Streamlit page.")
+            logger.exception("Pipeline failed from Streamlit page user_id=%s", user.user_id)
         finally:
             st.session_state[_PIPELINE_RESULT_KEY] = progress.snapshot()
             st.session_state[_PIPELINE_RUNNING_KEY] = False

@@ -66,6 +66,7 @@ class LoginScreen:
 
             user.upsert_latest(self.db_client, "latest_login", now)
             set_current_user(user)
+            self.logger.info("User authenticated in Streamlit user_id=%s", user.user_id)
 
 
 def require_authenticated_user() -> User:
