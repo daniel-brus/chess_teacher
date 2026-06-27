@@ -122,6 +122,11 @@ def test_transform_step_skips_save_when_incremental_filter_removes_all_rows(
     """Empty frame after incremental filter must not run later transforms (e.g. PGN filter)."""
     from chess_teacher.pipelines.preprocessing.pipeline_steps import RawGamesToGamesStep
 
+    monkeypatch.setattr(
+        "chess_teacher.utils.pipeline_utils.transformations.get_db_client",
+        lambda: MagicMock(),
+    )
+
     source_df = _source_table_df()
     db_client = _mock_db_client(target_game_ids=["game-1", "game-2", "game-3"])
 
