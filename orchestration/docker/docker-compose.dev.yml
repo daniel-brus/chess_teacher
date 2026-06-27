@@ -21,8 +21,4 @@ services:
       ENVIRONMENT: DEV
       POSTGRES_HOST: db
 
-    volumes:
-      # Only needed when STORAGE_BACKEND=filesystem
-      - ../../${STORAGE_ROOT}:/app/${STORAGE_ROOT}
-
     command: python scripts/maintenance.py

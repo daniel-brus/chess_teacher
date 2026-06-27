@@ -38,9 +38,11 @@ def main() -> None:
     if aggregated.latest_successful_run_id is not None:
         user.update_latest_pipeline_run(db_client, aggregated.latest_successful_run_id)
 
+    account_count = len({result.account_id for result in results if result.account_id is not None})
     logger.info(
-        "Pipeline job finished for user=%s: accounts=%s results=%s.",
+        "Pipeline job finished for user=%s: accounts=%s pipeline_runs=%s results=%s.",
         user.user_id,
+        account_count,
         len(results),
         [result.result.value for result in results],
     )

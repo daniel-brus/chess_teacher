@@ -114,3 +114,38 @@ def test_transform_step_incremental_filter_off_keeps_all_source_rows(
     assert saved_df.height == 3
     assert saved_df["game_id"].to_list() == ["game-1", "game-2", "game-3"]
     db_client.engine.execute_parameterized_query.assert_not_called()
+
+
+def test_transform_step_skips_save_when_incremental_filter_removes_all_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Empty frame after incremental filter must not run later transforms (e.g. PGN filter)."""
+    from chess_teacher.pipelines.preprocessing.pipeline_steps import RawGamesToGamesStep
+
+    monkeypatch.setattr(
+        "chess_teacher.utils.pipeline_utils.transformations.get_db_client",
+        lambda: MagicMock(),
+    )
+
+    source_df = _source_table_df()
+    db_client = _mock_db_client(target_game_ids=["game-1", "game-2", "game-3"])
+
+    step = RawGamesToGamesStep()
+    step._incremental_filter.db_client = db_client
+
+    saved_frames: list[pl.DataFrame] = []
+
+    def capture_save(
+        _db_client: MagicMock,
+        _table_metadata: object,
+        data: pl.DataFrame,
+    ) -> WriteResult:
+        saved_frames.append(data)
+        return WriteResult(strategy=WriteStrategy.MERGE, rows_inserted=data.height)
+
+    monkeypatch.setattr(step, "_load_records", lambda _db, _ctx: source_df)
+    monkeypatch.setattr(step, "_save_records", capture_save)
+
+    step.run(db_client, PipelineContext(account_id=_ACCOUNT_ID))
+
+    assert saved_frames == []
