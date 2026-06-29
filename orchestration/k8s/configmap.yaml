@@ -4,9 +4,6 @@ metadata:
   name: chess-teacher-config
   namespace: chess-teacher
 data:
-  # Postgres runs outside the cluster (Docker Compose on the host).
-  # k3d resolves the host via host.k3d.internal (added automatically on cluster create).
-  POSTGRES_HOST: host.k3d.internal
   ENVIRONMENT: DEV
   K8S_NAMESPACE: chess-teacher
   # Replaced by orchestration/k8s/apply.ps1 from DOCKERHUB_USERNAME in .env

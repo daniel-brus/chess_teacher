@@ -21,3 +21,8 @@ def get_env_variable(key: str, default: str | None = None) -> str:
 def get_hostname() -> str | None:
     """Return the HOSTNAME environment variable, or ``None`` if it is not set."""
     return os.getenv("HOSTNAME")
+
+
+def get_app_port() -> str:
+    """Host port for local Streamlit and Compose (``APP_PORT`` in ``.env``)."""
+    return get_env_variable("APP_PORT")

@@ -54,15 +54,6 @@ if (-not $dockerhub) {
 }
 
 $image = "$dockerhub/chess_teacher:develop"
-$postgresPort = Read-DotEnvValue "POSTGRES_PORT"
-if (-not $postgresPort) {
-    $postgresPort = "5432"
-}
-$appPort = Read-DotEnvValue "APP_PORT"
-if (-not $appPort) {
-    $appPort = "8501"
-}
-
 function Render-K8sManifest {
     param([string]$Content, [string]$Image, [string]$PullPolicy)
     return $Content.Replace("IMAGE_PLACEHOLDER", $Image).Replace("IMAGE_PULL_POLICY_PLACEHOLDER", $PullPolicy)
@@ -112,9 +103,7 @@ Invoke-Kubectl @("apply", "-f", "-") -InputObject $streamlitManifest
 
 Write-Host ""
 Write-Host "Kubernetes orchestration applied." -ForegroundColor Green
+Write-Host "Database connection (POSTGRES_*) comes from chess-teacher-env secret (.env / Supabase)." -ForegroundColor Green
 Write-Host ""
-Write-Host "Ensure Postgres is reachable from the k3d cluster at the POSTGRES_HOST in configmap.yaml." -ForegroundColor Yellow
-Write-Host "Compose Postgres must publish port $postgresPort to the host." -ForegroundColor Yellow
-Write-Host ""
-Write-Host "Streamlit (dev image): kubectl port-forward -n chess-teacher svc/streamlit ${appPort}:8501" -ForegroundColor Cyan
-Write-Host "Then open http://localhost:${appPort}" -ForegroundColor Cyan
+Write-Host "Streamlit (dev image): kubectl port-forward --address 0.0.0.0 -n chess-teacher svc/streamlit 8501:8501" -ForegroundColor Cyan
+Write-Host "Then open http://localhost:8501 (or via Caddy/DuckDNS; needs 0.0.0.0 bind for Docker)" -ForegroundColor Cyan

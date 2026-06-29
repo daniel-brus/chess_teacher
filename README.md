@@ -7,7 +7,7 @@ An AI-powered chess teaching application with a Streamlit UI for visualizing and
 - 🎯 Interactive chess board visualization with Streamlit
 - 🤖 AI-powered chess analysis via Anthropic API
 - 📊 Move history and game statistics
-- 💾 Persistent game storage with SQLite
+- 💾 Persistent game storage with Supabase (Postgres, session pooler)
 - ⚙️ Stockfish integration for move suggestions
 - 🧪 Comprehensive test suite with pytest
 - 🔧 Pre-commit hooks for code quality
@@ -40,9 +40,8 @@ An AI-powered chess teaching application with a Streamlit UI for visualizing and
    ```
 
 4. **Configure environment:**
-   - Copy `.env.example` to `.env`
-   - Add your API keys (DOCKERHUB_USERNAME, DOCKERHUB_TOKEN, etc.)
-   - Update `config.env` if needed
+   - Create `.env` with your API keys and Supabase Postgres settings (`POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`, `POSTGRES_SSLMODE`, etc.)
+   - No local Postgres container — the app connects to Supabase via the session pooler
 
 5. **Run tests:**
    ```bash
@@ -64,8 +63,11 @@ Example:
 
 ### Docker
 
+Streamlit only (database is Supabase, not in Compose). Smoke-test the production image locally:
+
 ```bash
-docker-compose up
+make streamlit_docker
+# or: docker compose up -d
 ```
 
 ## Project Structure

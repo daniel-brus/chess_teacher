@@ -2,7 +2,7 @@ from typing import Any
 
 from sqlalchemy import Connection, create_engine, text
 from sqlalchemy import inspect as sa_inspect
-from sqlalchemy.engine import Engine
+from sqlalchemy.engine import URL, Engine
 
 from chess_teacher.utils.env_utils import get_env_variable
 from chess_teacher.utils.exception_utils import ConfigError, DatabaseError
@@ -90,6 +90,7 @@ def get_db_engine(
     database: str = "",
     username: str = "",
     password: str = "",
+    sslmode: str = "",
     echo: bool = False,
 ) -> EnrichedEngine:
     """
@@ -102,6 +103,7 @@ def get_db_engine(
         database = database or get_env_variable("POSTGRES_DB")
         username = username or get_env_variable("POSTGRES_USER")
         password = password or get_env_variable("POSTGRES_PASSWORD")
+        sslmode = sslmode or get_env_variable("POSTGRES_SSLMODE", default="")
 
     except Exception as e:
         logger.log_and_raise(
@@ -109,9 +111,18 @@ def get_db_engine(
         )
 
     try:
-        connection_string = f"postgresql+psycopg://{username}:{password}@{host}:{port}/{database}"
+        query = {"sslmode": sslmode} if sslmode else {}
+        url = URL.create(
+            drivername="postgresql+psycopg",
+            username=username,
+            password=password,
+            host=host,
+            port=int(port),
+            database=database,
+            query=query,
+        )
         engine = create_engine(
-            connection_string,
+            url,
             echo=echo,
             pool_pre_ping=True,
         )

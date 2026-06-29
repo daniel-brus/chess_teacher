@@ -1,0 +1,10 @@
+services:
+  streamlit:
+    build: .
+
+    env_file:
+      - .env
+
+    ports:
+      # APP_PORT from .env: host port for local/Compose access (k3d uses fixed 8501).
+      - "${APP_PORT}:8501"
