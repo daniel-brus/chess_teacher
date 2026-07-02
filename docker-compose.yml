@@ -5,6 +5,14 @@ services:
     env_file:
       - .env
 
+    environment:
+      # .env may set a host-specific STOCKFISH_PATH (e.g. Windows); override for Linux image.
+      STOCKFISH_PATH: /usr/games/stockfish
+
     ports:
       # APP_PORT from .env: host port for local/Compose access (k3d uses fixed 8501).
       - "${APP_PORT}:8501"
+
+    volumes:
+      # secrets.toml is gitignored / excluded from the image (.dockerignore).
+      - ./.streamlit/secrets.toml:/app/.streamlit/secrets.toml:ro

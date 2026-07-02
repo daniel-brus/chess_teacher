@@ -139,3 +139,44 @@ tables:
         data_type: text
         nullable: false
         comment: FEN immediately after the user's move
+
+  move_characteristics:
+    schema: games
+    table: move_characteristics
+    comment: Derived characteristics per user move (eval, material, etc.)
+    primary_key:
+      - move_id
+    indexes:
+      - name: idx_move_characteristics_game_id
+        columns: [game_id]
+      - name: idx_move_characteristics_account_id
+        columns: [account_id]
+    columns:
+      - name: move_id
+        data_type: text
+        nullable: false
+        comment: FK to games.moves (logical, not enforced)
+      - name: game_id
+        data_type: text
+        nullable: false
+        comment: Denormalized from moves for game-scoped queries
+      - name: account_id
+        data_type: text
+        nullable: false
+        comment: Denormalized from moves for account-scoped queries
+      - name: evaluation_after
+        data_type: double precision
+        nullable: true
+        comment: Stockfish eval in pawns from white's perspective after the user's move
+      - name: evaluation_delta
+        data_type: double precision
+        nullable: true
+        comment: Change in white-perspective eval across the user's move (after minus before)
+      - name: material_balance_after
+        data_type: double precision
+        nullable: true
+        comment: Material balance (white minus black piece values) after the user's move
+      - name: material_balance_delta
+        data_type: double precision
+        nullable: true
+        comment: Change in material balance across the user's move (after minus before)

@@ -1,4 +1,5 @@
 import os
+import shutil
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -26,3 +27,14 @@ def get_hostname() -> str | None:
 def get_app_port() -> str:
     """Host port for local Streamlit and Compose (``APP_PORT`` in ``.env``)."""
     return get_env_variable("APP_PORT")
+
+
+def get_stockfish_path() -> str:
+    """Path to the Stockfish binary (``STOCKFISH_PATH`` in env, else PATH lookup)."""
+    explicit = os.getenv("STOCKFISH_PATH")
+    if explicit and Path(explicit).is_file():
+        return explicit
+    on_path = shutil.which("stockfish")
+    if on_path:
+        return on_path
+    return "stockfish"

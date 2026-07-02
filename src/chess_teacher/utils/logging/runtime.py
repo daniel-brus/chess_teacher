@@ -14,6 +14,7 @@ from chess_teacher.utils.logging.shipping import (
     LogShipper,
     is_log_ship_enabled,
 )
+from chess_teacher.utils.process_utils import is_parent_process
 
 _configure_lock = threading.Lock()
 _logging_configured = False
@@ -60,14 +61,15 @@ def attach_handlers(
     console_handler.setFormatter(console_formatter)
     root.addHandler(console_handler)
 
-    file_handler = SegmentFileHandler(buffer_dir)
-    file_handler.setLevel(level)
-    file_handler.setFormatter(file_formatter)
-    root.addHandler(file_handler)
+    if is_parent_process():
+        file_handler = SegmentFileHandler(buffer_dir)
+        file_handler.setLevel(level)
+        file_handler.setFormatter(file_formatter)
+        root.addHandler(file_handler)
 
-    register_segment_handler(file_handler)
-    start_log_shipping(buffer_dir)
-    register_shutdown_hooks()
+        register_segment_handler(file_handler)
+        start_log_shipping(buffer_dir)
+        register_shutdown_hooks()
 
 
 def start_log_shipping(buffer_dir: Path) -> LogShipper | None:

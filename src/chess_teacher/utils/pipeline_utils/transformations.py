@@ -1,4 +1,3 @@
-from abc import ABC, abstractmethod
 from typing import Literal
 
 import polars as pl
@@ -8,18 +7,10 @@ from chess_teacher.utils.exception_utils import ConfigError, TransformationError
 from chess_teacher.utils.general_utils import quote_ident
 from chess_teacher.utils.logging import get_logger
 from chess_teacher.utils.metadata_utils import ColumnMetadata
+from chess_teacher.utils.pipeline_utils.dataframe_transformation import DataFrameTransformation
 from chess_teacher.utils.table_data_class import TableDataClass
 
 logger = get_logger()
-
-
-class DataFrameTransformation(ABC):
-    """Base class for all DataFrame transformations."""
-
-    @abstractmethod
-    def transform(self, df: pl.DataFrame) -> pl.DataFrame:
-        """Transform the DataFrame."""
-        pass
 
 
 class IncrementalFilterTransformation(DataFrameTransformation):

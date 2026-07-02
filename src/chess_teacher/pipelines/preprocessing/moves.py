@@ -29,3 +29,22 @@ class Move(TableDataClass):
     @classmethod
     def get_id_hash_columns(cls) -> tuple[str, ...]:
         return ("game_id", "move_nr")
+
+
+@dataclass(frozen=True)
+class MoveCharacteristics(TableDataClass):
+    move_id: str
+    game_id: str
+    account_id: str
+    evaluation_after: float | None = None
+    evaluation_delta: float | None = None
+    material_balance_after: float | None = None
+    material_balance_delta: float | None = None
+
+    @classmethod
+    def get_yaml_path(cls) -> Path:
+        return Path(__file__).parent / "metadata.yml"
+
+    @classmethod
+    def get_key(cls) -> str:
+        return "move_characteristics"
