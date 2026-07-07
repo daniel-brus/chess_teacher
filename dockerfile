@@ -14,7 +14,7 @@ COPY pyproject.toml .
 COPY src/ ./src/
 RUN pip install .
 
-# Copy scripts and app-files# Copy scripts and app-files (including k8s/job/ for dispatcher)
+# Copy scripts and app-files (including k8s/job/ for dispatcher)
 COPY scripts/ ./scripts/
 COPY orchestration/k8s/job/ ./orchestration/k8s/job/
 COPY streamlit_app.py .
