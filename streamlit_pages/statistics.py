@@ -21,6 +21,7 @@ from chess_teacher.other.game_statistics import (
 from chess_teacher.platform.account import Account
 from chess_teacher.utils.chess_utils import Color, Result
 from chess_teacher.utils.db.client import get_db_client
+from chess_teacher.utils.logging import get_logger
 from streamlit_utils.charts import (
     account_category_pie_slices,
     apply_divider_matched_axis_config,
@@ -46,10 +47,12 @@ from streamlit_utils.overview_metric import (
     render_overview_section_title,
 )
 from streamlit_utils.page_config import configure_page
+from streamlit_utils.page_logging import log_page_view
 from streamlit_utils.platform_ui import pick_accounts_multi
 
 configure_page("Statistics")
 
+logger = get_logger()
 _RESULT_OPTIONS = list(Result)
 _RESULT_CHART_COLORS = {
     RESULT_LABELS[Result.WIN.value]: "#22c55e",
@@ -59,6 +62,7 @@ _RESULT_CHART_COLORS = {
 }
 _COLOR_OPTIONS = list(Color)
 user = require_authenticated_user()
+log_page_view("Statistics", user)
 db_client = get_db_client()
 accounts = user.get_linked_accounts(db_client)
 
@@ -66,6 +70,7 @@ st.title("Game statistics")
 st.caption("Summary from ingested games across your linked platform accounts.")
 
 if not accounts:
+    logger.info("Statistics page empty: no linked accounts user_id=%s", user.user_id)
     st.info("Link a platform account in **Settings**, then run the **Pipeline** to load games.")
     st.stop()
 
@@ -75,6 +80,11 @@ all_account_ids = [account.account_id for account in accounts]
 games = load_games_for_accounts(db_client, all_account_ids)
 
 if games.is_empty():
+    logger.info(
+        "Statistics page empty: no games loaded user_id=%s account_count=%s",
+        user.user_id,
+        len(all_account_ids),
+    )
     st.info("No games found yet. Run the pipeline on a linked account to ingest games.")
     st.stop()
 

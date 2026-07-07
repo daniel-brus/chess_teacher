@@ -13,6 +13,7 @@ from chess_teacher.utils.object_storage.images import (
     read_asset_image,
     storage_image_data_uri,
 )
+from chess_teacher.utils.object_storage.keys import key_basename
 
 _UPLOAD_PREFIX = "upload:"
 _ASSET_PREFIX = "asset:"
@@ -101,6 +102,7 @@ class ProfilePictureService:
         """Persist upload; return URL value for ``User.picture``."""
         suffix = self._normalize_upload_suffix(original_filename)
         key = f"{user_id}{suffix}"
+        self._purge_stale_user_uploads(user_id, keep_suffix=suffix)
         self._storage.write_bytes(self._object_key(key), data, overwrite=True)
         return f"{_UPLOAD_PREFIX}{key}"
 
@@ -129,6 +131,18 @@ class ProfilePictureService:
         if picture.startswith(_UPLOAD_PREFIX):
             return picture.removeprefix(_UPLOAD_PREFIX)
         raise ValueError(f"Not an upload picture reference: {picture!r}")
+
+    def _purge_stale_user_uploads(self, user_id: str, *, keep_suffix: str) -> None:
+        """Remove prior upload objects for ``user_id`` when the file extension changes."""
+        keep_name = f"{user_id}{keep_suffix}"
+        for key in self._storage.list_keys(_UPLOAD_STORAGE_PREFIX, recursive=True):
+            name = key_basename(key)
+            if name == keep_name:
+                continue
+            suffix = Path(name).suffix.lower()
+            if not name.startswith(user_id) or suffix not in _ALLOWED_SUFFIXES:
+                continue
+            self._storage.delete(key)
 
     @staticmethod
     def _normalize_upload_suffix(filename: str) -> str:

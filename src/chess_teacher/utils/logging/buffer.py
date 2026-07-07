@@ -196,7 +196,12 @@ class SegmentFileHandler(logging.Handler):
 
         closed_path = self._closed_segment_path()
         closed_path.parent.mkdir(parents=True, exist_ok=True)
-        self.active_path.replace(closed_path)
+        try:
+            self.active_path.replace(closed_path)
+        except PermissionError:
+            # Another process may still hold app.log open (common on Windows spawn).
+            self._open_active_stream()
+            return
         self._open_active_stream()
 
     def close_active_segment(self) -> None:

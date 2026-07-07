@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from chess_teacher.pipelines.modes import PipelineMode
 from chess_teacher.pipelines.preprocessing.pipeline_steps import (
+    EnrichMoveCharacteristicsStep,
     ExtractUserMovesStep,
     RawGamesToGamesStep,
 )
@@ -25,6 +26,7 @@ def run_preprocessing_pipeline(
         steps=[
             RawGamesToGamesStep(mode=mode),
             ExtractUserMovesStep(mode=mode),
+            EnrichMoveCharacteristicsStep(mode=mode),
         ],
         progress_window=progress_window,
     )

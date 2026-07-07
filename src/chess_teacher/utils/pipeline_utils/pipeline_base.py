@@ -14,6 +14,7 @@ from chess_teacher.utils.exception_utils import (
     FileError,
     PipelineError,
     PipelineLockError,
+    TransformationError,
 )
 from chess_teacher.utils.general_utils import (
     as_utc,
@@ -44,6 +45,7 @@ _DEFAULT_NO_RETRY_ON: tuple[type[Exception], ...] = (
     TypeError,
     AssertionError,
     NotImplementedError,
+    TransformationError,
 )
 
 

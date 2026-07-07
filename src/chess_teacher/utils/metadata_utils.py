@@ -49,6 +49,10 @@ _POSTGRES_TO_POLARS: dict[str, pl.DataType] = cast(
         "timestamptz": pl.Datetime(time_zone="UTC"),
         "timestamp with time zone": pl.Datetime(time_zone="UTC"),
         "time": pl.Time,
+        "double precision": pl.Float64,
+        "float8": pl.Float64,
+        "real": pl.Float32,
+        "float4": pl.Float32,
     },
 )
 

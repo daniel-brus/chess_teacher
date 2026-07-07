@@ -22,6 +22,7 @@ from chess_teacher.utils.general_utils import assert_valid_timezone
 from chess_teacher.utils.logging import get_logger
 from streamlit_utils.login import require_authenticated_user
 from streamlit_utils.page_config import configure_page
+from streamlit_utils.page_logging import log_page_view, log_user_action
 from streamlit_utils.platform_ui import pick_platform, render_platform_logo
 from streamlit_utils.profile_ui import (
     highlight_active_preset,
@@ -39,6 +40,7 @@ from streamlit_utils.theme import (
 configure_page("Settings")
 
 user = require_authenticated_user()
+log_page_view("Settings", user)
 
 db_client = get_db_client()
 logger = get_logger()
@@ -105,6 +107,12 @@ def _apply_profile_picture_choice(
             original_filename=upload.name,
         )
         set_current_user(updated_user)
+        log_user_action(
+            "Profile picture saved from upload",
+            updated_user,
+            filename=upload.name,
+            size_bytes=upload.size,
+        )
         st.success("Profile picture saved.")
         return
 
@@ -118,6 +126,11 @@ def _apply_profile_picture_choice(
         except (ValueError, FileNotFoundError) as e:
             logger.log_and_raise(e, "Failed to set app logo profile picture")
         set_current_user(updated_user)
+        log_user_action(
+            "Profile picture set to app logo",
+            updated_user,
+            variant=variant,
+        )
         label = "black" if variant == "black" else "white"
         st.success(f"Profile picture set to the {label} app logo.")
         return
@@ -132,6 +145,7 @@ def _apply_profile_picture_choice(
         user.upsert_field(db_client, "picture", provider_picture)
         user.picture = provider_picture
         set_current_user(user)
+        log_user_action("Profile picture reset to sign-in provider photo", user)
         st.success("Profile picture set to your sign-in provider photo.")
         return
 
@@ -249,6 +263,7 @@ def _show_profile_tab() -> None:
             if name_value != user.name:
                 updated_user = user.update_name(db_client, name_value)
                 set_current_user(updated_user)
+                log_user_action("Display name updated", updated_user, name=name_value)
             st.success("Display name saved.")
             st.rerun()
 
@@ -317,6 +332,13 @@ def _show_add_account_form() -> None:
     account = Account.from_username_and_platform(username=username, platform=platform)
     added = user.link_account(db_client, account)
     if added:
+        log_user_action(
+            "Platform account linked",
+            user,
+            platform=platform.value,
+            username=username,
+            account_id=account.account_id,
+        )
         st.success(f"{platform.value}-account added.")
     else:
         st.info("This account is already linked to your user.")
@@ -396,6 +418,12 @@ def _show_schedule_tab() -> None:
             if timezone != user.timezone:
                 updated_user = updated_user.update_timezone(db_client, timezone)
             set_current_user(updated_user)
+            log_user_action(
+                "Schedule updated",
+                updated_user,
+                cron_time=str(cron_time),
+                timezone=timezone,
+            )
             st.success("Schedule saved.")
             st.rerun()
 
@@ -416,6 +444,13 @@ def _show_account_list(accounts_list: list[Account]) -> None:
         cols[2].write(_format_latest_ingestion(account.latest_ingestion))
         if cols[3].button("Unlink", key=f"unlink_{account.account_id}"):
             user.unlink_account(db_client, account)
+            log_user_action(
+                "Platform account unlinked",
+                user,
+                platform=account.platform.value,
+                username=account.username,
+                account_id=account.account_id,
+            )
             st.success("Account unlinked.")
             st.rerun()
 
@@ -424,6 +459,7 @@ def _show_account_list(accounts_list: list[Account]) -> None:
 def _safe_remove_user():
     st.warning("Your user information will be lost forever")
     if st.button("I'm sure"):
+        log_user_action("User account deletion confirmed", user)
         user.unlink_all_accounts(db_client)
         user.delete_from_db(db_client)
         force_logout()
@@ -503,6 +539,12 @@ with appearance_tab:
             user.default_light_theme_id = selected_light_id or None
             user.default_dark_theme_id = selected_dark_id or None
             set_current_user(user)
+            log_user_action(
+                "Appearance theme updated",
+                user,
+                light_theme_id=selected_light_id,
+                dark_theme_id=selected_dark_id,
+            )
             st.success("Appearance saved.")
             st.rerun()
 

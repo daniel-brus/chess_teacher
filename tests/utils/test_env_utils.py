@@ -63,3 +63,14 @@ class TestGetHostname:
     def test_get_hostname_returns_none_when_missing(self, monkeypatch):
         monkeypatch.delenv("HOSTNAME", raising=False)
         assert env_utils.get_hostname() is None
+
+
+class TestGetAppPort:
+    def test_get_app_port_raises_when_missing(self, monkeypatch):
+        monkeypatch.delenv("APP_PORT", raising=False)
+        with pytest.raises(ValueError, match="APP_PORT"):
+            env_utils.get_app_port()
+
+    def test_get_app_port_reads_env(self, monkeypatch):
+        monkeypatch.setenv("APP_PORT", "8502")
+        assert env_utils.get_app_port() == "8502"

@@ -8,7 +8,7 @@ import pytest
 
 from chess_teacher.pipelines.ingestion.raw_games import RawGame
 from chess_teacher.pipelines.preprocessing.games import Game
-from chess_teacher.pipelines.preprocessing.moves import Move
+from chess_teacher.pipelines.preprocessing.moves import Move, MoveCharacteristics
 from chess_teacher.platform.account import Account
 from chess_teacher.platform.user import User
 from chess_teacher.platform.user_account import UserAccount
@@ -27,6 +27,7 @@ CLASSES_TO_TEST: list[type[TableDataClass]] = [
     RawGame,
     Game,
     Move,
+    MoveCharacteristics,
 ]
 
 

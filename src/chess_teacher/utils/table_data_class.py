@@ -55,6 +55,8 @@ def _python_type_to_data_type(annotation: Any) -> str:
         return "text"
     if annotation is int:
         return "integer"
+    if annotation is float:
+        return "double precision"
     if annotation is bool:
         return "boolean"
     if annotation is datetime:

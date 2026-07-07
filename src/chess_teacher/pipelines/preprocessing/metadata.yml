@@ -139,3 +139,268 @@ tables:
         data_type: text
         nullable: false
         comment: FEN immediately after the user's move
+      - name: previous_opponent_move_san
+        data_type: text
+        nullable: true
+        comment: SAN of the opponent's move immediately before this user move (null on first user move)
+      - name: previous_opponent_move_uci
+        data_type: text
+        nullable: true
+        comment: UCI of the opponent's move immediately before this user move (null on first user move)
+      - name: opponent_move_was_capture
+        data_type: boolean
+        nullable: false
+        default: false
+        comment: Whether the opponent's previous move was a capture (false on first user move)
+
+  move_characteristics:
+    schema: games
+    table: move_characteristics
+    comment: Derived characteristics per user move (eval, material, etc.)
+    primary_key:
+      - move_id
+    indexes:
+      - name: idx_move_characteristics_game_id
+        columns: [game_id]
+      - name: idx_move_characteristics_account_id
+        columns: [account_id]
+    columns:
+      - name: move_id
+        data_type: text
+        nullable: false
+        comment: FK to games.moves (logical, not enforced)
+      - name: game_id
+        data_type: text
+        nullable: false
+        comment: Denormalized from moves for game-scoped queries
+      - name: account_id
+        data_type: text
+        nullable: false
+        comment: Denormalized from moves for account-scoped queries
+      - name: evaluation_after
+        data_type: double precision
+        nullable: true
+        comment: Stockfish eval in pawns from white's perspective after the user's move
+      - name: evaluation_before
+        data_type: double precision
+        nullable: true
+        comment: Stockfish eval in pawns from white's perspective before the user's move
+      - name: evaluation_delta
+        data_type: double precision
+        nullable: true
+        comment: Change in white-perspective eval across the user's move (after minus before)
+      - name: material_balance_after
+        data_type: double precision
+        nullable: true
+        comment: Material balance (white minus black piece values) after the user's move
+      - name: material_balance_before
+        data_type: double precision
+        nullable: true
+        comment: Material balance (white minus black piece values) before the user's move
+      - name: material_balance_delta
+        data_type: double precision
+        nullable: true
+        comment: Change in material balance across the user's move (after minus before)
+      - name: vertical_openness_after
+        data_type: double precision
+        nullable: true
+        comment: Weighted file openness after the user's move (0-8)
+      - name: vertical_openness_delta
+        data_type: double precision
+        nullable: true
+        comment: Change in weighted file openness across the user's move
+      - name: diagonal_openness_after
+        data_type: double precision
+        nullable: true
+        comment: Weighted openness of six center diagonals after the user's move (0-6)
+      - name: diagonal_openness_delta
+        data_type: double precision
+        nullable: true
+        comment: Change in weighted diagonal openness across the user's move
+      - name: pawn_tension_after
+        data_type: double precision
+        nullable: true
+        comment: Pawn tension pair count after the user's move
+      - name: pawn_tension_delta
+        data_type: double precision
+        nullable: true
+        comment: Change in pawn tension pair count across the user's move
+      - name: white_legal_moves_after
+        data_type: double precision
+        nullable: true
+        comment: White legal move count after the user's move (STM ignored)
+      - name: white_legal_moves_delta
+        data_type: double precision
+        nullable: true
+        comment: Change in white legal move count across the user's move
+      - name: black_legal_moves_after
+        data_type: double precision
+        nullable: true
+        comment: Black legal move count after the user's move (STM ignored)
+      - name: black_legal_moves_delta
+        data_type: double precision
+        nullable: true
+        comment: Change in black legal move count across the user's move
+      - name: white_king_safety_after
+        data_type: double precision
+        nullable: true
+        comment: White king safety score after the user's move (higher = safer)
+      - name: white_king_safety_delta
+        data_type: double precision
+        nullable: true
+        comment: Change in white king safety across the user's move
+      - name: black_king_safety_after
+        data_type: double precision
+        nullable: true
+        comment: Black king safety score after the user's move (higher = safer)
+      - name: black_king_safety_delta
+        data_type: double precision
+        nullable: true
+        comment: Change in black king safety across the user's move
+      - name: white_mean_rank_after
+        data_type: double precision
+        nullable: true
+        comment: White mean piece rank (0-1) after the user's move
+      - name: white_mean_rank_delta
+        data_type: double precision
+        nullable: true
+        comment: Change in white mean piece rank across the user's move
+      - name: black_mean_rank_after
+        data_type: double precision
+        nullable: true
+        comment: Black mean piece rank (0-1) after the user's move
+      - name: black_mean_rank_delta
+        data_type: double precision
+        nullable: true
+        comment: Change in black mean piece rank across the user's move
+      - name: white_attack_pressure_after
+        data_type: double precision
+        nullable: true
+        comment: Attack pressure on white pieces after the user's move
+      - name: white_attack_pressure_delta
+        data_type: double precision
+        nullable: true
+        comment: Change in attack pressure on white pieces across the user's move
+      - name: black_attack_pressure_after
+        data_type: double precision
+        nullable: true
+        comment: Attack pressure on black pieces after the user's move
+      - name: black_attack_pressure_delta
+        data_type: double precision
+        nullable: true
+        comment: Change in attack pressure on black pieces across the user's move
+      - name: white_hanging_value_after
+        data_type: double precision
+        nullable: true
+        comment: Vulnerability-weighted hanging white material (pawns and minors only)
+      - name: white_hanging_value_delta
+        data_type: double precision
+        nullable: true
+        comment: Change in hanging white material value across the user's move
+      - name: black_hanging_value_after
+        data_type: double precision
+        nullable: true
+        comment: Vulnerability-weighted hanging black material (pawns and minors only)
+      - name: black_hanging_value_delta
+        data_type: double precision
+        nullable: true
+        comment: Change in hanging black material value across the user's move
+      - name: white_pin_value_after
+        data_type: double precision
+        nullable: true
+        comment: Pin burden on white pieces after the user's move
+      - name: white_pin_value_delta
+        data_type: double precision
+        nullable: true
+        comment: Change in pin burden on white pieces across the user's move
+      - name: black_pin_value_after
+        data_type: double precision
+        nullable: true
+        comment: Pin burden on black pieces after the user's move
+      - name: black_pin_value_delta
+        data_type: double precision
+        nullable: true
+        comment: Change in pin burden on black pieces across the user's move
+      - name: is_capture
+        data_type: boolean
+        nullable: false
+        default: false
+        comment: Whether the user's move was a capture
+      - name: is_castle
+        data_type: boolean
+        nullable: false
+        default: false
+        comment: Whether the user's move was castling
+      - name: gave_check
+        data_type: boolean
+        nullable: false
+        default: false
+        comment: Whether the user's move gave check
+      - name: created_fork
+        data_type: boolean
+        nullable: false
+        default: false
+        comment: Whether the move created a fork (two+ newly attacked targets that are loose, up-exchange, or the king)
+      - name: is_promotion
+        data_type: boolean
+        nullable: false
+        default: false
+        comment: Whether the user's move was a pawn promotion
+      - name: is_en_passant
+        data_type: boolean
+        nullable: false
+        default: false
+        comment: Whether the user's move was an en passant capture
+      - name: is_recapture
+        data_type: boolean
+        nullable: false
+        default: false
+        comment: Whether the user's move recaptured after the opponent's capture
+      - name: is_in_check_before
+        data_type: boolean
+        nullable: false
+        default: false
+        comment: Whether the user was in check before the move
+      - name: user_has_hanging_piece_before
+        data_type: boolean
+        nullable: false
+        default: false
+        comment: Whether the user had a hanging pawn or minor piece before the move
+      - name: opponent_has_hanging_piece_before
+        data_type: boolean
+        nullable: false
+        default: false
+        comment: Whether the opponent had a hanging pawn or minor piece before the move
+      - name: has_castling_rights_before
+        data_type: boolean
+        nullable: false
+        default: false
+        comment: Whether the user still had castling rights before the move
+      - name: is_opening
+        data_type: boolean
+        nullable: false
+        default: false
+        comment: Game phase heuristic — opening (mutually exclusive with middle/end game)
+      - name: is_middle_game
+        data_type: boolean
+        nullable: false
+        default: false
+        comment: Game phase heuristic — middlegame
+      - name: is_end_game
+        data_type: boolean
+        nullable: false
+        default: false
+        comment: Game phase heuristic — endgame
+      - name: previous_opponent_move_san
+        data_type: text
+        nullable: true
+        comment: SAN of the opponent's move immediately before this user move
+      - name: previous_opponent_move_uci
+        data_type: text
+        nullable: true
+        comment: UCI of the opponent's move immediately before this user move
+      - name: opponent_move_was_capture
+        data_type: boolean
+        nullable: false
+        default: false
+        comment: Whether the opponent's previous move was a capture

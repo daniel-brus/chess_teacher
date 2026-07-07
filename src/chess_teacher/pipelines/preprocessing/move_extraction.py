@@ -28,6 +28,9 @@ _MOVE_STRUCT = pl.Struct({
     "move_uci": pl.Utf8,
     "fen_before": pl.Utf8,
     "fen_after": pl.Utf8,
+    "previous_opponent_move_san": pl.Utf8,
+    "previous_opponent_move_uci": pl.Utf8,
+    "opponent_move_was_capture": pl.Boolean,
 })
 
 _MOVE_OUTPUT_SCHEMA = pl.Schema({
@@ -39,6 +42,9 @@ _MOVE_OUTPUT_SCHEMA = pl.Schema({
     "move_uci": pl.Utf8,
     "fen_before": pl.Utf8,
     "fen_after": pl.Utf8,
+    "previous_opponent_move_san": pl.Utf8,
+    "previous_opponent_move_uci": pl.Utf8,
+    "opponent_move_was_capture": pl.Boolean,
 })
 
 _GAME_INPUT_COLUMNS = ("game_id", "account_id", "cleaned_pgn", "color", "variant")
@@ -66,6 +72,9 @@ def _rows_from_sans(
     ply = 0
     move_nr = 0
     rows: list[dict[str, object]] = []
+    previous_opponent_move_san: str | None = None
+    previous_opponent_move_uci: str | None = None
+    opponent_move_was_capture = False
 
     for san in sans:
         ply += 1
@@ -81,8 +90,15 @@ def _rows_from_sans(
                 "move_uci": move.uci(),
                 "fen_before": fen_before,
                 "fen_after": board.fen(),
+                "previous_opponent_move_san": previous_opponent_move_san,
+                "previous_opponent_move_uci": previous_opponent_move_uci,
+                "opponent_move_was_capture": opponent_move_was_capture,
             })
         else:
+            move = board.parse_san(san)
+            opponent_move_was_capture = board.is_capture(move)
+            previous_opponent_move_san = san
+            previous_opponent_move_uci = move.uci()
             board.push_san(san)
 
     return rows
@@ -106,6 +122,9 @@ def _rows_from_pgn_parser(
     ply = 0
     move_nr = 0
     rows: list[dict[str, object]] = []
+    previous_opponent_move_san: str | None = None
+    previous_opponent_move_uci: str | None = None
+    opponent_move_was_capture = False
 
     while node.variations:
         ply += 1
@@ -126,8 +145,14 @@ def _rows_from_pgn_parser(
                 "move_uci": move.uci(),
                 "fen_before": fen_before,
                 "fen_after": board.fen(),
+                "previous_opponent_move_san": previous_opponent_move_san,
+                "previous_opponent_move_uci": previous_opponent_move_uci,
+                "opponent_move_was_capture": opponent_move_was_capture,
             })
         else:
+            opponent_move_was_capture = board.is_capture(move)
+            previous_opponent_move_san = board.san(move)
+            previous_opponent_move_uci = move.uci()
             board.push(move)
         node = next_node
 

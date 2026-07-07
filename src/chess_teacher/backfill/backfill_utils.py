@@ -78,7 +78,7 @@ def move_processed_and_failed_to_ingested(
                 storage=store,
             )
             try:
-                store.move(source_key, destination, overwrite=overwrite)
+                store.move_verified(source_key, destination, overwrite=overwrite)
             except FileError as e:
                 raise FileError(
                     f"Backfill move failed for {source_key} -> {destination}: {e}"

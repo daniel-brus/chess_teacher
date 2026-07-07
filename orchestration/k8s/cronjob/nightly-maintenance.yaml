@@ -25,11 +25,6 @@ spec:
                 - secretRef:
                     name: chess-teacher-env
               env:
-                - name: POSTGRES_HOST
-                  valueFrom:
-                    configMapKeyRef:
-                      name: chess-teacher-config
-                      key: POSTGRES_HOST
                 - name: ENVIRONMENT
                   valueFrom:
                     configMapKeyRef:
