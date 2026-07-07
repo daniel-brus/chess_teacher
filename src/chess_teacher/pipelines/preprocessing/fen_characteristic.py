@@ -11,41 +11,25 @@ import struct
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterator
-from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
+from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
 from contextlib import contextmanager
 from multiprocessing import shared_memory
-from typing import TYPE_CHECKING
+from typing import TypeVar
 
 import polars as pl
 
 from chess_teacher.utils.exception_utils import TransformationError
 from chess_teacher.utils.pipeline_utils.dataframe_transformation import DataFrameTransformation
-from chess_teacher.utils.process_utils import (
-    WORKER_NO_OP_LOGGER,
-    _WorkerNoOpLogger,
-    is_parent_process,
-)
-
-if TYPE_CHECKING:
-    from chess_teacher.utils.logging.logger import EnhancedLogger
+from chess_teacher.utils.process_utils import WorkerSafeLogger, is_parent_process
 
 _MIN_PARALLEL_FENS = 100
 _DEFAULT_LOG_PROGRESS_PERCENT = 5
 _PROGRESS_INT_BYTES = struct.calcsize("i")
-_PROGRESS_UPDATE_EVERY = 25
+_PROGRESS_UPDATE_EVERY = 1
 
-_logger: EnhancedLogger | _WorkerNoOpLogger | None = None
+TScore = TypeVar("TScore")
 
-
-def _log() -> EnhancedLogger | _WorkerNoOpLogger:
-    global _logger
-    if not is_parent_process():
-        return WORKER_NO_OP_LOGGER
-    if _logger is None:
-        from chess_teacher.utils.logging import get_logger
-
-        _logger = get_logger(__name__)
-    return _logger
+_logger = WorkerSafeLogger(__name__)
 
 
 def _default_fen_eval_workers() -> int:
@@ -154,6 +138,9 @@ class FenCharacteristicTransformation(DataFrameTransformation, ABC):
         self.n_workers = n_workers if n_workers is not None else _default_fen_eval_workers()
         self._worker_init_kwargs: dict[str, object] = {}
 
+    def before_column(self) -> str:
+        return f"{self.characteristic_name}_before"
+
     def after_column(self) -> str:
         return f"{self.characteristic_name}_after"
 
@@ -164,6 +151,9 @@ class FenCharacteristicTransformation(DataFrameTransformation, ABC):
     def evaluate(self, fen: str, *, row: dict[str, object]) -> float:
         """Map a FEN to a numeric characteristic value."""
 
+    def _score_fen(self, fen: str) -> float:
+        return self.evaluate(fen, row={})
+
     @contextmanager
     def _evaluation_context(self) -> Iterator[None]:
         """Optional setup for batched evaluation (e.g. a reused Stockfish engine)."""
@@ -173,7 +163,7 @@ class FenCharacteristicTransformation(DataFrameTransformation, ABC):
         if not is_parent_process():
             return
         percent = _completed_percent(completed, total)
-        _log().info(
+        _logger.info(
             "%s: %d / %d FENs evaluated (%d%%).",
             type(self).__name__,
             completed,
@@ -181,8 +171,21 @@ class FenCharacteristicTransformation(DataFrameTransformation, ABC):
             percent,
         )
 
+    def _collect_unique_fens(self, df: pl.DataFrame) -> tuple[list[str], list[str], list[str]]:
+        fen_before = df["fen_before"].cast(pl.Utf8).to_list()
+        fen_after = df["fen_after"].cast(pl.Utf8).to_list()
+        unique_fens = pl.concat([df["fen_before"], df["fen_after"]]).unique().to_list()
+        return unique_fens, [str(fen) for fen in fen_before], [str(fen) for fen in fen_after]
+
     def _evaluate_fens_serial(self, unique_fens: list[str]) -> dict[str, float]:
-        scores: dict[str, float] = {}
+        return self._evaluate_fens_serial_with(unique_fens, self._score_fen)
+
+    def _evaluate_fens_serial_with(
+        self,
+        unique_fens: list[str],
+        score_fn: Callable[[str], TScore],
+    ) -> dict[str, TScore]:
+        scores: dict[str, TScore] = {}
         total_fens = len(unique_fens)
         last_logged_percent = 0
         report: Callable[[int, int], None] | None = (
@@ -190,7 +193,7 @@ class FenCharacteristicTransformation(DataFrameTransformation, ABC):
         )
         with self._evaluation_context():
             for index, fen in enumerate(unique_fens):
-                scores[fen] = self.evaluate(fen, row={})
+                scores[fen] = score_fn(fen)
                 last_logged_percent = _advance_fen_progress(
                     completed=index + 1,
                     total=total_fens,
@@ -200,15 +203,20 @@ class FenCharacteristicTransformation(DataFrameTransformation, ABC):
                 )
         return scores
 
-    def _evaluate_fens_parallel(self, unique_fens: list[str]) -> dict[str, float]:
+    def _run_fen_pool(
+        self,
+        unique_fens: list[str],
+        submit_chunk: Callable[
+            [ProcessPoolExecutor, int, list[str], str], Future[dict[str, TScore]]
+        ],
+    ) -> dict[str, TScore]:
         chunks = _split_fen_list(unique_fens, self.n_workers)
-        transformation_cls = type(self)
         n_chunks = len(chunks)
         chunk_size = len(chunks[0]) if chunks else 0
         progress_shm = shared_memory.SharedMemory(create=True, size=n_chunks * _PROGRESS_INT_BYTES)
         progress_shm_name = progress_shm.name
 
-        _log().info(
+        _logger.info(
             "%s: starting ProcessPoolExecutor with %d worker(s) for %d unique FEN(s) "
             "(%d FENs per chunk).",
             type(self).__name__,
@@ -218,18 +226,11 @@ class FenCharacteristicTransformation(DataFrameTransformation, ABC):
         )
 
         try:
-            scores: dict[str, float] = {}
+            scores: dict[str, TScore] = {}
             total_fens = len(unique_fens)
             with ProcessPoolExecutor(max_workers=n_chunks) as executor:
                 futures = [
-                    executor.submit(
-                        _evaluate_fen_chunk_worker,
-                        worker_index,
-                        transformation_cls,
-                        self._worker_init_kwargs,
-                        chunk,
-                        progress_shm_name,
-                    )
+                    submit_chunk(executor, worker_index, chunk, progress_shm_name)
                     for worker_index, chunk in enumerate(chunks)
                 ]
                 pending = set(futures)
@@ -241,7 +242,7 @@ class FenCharacteristicTransformation(DataFrameTransformation, ABC):
                     for future in done:
                         scores.update(future.result())
                         completed_chunks += 1
-                        _log().info(
+                        _logger.info(
                             "%s: worker chunk finished (%d / %d chunks complete, %d scores so far).",
                             type(self).__name__,
                             completed_chunks,
@@ -251,7 +252,7 @@ class FenCharacteristicTransformation(DataFrameTransformation, ABC):
                     now = time.monotonic()
                     if now - last_heartbeat >= 60.0:
                         percent = _completed_percent(completed_fens, total_fens)
-                        _log().info(
+                        _logger.info(
                             "%s: %d / %d FENs evaluated (%d%%), "
                             "%d / %d chunk(s) complete, %d pending.",
                             type(self).__name__,
@@ -264,7 +265,7 @@ class FenCharacteristicTransformation(DataFrameTransformation, ABC):
                         )
                         last_heartbeat = now
 
-            _log().info(
+            _logger.info(
                 "%s: ProcessPoolExecutor finished (%d unique FEN scores).",
                 type(self).__name__,
                 len(scores),
@@ -274,12 +275,32 @@ class FenCharacteristicTransformation(DataFrameTransformation, ABC):
             progress_shm.close()
             progress_shm.unlink()
 
+    def _evaluate_fens_parallel(self, unique_fens: list[str]) -> dict[str, float]:
+        transformation_cls = type(self)
+
+        def submit_chunk(
+            executor: ProcessPoolExecutor,
+            worker_index: int,
+            chunk: list[str],
+            progress_shm_name: str,
+        ) -> Future[dict[str, float]]:
+            return executor.submit(
+                _evaluate_fen_chunk_worker,
+                worker_index,
+                transformation_cls,
+                self._worker_init_kwargs,
+                chunk,
+                progress_shm_name,
+            )
+
+        return self._run_fen_pool(unique_fens, submit_chunk)
+
     def _evaluate_unique_fens(self, unique_fens: list[str]) -> dict[str, float]:
         total_fens = len(unique_fens)
         use_parallel = self.n_workers > 1 and total_fens >= _MIN_PARALLEL_FENS
 
         if use_parallel:
-            _log().info(
+            _logger.info(
                 "%s: using parallel evaluation (%d unique FEN(s), %d ProcessPool worker(s), "
                 "heartbeat every 60s).",
                 type(self).__name__,
@@ -288,7 +309,7 @@ class FenCharacteristicTransformation(DataFrameTransformation, ABC):
             )
             return self._evaluate_fens_parallel(unique_fens)
 
-        _log().info(
+        _logger.info(
             "%s: using serial evaluation (%d unique FEN(s), progress every %s%%).",
             type(self).__name__,
             total_fens,
@@ -299,7 +320,7 @@ class FenCharacteristicTransformation(DataFrameTransformation, ABC):
     def transform(self, df: pl.DataFrame) -> pl.DataFrame:
         missing = [column for column in ("fen_before", "fen_after") if column not in df.columns]
         if missing:
-            _log().log_and_raise(
+            _logger.log_and_raise(
                 TransformationError(f"FenCharacteristicTransformation requires columns {missing}.")
             )
         if df.height == 0:
@@ -307,12 +328,11 @@ class FenCharacteristicTransformation(DataFrameTransformation, ABC):
 
         after_column = self.after_column()
         delta_column = self.delta_column()
-        fen_before = df["fen_before"].cast(pl.Utf8)
-        fen_after = df["fen_after"].cast(pl.Utf8)
+        before_column = self.before_column()
 
         try:
-            unique_fens = pl.concat([fen_before, fen_after]).unique().to_list()
-            _log().info(
+            unique_fens, before_fens, after_fens = self._collect_unique_fens(df)
+            _logger.info(
                 "%s: collected %d unique FEN(s) from %d row(s).",
                 type(self).__name__,
                 len(unique_fens),
@@ -322,21 +342,147 @@ class FenCharacteristicTransformation(DataFrameTransformation, ABC):
         except TransformationError:
             raise
         except Exception as e:
-            _log().log_and_raise(
+            _logger.log_and_raise(
                 TransformationError(
                     f"Failed to compute {self.characteristic_name} characteristic: {e}"
                 )
             )
 
-        before_values = [scores[str(fen)] for fen in fen_before.to_list()]
-        after_values = [scores[str(fen)] for fen in fen_after.to_list()]
+        before_values = [scores[fen] for fen in before_fens]
+        after_values = [scores[fen] for fen in after_fens]
         delta_values = [
             after - before for before, after in zip(before_values, after_values, strict=True)
         ]
 
         return df.with_columns(
+            pl.Series(before_column, before_values, dtype=pl.Float64),
             pl.Series(after_column, after_values, dtype=pl.Float64),
             pl.Series(delta_column, delta_values, dtype=pl.Float64),
+        )
+
+
+class DualSidedFenCharacteristicTransformation(FenCharacteristicTransformation):
+    """
+    Derive white/black ``{name}_after`` and ``{name}_delta`` from ``fen_before`` / ``fen_after``.
+
+    Reuses FEN deduplication, serial/parallel evaluation, and progress reporting from
+    ``FenCharacteristicTransformation``.
+    """
+
+    @abstractmethod
+    def evaluate_sides(self, fen: str, *, row: dict[str, object]) -> tuple[float, float]:
+        """Return ``(white_value, black_value)`` for one FEN."""
+
+    def evaluate(self, fen: str, *, row: dict[str, object]) -> float:
+        del fen, row
+        raise NotImplementedError(f"{type(self).__name__} uses evaluate_sides(), not evaluate().")
+
+    def _score_fen_sides(self, fen: str) -> tuple[float, float]:
+        return self.evaluate_sides(fen, row={})
+
+    def white_after_column(self) -> str:
+        return f"white_{self.characteristic_name}_after"
+
+    def white_delta_column(self) -> str:
+        return f"white_{self.characteristic_name}_delta"
+
+    def black_after_column(self) -> str:
+        return f"black_{self.characteristic_name}_after"
+
+    def black_delta_column(self) -> str:
+        return f"black_{self.characteristic_name}_delta"
+
+    def _evaluate_fens_parallel_sides(
+        self, unique_fens: list[str]
+    ) -> dict[str, tuple[float, float]]:
+        transformation_cls = type(self)
+
+        def submit_chunk(
+            executor: ProcessPoolExecutor,
+            worker_index: int,
+            chunk: list[str],
+            progress_shm_name: str,
+        ) -> Future[dict[str, tuple[float, float]]]:
+            return executor.submit(
+                _evaluate_dual_sided_fen_chunk_worker,
+                worker_index,
+                transformation_cls,
+                self._worker_init_kwargs,
+                chunk,
+                progress_shm_name,
+            )
+
+        return self._run_fen_pool(unique_fens, submit_chunk)
+
+    def _evaluate_unique_fens_sides(self, unique_fens: list[str]) -> dict[str, tuple[float, float]]:
+        total_fens = len(unique_fens)
+        use_parallel = self.n_workers > 1 and total_fens >= _MIN_PARALLEL_FENS
+
+        if use_parallel:
+            _logger.info(
+                "%s: using parallel evaluation (%d unique FEN(s), %d ProcessPool worker(s), "
+                "heartbeat every 60s).",
+                type(self).__name__,
+                total_fens,
+                self.n_workers,
+            )
+            return self._evaluate_fens_parallel_sides(unique_fens)
+
+        _logger.info(
+            "%s: using serial evaluation (%d unique FEN(s), progress every %s%%).",
+            type(self).__name__,
+            total_fens,
+            self.log_progress_percent if self.log_progress_percent is not None else "off",
+        )
+        return self._evaluate_fens_serial_with(unique_fens, self._score_fen_sides)
+
+    def transform(self, df: pl.DataFrame) -> pl.DataFrame:
+        missing = [column for column in ("fen_before", "fen_after") if column not in df.columns]
+        if missing:
+            _logger.log_and_raise(
+                TransformationError(
+                    f"DualSidedFenCharacteristicTransformation requires columns {missing}."
+                )
+            )
+        if df.height == 0:
+            return df
+
+        try:
+            unique_fens, before_fens, after_fens = self._collect_unique_fens(df)
+            _logger.info(
+                "%s: collected %d unique FEN(s) from %d row(s).",
+                type(self).__name__,
+                len(unique_fens),
+                df.height,
+            )
+            scores = self._evaluate_unique_fens_sides(unique_fens)
+        except TransformationError:
+            raise
+        except Exception as e:
+            _logger.log_and_raise(
+                TransformationError(
+                    f"Failed to compute {self.characteristic_name} characteristic: {e}"
+                )
+            )
+
+        white_before = [scores[fen][0] for fen in before_fens]
+        white_after = [scores[fen][0] for fen in after_fens]
+        black_before = [scores[fen][1] for fen in before_fens]
+        black_after = [scores[fen][1] for fen in after_fens]
+
+        return df.with_columns(
+            pl.Series(self.white_after_column(), white_after, dtype=pl.Float64),
+            pl.Series(
+                self.white_delta_column(),
+                [after - before for before, after in zip(white_before, white_after, strict=True)],
+                dtype=pl.Float64,
+            ),
+            pl.Series(self.black_after_column(), black_after, dtype=pl.Float64),
+            pl.Series(
+                self.black_delta_column(),
+                [after - before for before, after in zip(black_before, black_after, strict=True)],
+                dtype=pl.Float64,
+            ),
         )
 
 
@@ -354,7 +500,29 @@ def _evaluate_fen_chunk_worker(
     try:
         with instance._evaluation_context():
             for index, fen in enumerate(fens):
-                scores[fen] = instance.evaluate(fen, row={})
+                scores[fen] = instance._score_fen(fen)
+                progress_tracker.maybe_update(index + 1)
+    finally:
+        progress_tracker.finalize(total_fens)
+        progress_tracker.close()
+    return scores
+
+
+def _evaluate_dual_sided_fen_chunk_worker(
+    worker_index: int,
+    transformation_cls: type[DualSidedFenCharacteristicTransformation],
+    init_kwargs: dict[str, object],
+    fens: list[str],
+    progress_shm_name: str,
+) -> dict[str, tuple[float, float]]:
+    instance = transformation_cls(**init_kwargs)
+    scores: dict[str, tuple[float, float]] = {}
+    total_fens = len(fens)
+    progress_tracker = _WorkerFenProgressTracker(progress_shm_name, worker_index)
+    try:
+        with instance._evaluation_context():
+            for index, fen in enumerate(fens):
+                scores[fen] = instance._score_fen_sides(fen)
                 progress_tracker.maybe_update(index + 1)
     finally:
         progress_tracker.finalize(total_fens)

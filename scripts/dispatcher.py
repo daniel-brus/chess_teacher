@@ -226,14 +226,17 @@ def dispatch_pipeline_jobs(
     return result
 
 
-def main() -> None:
+def main() -> int:
     logger.info("Pipeline dispatcher started.")
     result = dispatch_pipeline_jobs()
     logger.info(
         "Pipeline dispatcher completed: spawned=%s jobs.",
         len(result.spawned_jobs),
     )
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    from chess_teacher.utils.process_utils import run_script_main
+
+    run_script_main(main)

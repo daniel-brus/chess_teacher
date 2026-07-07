@@ -12,7 +12,6 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
-from multiprocessing import parent_process
 from pathlib import Path
 
 import polars as pl
@@ -314,5 +313,6 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    if parent_process() is None:
-        raise SystemExit(main())
+    from chess_teacher.utils.process_utils import run_script_main
+
+    run_script_main(main)

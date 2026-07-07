@@ -3,8 +3,19 @@ from chess_teacher.pipelines.ingestion.raw_games import RawGame
 from chess_teacher.pipelines.modes import PipelineMode, preprocessing_transform_config
 from chess_teacher.pipelines.preprocessing.games import Game
 from chess_teacher.pipelines.preprocessing.move_characteristics import (
+    AttackPressureTransformation,
+    DiagonalOpennessTransformation,
+    HangingValueTransformation,
+    KingSafetyTransformation,
+    LegalMovesTransformation,
     MaterialBalanceTransformation,
+    MeanRankTransformation,
+    MoveContextTransformation,
+    MoveFlagsTransformation,
+    PawnTensionTransformation,
+    PinValueTransformation,
     StockfishEvaluationTransformation,
+    VerticalOpennessTransformation,
 )
 from chess_teacher.pipelines.preprocessing.move_extraction import ExtractUserMovesTransformation
 from chess_teacher.pipelines.preprocessing.moves import Move, MoveCharacteristics
@@ -94,6 +105,17 @@ class EnrichMoveCharacteristicsStep(TransformStep):
             on=on,
             transformations=[
                 MaterialBalanceTransformation(),
+                VerticalOpennessTransformation(),
+                DiagonalOpennessTransformation(),
+                PawnTensionTransformation(),
+                LegalMovesTransformation(),
+                KingSafetyTransformation(),
+                MeanRankTransformation(),
+                AttackPressureTransformation(),
+                HangingValueTransformation(),
+                PinValueTransformation(),
+                MoveContextTransformation(),
+                MoveFlagsTransformation(),
                 StockfishEvaluationTransformation(depth=20, log_progress_percent=5),
             ],
             loading_strategy=LoadingStrategy.MERGE,

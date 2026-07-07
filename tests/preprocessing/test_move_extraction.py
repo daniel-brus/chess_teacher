@@ -23,13 +23,29 @@ def test_extract_user_moves_white() -> None:
     assert rows[0]["ply"] == 1
     assert rows[0]["move_san"] == "e4"
     assert rows[0]["move_uci"] == "e2e4"
+    assert rows[0]["previous_opponent_move_san"] is None
+    assert rows[0]["opponent_move_was_capture"] is False
     assert rows[1]["move_nr"] == 2
     assert rows[1]["ply"] == 3
     assert rows[1]["move_san"] == "Nf3"
+    assert rows[1]["previous_opponent_move_san"] == "e5"
+    assert rows[1]["previous_opponent_move_uci"] == "e7e5"
+    assert rows[1]["opponent_move_was_capture"] is False
     assert rows[2]["move_nr"] == 3
     assert rows[2]["move_san"] == "d3"
+    assert rows[2]["previous_opponent_move_san"] == "Nc6"
     assert rows[0]["fen_before"] == chess.STARTING_FEN
     assert rows[0]["fen_after"] == "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1"
+
+
+def test_extract_user_moves_opponent_capture_flag() -> None:
+    rows = extract_user_moves(
+        game_id="game-1",
+        cleaned_pgn="1. e4 e5 2. d4 exd4 3. Nf3",
+        color=Color.WHITE,
+    )
+    assert rows[2]["previous_opponent_move_san"] == "exd4"
+    assert rows[2]["opponent_move_was_capture"] is True
 
 
 def test_extract_user_moves_black() -> None:
@@ -43,6 +59,8 @@ def test_extract_user_moves_black() -> None:
     assert rows[0]["ply"] == 2
     assert rows[0]["move_san"] == "e5"
     assert rows[0]["move_uci"] == "e7e5"
+    assert rows[0]["previous_opponent_move_san"] == "e4"
+    assert rows[0]["opponent_move_was_capture"] is False
     assert rows[1]["move_nr"] == 2
     assert rows[1]["ply"] == 4
     assert rows[1]["move_san"] == "Nc6"
