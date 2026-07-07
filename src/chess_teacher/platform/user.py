@@ -255,6 +255,11 @@ class User(TableDataClass):
                 return cached_accounts
 
         accounts = self._load_linked_accounts_from_db(db_client)
+        logger.info(
+            "Loaded linked accounts from database user_id=%s count=%s",
+            self.user_id,
+            len(accounts),
+        )
 
         if cache is not None:
             cache.set_user_accounts(self.user_id, accounts)

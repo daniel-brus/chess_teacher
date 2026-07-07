@@ -127,6 +127,14 @@ def get_db_engine(
             pool_pre_ping=True,
         )
         enriched = EnrichedEngine(engine.pool, engine.dialect, engine.url)
+        logger.info(
+            "Postgres engine created host=%s port=%s database=%s user=%s sslmode=%s",
+            host,
+            port,
+            database,
+            username,
+            sslmode or "default",
+        )
     except Exception as e:
         logger.log_and_raise(DatabaseError(f"Error occurred while creating database engine: {e}"))
     return enriched

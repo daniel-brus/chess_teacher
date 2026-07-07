@@ -16,6 +16,7 @@ from chess_teacher.utils.cache_utils import (
     _account_to_cache_dict,
     _decode_polars,
     _encode_polars,
+    _redis_endpoint_label,
     get_cache_client,
     invalidate_user_games_and_accounts_cache,
     user_accounts_cache_key,
@@ -36,6 +37,11 @@ class TestCacheKeys:
 
     def test_user_accounts_cache_key(self):
         assert user_accounts_cache_key("abc") == "user:abc:accounts:v1"
+
+    def test_redis_endpoint_label_hides_credentials(self):
+        label = _redis_endpoint_label("rediss://default:secret@fancy-marmot.upstash.io:6379")
+        assert label == "fancy-marmot.upstash.io:6379"
+        assert "secret" not in label
 
 
 class TestAccountSerialization:
@@ -82,7 +88,7 @@ class TestRedisCacheClient:
     def test_set_and_get_user_accounts(self):
         redis_client = MagicMock()
         redis_client.get.return_value = None
-        cache = RedisCacheClient(redis_client)
+        cache = RedisCacheClient(redis_client, endpoint="test-host:6379")
 
         account = Account.from_username_and_platform("hikaru", AccountPlatform.CHESS_COM)
         cache.set_user_accounts("user1", [account])
@@ -98,7 +104,7 @@ class TestRedisCacheClient:
     def test_set_and_get_user_games(self):
         redis_client = MagicMock()
         redis_client.get.return_value = None
-        cache = RedisCacheClient(redis_client)
+        cache = RedisCacheClient(redis_client, endpoint="test-host:6379")
 
         games = pl.DataFrame({"game_id": ["g1"], "result": ["win"]})
         cache.set_user_games("user1", games)
@@ -114,7 +120,7 @@ class TestRedisCacheClient:
 
     def test_delete(self):
         redis_client = MagicMock()
-        cache = RedisCacheClient(redis_client)
+        cache = RedisCacheClient(redis_client, endpoint="test-host:6379")
         cache.delete("a", "b")
         redis_client.delete.assert_called_once_with("a", "b")
 

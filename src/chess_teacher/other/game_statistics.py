@@ -14,6 +14,9 @@ from chess_teacher.utils.cache_utils import get_cache_client
 from chess_teacher.utils.chess_utils import Color, Result
 from chess_teacher.utils.db.client import DatabaseClient
 from chess_teacher.utils.general_utils import quote_ident, quote_literal
+from chess_teacher.utils.logging import get_logger
+
+logger = get_logger()
 
 _GAME_COLUMNS = [
     "game_id",
@@ -106,6 +109,11 @@ def load_games_for_accounts(
             return cached_games
 
     db_client.ensure_table(Game.get_metadata())
+    logger.info(
+        "Loading games from database user_id=%s account_count=%s",
+        user_id,
+        len(account_ids),
+    )
     games = db_client.read(
         Game.get_metadata(),
         columns=_GAME_COLUMNS,
@@ -114,6 +122,11 @@ def load_games_for_accounts(
         as_polars=True,
     )
     games = _decode_html_text_columns(games, ("opening_family",))
+    logger.info(
+        "Loaded games from database user_id=%s rows=%s",
+        user_id,
+        games.height,
+    )
 
     if cache is not None and user_id is not None:
         cache.set_user_games(user_id, games)

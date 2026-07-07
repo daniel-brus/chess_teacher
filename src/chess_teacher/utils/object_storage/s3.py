@@ -46,6 +46,12 @@ class S3ObjectStorage(ObjectStorage):
             config=Config(signature_version="s3v4"),
         )
         self._transfer_config = TransferConfig(multipart_threshold=_MULTIPART_THRESHOLD)
+        self.logger.info(
+            "S3 object storage client initialized bucket=%s endpoint=%s key_prefix=%s",
+            self.bucket,
+            endpoint_url,
+            self.key_prefix or "(root)",
+        )
 
     def _full_key(self, relative: str) -> str:
         relative = relative.strip("/")
@@ -77,6 +83,13 @@ class S3ObjectStorage(ObjectStorage):
             self.logger.log_and_raise(FileError(f"Could not open {key}: {e}"))
 
         body = response["Body"]
+        content_length = response.get("ContentLength")
+        self.logger.debug(
+            "S3 GET text opened bucket=%s key=%s bytes=%s",
+            self.bucket,
+            key,
+            content_length,
+        )
         try:
             stream = TextIOWrapper(body, encoding=encoding)
             yield TextStreamSource(stream, source_name=key)
@@ -89,11 +102,19 @@ class S3ObjectStorage(ObjectStorage):
         full_key = self._full_key(key)
         try:
             response = self._client.get_object(Bucket=self.bucket, Key=full_key)
-            return response["Body"].read()
+            data = response["Body"].read()
         except ClientError as e:
             if self._is_not_found(e):
+                self.logger.debug("S3 GET miss bucket=%s key=%s", self.bucket, key)
                 return None
             self.logger.log_and_raise(FileError(f"Could not read {key}: {e}"))
+        self.logger.debug(
+            "S3 GET bucket=%s key=%s bytes=%s",
+            self.bucket,
+            key,
+            len(data),
+        )
+        return data
 
     def write_bytes(self, key: str, data: bytes, *, overwrite: bool = False) -> None:
         full_key = self._full_key(key)
@@ -113,10 +134,20 @@ class S3ObjectStorage(ObjectStorage):
                     full_key,
                     Config=self._transfer_config,
                 )
+                upload_mode = "multipart"
             else:
                 self._client.put_object(Bucket=self.bucket, Key=full_key, Body=data)
+                upload_mode = "put_object"
         except ClientError as e:
             self.logger.log_and_raise(FileError(f"Could not write {key}: {e}"))
+        self.logger.debug(
+            "S3 PUT bucket=%s key=%s bytes=%s mode=%s overwrite=%s",
+            self.bucket,
+            key,
+            len(data),
+            upload_mode,
+            overwrite,
+        )
 
     def write_text_atomic(
         self,
@@ -182,6 +213,13 @@ class S3ObjectStorage(ObjectStorage):
         except ClientError as e:
             self.logger.log_and_raise(FileError(f"Could not list keys under {prefix}: {e}"))
 
+        self.logger.debug(
+            "S3 LIST bucket=%s prefix=%s keys=%s recursive=%s",
+            self.bucket,
+            prefix or "(root)",
+            len(keys),
+            recursive,
+        )
         return sorted(keys)
 
     def move(self, source_key: str, dest_key: str, *, overwrite: bool = False) -> None:
@@ -207,6 +245,13 @@ class S3ObjectStorage(ObjectStorage):
             self._client.delete_object(Bucket=self.bucket, Key=source_full)
         except ClientError as e:
             self.logger.log_and_raise(FileError(f"Could not move {source_key} to {dest_key}: {e}"))
+        self.logger.debug(
+            "S3 MOVE bucket=%s source=%s dest=%s overwrite=%s",
+            self.bucket,
+            source_key,
+            dest_key,
+            overwrite,
+        )
 
     def delete(self, key: str, *, missing_ok: bool = True) -> None:
         full_key = self._full_key(key)
@@ -214,8 +259,10 @@ class S3ObjectStorage(ObjectStorage):
             self._client.delete_object(Bucket=self.bucket, Key=full_key)
         except ClientError as e:
             if missing_ok and self._is_not_found(e):
+                self.logger.debug("S3 DELETE miss bucket=%s key=%s", self.bucket, key)
                 return
             self.logger.log_and_raise(FileError(f"Could not delete {key}: {e}"))
+        self.logger.debug("S3 DELETE bucket=%s key=%s", self.bucket, key)
 
     def _raise_delete_objects_errors(
         self,
@@ -251,6 +298,7 @@ class S3ObjectStorage(ObjectStorage):
         if not keys:
             return
 
+        deleted_total = 0
         for start in range(0, len(keys), _DELETE_BATCH_SIZE):
             chunk = keys[start : start + _DELETE_BATCH_SIZE]
             full_keys = [self._full_key(key) for key in chunk]
@@ -270,6 +318,16 @@ class S3ObjectStorage(ObjectStorage):
                 full_keys=full_keys,
                 missing_ok=missing_ok,
             )
+            deleted_raw = response.get("Deleted")
+            deleted_count = len(deleted_raw) if isinstance(deleted_raw, list) else len(chunk)
+            deleted_total += deleted_count
+
+        self.logger.info(
+            "S3 DELETE batch bucket=%s requested=%s deleted=%s",
+            self.bucket,
+            len(keys),
+            deleted_total,
+        )
 
     def presigned_get_url(self, key: str, *, expires_in: int = 3600) -> str | None:
         full_key = self._full_key(key)
