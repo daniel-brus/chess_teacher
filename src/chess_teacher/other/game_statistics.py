@@ -10,6 +10,7 @@ import polars as pl
 from chess_teacher.other.dataclasses import TimeControlCategory
 from chess_teacher.pipelines.preprocessing.games import Game
 from chess_teacher.platform.account import Account
+from chess_teacher.utils.cache_utils import get_cache_client
 from chess_teacher.utils.chess_utils import Color, Result
 from chess_teacher.utils.db.client import DatabaseClient
 from chess_teacher.utils.general_utils import quote_ident, quote_literal
@@ -92,10 +93,19 @@ def _decode_html_text_columns(df: pl.DataFrame, columns: Sequence[str]) -> pl.Da
 def load_games_for_accounts(
     db_client: DatabaseClient,
     account_ids: Sequence[str],
+    *,
+    user_id: str | None = None,
 ) -> pl.DataFrame:
-    db_client.ensure_table(Game.get_metadata())
     if not account_ids:
         return pl.DataFrame()
+
+    cache = get_cache_client()
+    if cache is not None and user_id is not None:
+        cached_games = cache.get_user_games(user_id)
+        if cached_games is not None:
+            return cached_games
+
+    db_client.ensure_table(Game.get_metadata())
     games = db_client.read(
         Game.get_metadata(),
         columns=_GAME_COLUMNS,
@@ -103,7 +113,12 @@ def load_games_for_accounts(
         order_by="start_time DESC NULLS LAST",
         as_polars=True,
     )
-    return _decode_html_text_columns(games, ("opening_family",))
+    games = _decode_html_text_columns(games, ("opening_family",))
+
+    if cache is not None and user_id is not None:
+        cache.set_user_games(user_id, games)
+
+    return games
 
 
 @dataclass(frozen=True)
