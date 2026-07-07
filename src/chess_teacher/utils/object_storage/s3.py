@@ -225,7 +225,8 @@ class S3ObjectStorage(ObjectStorage):
         full_keys: list[str],
         missing_ok: bool,
     ) -> None:
-        errors = response.get("Errors") or []
+        errors_raw = response.get("Errors")
+        errors: list[object] = errors_raw if isinstance(errors_raw, list) else []
         if not errors:
             return
 

@@ -4,7 +4,7 @@ from contextlib import AbstractContextManager
 from enum import StrEnum
 
 import chess
-from stockfish import Stockfish
+from stockfish import Stockfish  # type: ignore[import-untyped]
 
 from chess_teacher.utils.env_utils import get_env_variable, get_stockfish_path
 from chess_teacher.utils.process_utils import WorkerSafeLogger

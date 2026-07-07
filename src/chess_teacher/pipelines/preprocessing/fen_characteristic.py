@@ -14,7 +14,7 @@ from collections.abc import Callable, Iterator
 from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
 from contextlib import contextmanager
 from multiprocessing import shared_memory
-from typing import TypeVar
+from typing import Any, TypeVar, cast
 
 import polars as pl
 
@@ -88,6 +88,9 @@ class _WorkerFenProgressTracker:
 
     def __init__(self, progress_shm_name: str, worker_index: int) -> None:
         self._shm = shared_memory.SharedMemory(name=progress_shm_name)
+        if self._shm.buf is None:
+            raise RuntimeError("Shared memory progress buffer is unavailable.")
+        self._buf: memoryview = self._shm.buf
         self._offset = worker_index * _PROGRESS_INT_BYTES
         self._last_written = 0
 
@@ -96,12 +99,12 @@ class _WorkerFenProgressTracker:
             return
         if completed - self._last_written < _PROGRESS_UPDATE_EVERY and completed != 0:
             return
-        struct.pack_into("i", self._shm.buf, self._offset, completed)
+        struct.pack_into("i", self._buf, self._offset, completed)
         self._last_written = completed
 
     def finalize(self, completed: int) -> None:
         if completed > self._last_written:
-            struct.pack_into("i", self._shm.buf, self._offset, completed)
+            struct.pack_into("i", self._buf, self._offset, completed)
             self._last_written = completed
 
     def close(self) -> None:
@@ -215,6 +218,11 @@ class FenCharacteristicTransformation(DataFrameTransformation, ABC):
         chunk_size = len(chunks[0]) if chunks else 0
         progress_shm = shared_memory.SharedMemory(create=True, size=n_chunks * _PROGRESS_INT_BYTES)
         progress_shm_name = progress_shm.name
+        if progress_shm.buf is None:
+            progress_shm.close()
+            progress_shm.unlink()
+            raise RuntimeError("Shared memory progress buffer is unavailable.")
+        progress_buf: memoryview = progress_shm.buf
 
         _logger.info(
             "%s: starting ProcessPoolExecutor with %d worker(s) for %d unique FEN(s) "
@@ -238,7 +246,7 @@ class FenCharacteristicTransformation(DataFrameTransformation, ABC):
                 last_heartbeat = time.monotonic()
                 while pending:
                     done, pending = wait(pending, timeout=2.0, return_when=FIRST_COMPLETED)
-                    completed_fens = _sum_shared_fen_progress(progress_shm.buf, n_chunks)
+                    completed_fens = _sum_shared_fen_progress(progress_buf, n_chunks)
                     for future in done:
                         scores.update(future.result())
                         completed_chunks += 1
@@ -493,7 +501,7 @@ def _evaluate_fen_chunk_worker(
     fens: list[str],
     progress_shm_name: str,
 ) -> dict[str, float]:
-    instance = transformation_cls(**init_kwargs)
+    instance = transformation_cls(**cast(Any, init_kwargs))
     scores: dict[str, float] = {}
     total_fens = len(fens)
     progress_tracker = _WorkerFenProgressTracker(progress_shm_name, worker_index)
@@ -515,7 +523,7 @@ def _evaluate_dual_sided_fen_chunk_worker(
     fens: list[str],
     progress_shm_name: str,
 ) -> dict[str, tuple[float, float]]:
-    instance = transformation_cls(**init_kwargs)
+    instance = transformation_cls(**cast(Any, init_kwargs))
     scores: dict[str, tuple[float, float]] = {}
     total_fens = len(fens)
     progress_tracker = _WorkerFenProgressTracker(progress_shm_name, worker_index)
