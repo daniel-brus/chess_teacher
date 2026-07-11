@@ -55,8 +55,8 @@ if (-not $dockerhub) {
 
 $image = "$dockerhub/chess_teacher:develop"
 function Render-K8sManifest {
-    param([string]$Content, [string]$Image, [string]$PullPolicy)
-    return $Content.Replace("IMAGE_PLACEHOLDER", $Image).Replace("IMAGE_PULL_POLICY_PLACEHOLDER", $PullPolicy)
+    param([string]$Content, [string]$Image, [string]$PullPolicy, [string]$Environment)
+    return $Content.Replace("IMAGE_PLACEHOLDER", $Image).Replace("IMAGE_PULL_POLICY_PLACEHOLDER", $PullPolicy).Replace("ENVIRONMENT_PLACEHOLDER", $Environment)
 }
 
 Write-Host "Using image: $image (pull: Always)" -ForegroundColor Cyan
@@ -64,7 +64,7 @@ Write-Host "Using image: $image (pull: Always)" -ForegroundColor Cyan
 Invoke-Kubectl @("apply", "-f", (Join-Path $k8sDir "namespace.yaml"))
 
 $configPath = Join-Path $k8sDir "configmap.yaml"
-$config = Render-K8sManifest (Get-Content $configPath -Raw) $image "Always"
+$config = Render-K8sManifest (Get-Content $configPath -Raw) $image "Always" "DEV"
 Invoke-Kubectl @("apply", "-f", "-") -InputObject $config
 
 Invoke-Kubectl @("apply", "-f", (Join-Path $k8sDir "rbac.yaml"))
@@ -80,7 +80,7 @@ Invoke-Kubectl @("apply", "-f", "-") -InputObject $secretYaml
 
 foreach ($cronFile in @("nightly-maintenance.yaml", "ingestion-dispatcher.yaml")) {
     $path = Join-Path $k8sDir "cronjob\$cronFile"
-    $manifest = Render-K8sManifest (Get-Content $path -Raw) $image "Always"
+    $manifest = Render-K8sManifest (Get-Content $path -Raw) $image "Always" "DEV"
     Invoke-Kubectl @("apply", "-f", "-") -InputObject $manifest
 }
 
@@ -98,7 +98,7 @@ if ($LASTEXITCODE -ne 0) {
 Invoke-Kubectl @("apply", "-f", "-") -InputObject $streamlitSecretYaml
 
 $streamlitPath = Join-Path $k8sDir "deployment\streamlit.yaml"
-$streamlitManifest = Render-K8sManifest (Get-Content $streamlitPath -Raw) $image "Always"
+$streamlitManifest = Render-K8sManifest (Get-Content $streamlitPath -Raw) $image "Always" "DEV"
 Invoke-Kubectl @("apply", "-f", "-") -InputObject $streamlitManifest
 
 Write-Host ""

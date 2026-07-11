@@ -1,8 +1,8 @@
-# Streamlit UI (dev image). Access locally via:
-#   kubectl port-forward -n chess-teacher svc/streamlit 8501:8501
+# Streamlit UI. Local dev: kubectl port-forward -n chess-teacher svc/streamlit 8501:8501
+# Production: https://chess-teacher.duckdns.org via Ingress below.
 #
-# Placeholders substituted by orchestration/k8s/apply.ps1:
-#   IMAGE_PLACEHOLDER, IMAGE_PULL_POLICY_PLACEHOLDER
+# Placeholders substituted by apply.ps1 (DEV) / apply.sh (PROD):
+#   IMAGE_PLACEHOLDER, IMAGE_PULL_POLICY_PLACEHOLDER, ENVIRONMENT_PLACEHOLDER
 apiVersion: apps/v1
 kind: Deployment
 metadata:
