@@ -57,20 +57,17 @@ def _children(prefix: str, keys: Iterable[str]) -> tuple[list[str], list[str]]:
 
 
 def _cmd_info(_: argparse.Namespace) -> dict[str, Any]:
-    backend = get_env_variable("STORAGE_BACKEND")
     root = get_env_variable("STORAGE_ROOT")
-    info: dict[str, Any] = {
-        "backend": backend,
+    return {
+        "backend": "s3",
         "storage_root": root,
+        "bucket": get_env_variable("S3_BUCKET"),
+        "endpoint_url": get_env_variable("S3_ENDPOINT_URL"),
         "note": (
             "Keys are POSIX-style paths relative to storage_root. "
             "Object storage has no real folders; prefixes group keys."
         ),
     }
-    if backend == "s3":
-        info["bucket"] = get_env_variable("S3_BUCKET")
-        info["endpoint_url"] = get_env_variable("S3_ENDPOINT_URL")
-    return info
 
 
 def _cmd_list(args: argparse.Namespace, storage: ObjectStorage) -> dict[str, Any]:

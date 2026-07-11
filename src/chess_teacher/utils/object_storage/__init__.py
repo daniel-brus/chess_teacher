@@ -1,4 +1,4 @@
-"""Object storage backends for raw data (local filesystem or S3-compatible buckets)."""
+"""Object storage for raw data (S3-compatible buckets; legacy local backend for tests)."""
 
 from chess_teacher.utils.object_storage.base import ObjectStorage
 from chess_teacher.utils.object_storage.factory import (

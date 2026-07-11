@@ -18,7 +18,10 @@ from chess_teacher.utils.object_storage.base import ObjectStorage
 
 
 class FilesystemObjectStorage(ObjectStorage):
-    """Object storage backed by a local directory tree."""
+    """Legacy local-directory object storage (tests only).
+
+    Production raw storage uses ``S3ObjectStorage`` via ``get_raw_storage()``.
+    """
 
     def __init__(self, root: Path, *, logger: EnhancedLogger | None = None) -> None:
         self.root = Path(root)

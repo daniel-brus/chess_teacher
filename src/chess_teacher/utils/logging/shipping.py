@@ -27,7 +27,7 @@ def is_log_ship_enabled() -> bool:
     """Return whether the in-process log shipper should run."""
     explicit = get_env_variable("LOG_SHIP_ENABLED", default="")
     if explicit == "":
-        return get_env_variable("STORAGE_BACKEND") == "s3"
+        return True
     return explicit.lower() in {"1", "true", "yes"}
 
 
