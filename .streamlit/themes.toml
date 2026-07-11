@@ -1,0 +1,66 @@
+# Built-in palettes when no named theme is selected ([generic.*]).
+# Named themes are grouped by Streamlit appearance (light menu vs dark menu).
+
+[generic.light]
+label = "Built-in"
+tile_light = "#FAFAFA"
+tile_dark = "#E8E8E8"
+divider = "rgba(49, 51, 63, 0.25)"
+
+[generic.dark]
+label = "Built-in"
+tile_light = "#1A1D24"
+tile_dark = "#262730"
+divider = "rgba(250, 250, 250, 0.2)"
+
+# Light mode styles
+
+[themes.light.vintage]
+label = "Vintage"
+tile_light = "#F3ECDC"
+tile_dark = "#C7D8C2"
+divider = "rgba(49, 51, 63, 0.25)"
+
+[themes.light.confetti]
+label = "Confetti"
+tile_light = "#EDF3C8"
+tile_dark = "#E0B4EB"
+divider = "rgba(58, 49, 43, 0.25)"
+
+[themes.light.coral]
+label = "Coral"
+tile_light = "#F8E6DC"
+tile_dark = "#FFB6B6"
+divider = "rgba(30, 50, 35, 0.25)"
+
+[themes.light.glacier]
+label = "Glacier"
+tile_light = "#E6FCFA"
+tile_dark = "#CCE0FA"
+divider = "rgba(30, 50, 35, 0.25)"
+
+# Dark mode styles
+
+[themes.dark.forest]
+label = "Forest"
+tile_light = "#132E00"
+tile_dark = "#18462C"
+divider = "rgba(248, 250, 252, 0.2)"
+
+[themes.dark.midnight]
+label = "Midnight"
+tile_light = "#0F172A"
+tile_dark = "#1E293B"
+divider = "rgba(248, 250, 252, 0.2)"
+
+[themes.dark.royal]
+label = "Royal"
+tile_light = "#3A135F"
+tile_dark = "#4D430F"
+divider = "rgba(248, 250, 252, 0.2)"
+
+[themes.dark.ember]
+label = "Ember"
+tile_light = "#4B0000"
+tile_dark = "#5A2A0A"
+divider = "rgba(248, 250, 252, 0.2)"

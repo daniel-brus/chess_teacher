@@ -206,7 +206,7 @@ jobs:
           cache-to: type=gha,mode=max,scope=${{ github.ref_name }}
 
   # ---------------------------------------------------------------------------
-  # Deploy (main only — placeholder)
+  # Deploy (main only — SCP manifests + SSH apply on Hetzner)
   # ---------------------------------------------------------------------------
   deploy:
     runs-on: ubuntu-latest
@@ -215,8 +215,52 @@ jobs:
     environment: production
 
     steps:
-      - name: Deploy placeholder
-        run: |
-          echo "Image pushed:"
-          echo "${{ vars.DOCKERHUB_USERNAME }}/chess_teacher:latest"
-          echo "Future production deployment goes here."
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Copy k8s manifests to VPS
+        uses: appleboy/scp-action@v1
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ vars.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          source: orchestration/k8s/
+          target: /opt/chess_teacher/
+          strip_components: 1
+          rm: true
+
+      - name: Deploy to Hetzner
+        uses: appleboy/ssh-action@v1
+        env:
+          POSTGRES_HOST: ${{ vars.POSTGRES_HOST }}
+          POSTGRES_PORT: ${{ vars.POSTGRES_PORT }}
+          POSTGRES_DB: ${{ vars.POSTGRES_DB }}
+          POSTGRES_SSLMODE: ${{ vars.POSTGRES_SSLMODE }}
+          STORAGE_ROOT: ${{ vars.STORAGE_ROOT }}
+          S3_BUCKET: ${{ vars.S3_BUCKET }}
+          S3_ENDPOINT_URL: ${{ vars.S3_ENDPOINT_URL }}
+          LOG_BUFFER_DIR: ${{ vars.LOG_BUFFER_DIR }}
+          LOG_SHIP_ENABLED: ${{ vars.LOG_SHIP_ENABLED }}
+          STOCKFISH_WORKERS: ${{ vars.STOCKFISH_WORKERS }}
+          STOCKFISH_THREADS_PER_ENGINE: ${{ vars.STOCKFISH_THREADS_PER_ENGINE }}
+          STOCKFISH_HASH_MB: ${{ vars.STOCKFISH_HASH_MB }}
+          CERT_MANAGER_ACME_EMAIL: ${{ vars.CERT_MANAGER_ACME_EMAIL }}
+          POSTGRES_USER: ${{ secrets.POSTGRES_USER }}
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+          S3_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
+          S3_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
+          REDIS_URL: ${{ secrets.REDIS_URL }}
+          STREAMLIT_REDIRECT_URI: ${{ secrets.STREAMLIT_REDIRECT_URI }}
+          STREAMLIT_COOKIE_SECRET: ${{ secrets.STREAMLIT_COOKIE_SECRET }}
+          STREAMLIT_GOOGLE_CLIENT_ID: ${{ secrets.STREAMLIT_GOOGLE_CLIENT_ID }}
+          STREAMLIT_GOOGLE_CLIENT_SECRET: ${{ secrets.STREAMLIT_GOOGLE_CLIENT_SECRET }}
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ vars.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          envs: POSTGRES_HOST,POSTGRES_PORT,POSTGRES_DB,POSTGRES_SSLMODE,STORAGE_ROOT,S3_BUCKET,S3_ENDPOINT_URL,LOG_BUFFER_DIR,LOG_SHIP_ENABLED,STOCKFISH_WORKERS,STOCKFISH_THREADS_PER_ENGINE,STOCKFISH_HASH_MB,CERT_MANAGER_ACME_EMAIL,POSTGRES_USER,POSTGRES_PASSWORD,S3_ACCESS_KEY_ID,S3_SECRET_ACCESS_KEY,REDIS_URL,STREAMLIT_REDIRECT_URI,STREAMLIT_COOKIE_SECRET,STREAMLIT_GOOGLE_CLIENT_ID,STREAMLIT_GOOGLE_CLIENT_SECRET
+          script: |
+            export IMAGE="${{ vars.DOCKERHUB_USERNAME }}/chess_teacher:latest"
+            export IMAGE_PULL_POLICY=IfNotPresent
+            export ENVIRONMENT=PROD
+            bash /opt/chess_teacher/k8s/apply.sh

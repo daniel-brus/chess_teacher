@@ -34,7 +34,7 @@ tables:
       - name: picture
         data_type: text
         nullable: true
-        comment: URL to profile picture
+        comment: OAuth profile URL or upload:object-key via profile picture store
 
       - name: given_name
         data_type: text
@@ -59,26 +59,36 @@ tables:
         comment: Tier of the user (Free/Premium)
 
       - name: latest_login
-        data_type: timestamp
+        data_type: timestamptz
         nullable: true
-        comment: Timestamp of most recent login (UTC)
+        comment: Timestamp of most recent login
 
       - name: latest_pipeline_run
-        data_type: timestamp
+        data_type: text
         nullable: true
-        comment: Timestamp of most recent pipeline run (UTC). Used to prevent multiple runs in 24hs.
+        comment: run_id of the most recent successful/partial pipeline run. Used for cooldown and status display.
 
       - name: cron_time
         data_type: time
         nullable: false
         default: "03:00:00"
-        comment: Time at which the daily cron job for a user is executed.
+        comment: Time at which the daily cron job for a user is executed (in the user's timezone).
 
       - name: timezone
         data_type: text
         nullable: false
         default: "Europe/Amsterdam"
-        comment: Timezone applicable to the cron_time.
+        comment: Timezone applicable to the cron_time (e.g. Europe/Amsterdam).
+
+      - name: default_light_theme_id
+        data_type: text
+        nullable: true
+        comment: Chessboard theme id from themes.toml [themes.light.*]; null uses built-in light palette.
+
+      - name: default_dark_theme_id
+        data_type: text
+        nullable: true
+        comment: Chessboard theme id from themes.toml [themes.dark.*]; null uses built-in dark palette.
 
   accounts:
     schema: platform
@@ -100,9 +110,9 @@ tables:
         nullable: false
         comment: Platform of the account (e.g. Chess.com, Lichess, etc.)
       - name: latest_ingestion
-        data_type: timestamp
+        data_type: timestamptz
         nullable: true
-        comment: Timestamp of most recent ingestion (UTC). Used to prevent multiple ingestions in 24hs.
+        comment: Timestamp of most recent ingestion. Used to prevent multiple ingestions in 24hs.
 
   br_users_accounts:
     schema: platform

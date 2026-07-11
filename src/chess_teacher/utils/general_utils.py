@@ -13,6 +13,12 @@ def get_current_datetime(tz: str = "UTC") -> datetime:
     return datetime.now(ZoneInfo(tz))
 
 
+def as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
 def generate_hash(input: str | list[str]) -> str:
     """Generate a sha256hash for the given input string."""
     if isinstance(input, list):
@@ -21,6 +27,18 @@ def generate_hash(input: str | list[str]) -> str:
         input_string = input
 
     return hashlib.sha256(input_string.encode()).hexdigest()
+
+
+def build_daily_key(base_key: str, file_name: str | None = None) -> str:
+    """
+    Example:
+        ingested/account/2026/05/08
+        ingested/account/2026/05/08/file_name.jsonl
+    """
+    daily = f"{base_key}/{datetime.now(UTC).strftime('%Y/%m/%d')}"
+    if file_name is None:
+        return daily
+    return f"{daily}/{file_name}"
 
 
 def build_daily_path(base_dir: Path, file_name: str | None = None) -> Path:
@@ -102,8 +120,14 @@ def quote_literal(value: object | None) -> str:
 
 
 def generate_ident_is_literal(ident: str, literal: object | None) -> str:
+    """``col IS NULL`` or ``col = 'value'`` — for WHERE clauses."""
     if literal is None:
         return quote_ident(ident) + " IS NULL"
+    return quote_ident(ident) + " = " + quote_literal(literal)
+
+
+def generate_ident_eq_literal(ident: str, literal: object | None) -> str:
+    """``col = NULL`` or ``col = 'value'`` — for UPDATE SET / INSERT assignments."""
     return quote_ident(ident) + " = " + quote_literal(literal)
 
 

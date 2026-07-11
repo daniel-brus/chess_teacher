@@ -11,3 +11,6 @@ python-dotenv
 sqlalchemy
 psycopg[binary]
 polars
+boto3
+kubernetes
+redis

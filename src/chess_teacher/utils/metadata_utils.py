@@ -1,16 +1,70 @@
 from __future__ import annotations
 
 import inspect
+import logging
 from dataclasses import dataclass, field
 from datetime import date, datetime, time
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
+
+import polars as pl
 
 from chess_teacher.utils.exception_utils import MetadataError
 from chess_teacher.utils.general_utils import load_yaml, quote_ident, quote_literal, require_ident
-from chess_teacher.utils.logging_utils import get_logger
+from chess_teacher.utils.logging import get_logger
 
 logger = get_logger()
+
+
+def _dataframe_columns_lower(df: pl.DataFrame) -> set[str]:
+    return {column.lower() for column in df.columns}
+
+
+def _resolve_dataframe_column(df: pl.DataFrame, column_name: str) -> str:
+    """Return the actual DataFrame column name (case-insensitive match)."""
+    for column in df.columns:
+        if column.lower() == column_name:
+            return column
+    raise KeyError(column_name)
+
+
+_POSTGRES_TO_POLARS: dict[str, pl.DataType] = cast(
+    dict[str, pl.DataType],
+    {
+        "text": pl.Utf8,
+        "varchar": pl.Utf8,
+        "character varying": pl.Utf8,
+        "char": pl.Utf8,
+        "character": pl.Utf8,
+        "integer": pl.Int64,
+        "int": pl.Int64,
+        "int4": pl.Int64,
+        "bigint": pl.Int64,
+        "int8": pl.Int64,
+        "boolean": pl.Boolean,
+        "bool": pl.Boolean,
+        "date": pl.Date,
+        "timestamp": pl.Datetime(),
+        "timestamp without time zone": pl.Datetime(),
+        "timestamptz": pl.Datetime(time_zone="UTC"),
+        "timestamp with time zone": pl.Datetime(time_zone="UTC"),
+        "time": pl.Time,
+        "double precision": pl.Float64,
+        "float8": pl.Float64,
+        "real": pl.Float32,
+        "float4": pl.Float32,
+    },
+)
+
+
+def postgres_type_to_polars(data_type: str) -> pl.DataType:
+    """Map a PostgreSQL column type string to a Polars dtype."""
+    base = data_type.strip().lower().split("(")[0].strip()
+    try:
+        return _POSTGRES_TO_POLARS[base]
+    except KeyError:
+        raise MetadataError(f"No Polars mapping for PostgreSQL data_type: {data_type!r}")
+
 
 # TODO: add other schema functionality (https://docs.sqlalchemy.org/en/21/core/metadata.html#sqlalchemy.schema.Column)
 # e.g. foreignkey, constraint (constraint: maybe a nice class to define? )
@@ -61,6 +115,10 @@ class ColumnMetadata:
             logger.log_and_raise(MetadataError(f"Error parsing column metadata from dict: {e}"))
         return col
 
+    def polars_dtype(self) -> pl.DataType:
+        """Polars dtype corresponding to this column's PostgreSQL data_type."""
+        return postgres_type_to_polars(self.data_type)
+
     def column_def_sql(self) -> str:
         parts: list[str] = [quote_ident(self.name), self.data_type]
         if not self.nullable:
@@ -91,6 +149,68 @@ class ColumnMetadata:
         return quote_literal(str(self.default))
 
 
+@dataclass(frozen=True)
+class IndexMetadata:
+    name: str
+    columns: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        name = require_ident(self.name.strip().lower(), what="index name")
+        object.__setattr__(self, "name", name)
+        if not self.columns:
+            logger.log_and_raise(MetadataError("Index must declare at least one column."))
+        normalized_columns = tuple(
+            require_ident(column.strip().lower(), what="index column").lower()
+            for column in self.columns
+        )
+        object.__setattr__(self, "columns", normalized_columns)
+
+    @staticmethod
+    def from_dict(raw: dict[str, Any]) -> IndexMetadata:
+        name = raw.get("name", "")
+        columns_raw = raw.get("columns") or []
+        if isinstance(columns_raw, str):
+            columns_list: list[str] = [columns_raw]
+        elif isinstance(columns_raw, list):
+            columns_list = [str(column) for column in columns_raw]
+        else:
+            columns_list = []
+        return IndexMetadata(name=str(name), columns=tuple(columns_list))
+
+
+def _parse_indexes_from_raw(
+    raw: dict[str, Any],
+    *,
+    column_names: set[str],
+    primary_key: tuple[str, ...],
+) -> tuple[IndexMetadata, ...]:
+    indexes_raw = raw.get("indexes") or []
+    if not indexes_raw:
+        return ()
+    if not isinstance(indexes_raw, list):
+        raise MetadataError("'indexes' must be a list when present")
+
+    parsed: list[IndexMetadata] = []
+    for entry in indexes_raw:
+        if not isinstance(entry, dict):
+            raise MetadataError("Each index entry must be a mapping/object")
+        index = IndexMetadata.from_dict(entry)
+        missing = [column for column in index.columns if column not in column_names]
+        if missing:
+            raise MetadataError(
+                f"Index {index.name!r} references columns not present in table: {missing}"
+            )
+        if tuple(index.columns) == primary_key:
+            logger.warning(
+                "Skipping index %r: columns %s match primary_key (Postgres already indexes PK).",
+                index.name,
+                list(index.columns),
+            )
+            continue
+        parsed.append(index)
+    return tuple(parsed)
+
+
 @dataclass(frozen=True, init=False)
 class TableMetadata:
     schema_name: str
@@ -98,6 +218,7 @@ class TableMetadata:
     columns: tuple[ColumnMetadata, ...]
     comment: str | None = None
     primary_key: tuple[str, ...] = field(default_factory=tuple)
+    indexes: tuple[IndexMetadata, ...] = field(default_factory=tuple)
 
     def __init__(
         self,
@@ -108,6 +229,7 @@ class TableMetadata:
         columns: tuple[ColumnMetadata, ...] | None = None,
         comment: str | None = None,
         primary_key: tuple[str, ...] | None = None,
+        indexes: tuple[IndexMetadata, ...] | None = None,
         yaml_path: str | Path | None = None,
     ):
         """Initialize TableMetadata.
@@ -129,6 +251,7 @@ class TableMetadata:
             object.__setattr__(self, "columns", loaded.columns)
             object.__setattr__(self, "comment", loaded.comment)
             object.__setattr__(self, "primary_key", loaded.primary_key)
+            object.__setattr__(self, "indexes", loaded.indexes)
         # Mode 2: Direct initialization
         else:
             if schema_name is None or table_name is None or columns is None:
@@ -142,6 +265,7 @@ class TableMetadata:
             object.__setattr__(self, "columns", columns)
             object.__setattr__(self, "comment", comment)
             object.__setattr__(self, "primary_key", primary_key or ())
+            object.__setattr__(self, "indexes", indexes or ())
 
     @staticmethod
     def _load_from_yaml_by_key(key: str, path: str | Path) -> TableMetadata:
@@ -229,6 +353,13 @@ class TableMetadata:
         else:
             columns = tuple(parsed_columns)
 
+        column_names = {column.name for column in columns}
+        indexes = _parse_indexes_from_raw(
+            raw,
+            column_names=column_names,
+            primary_key=primary_key,
+        )
+
         # Create without using __init__
         obj = object.__new__(TableMetadata)
         object.__setattr__(obj, "schema_name", schema_name)
@@ -236,6 +367,7 @@ class TableMetadata:
         object.__setattr__(obj, "columns", columns)
         object.__setattr__(obj, "comment", comment)
         object.__setattr__(obj, "primary_key", primary_key)
+        object.__setattr__(obj, "indexes", indexes)
         return obj
 
     def column_names(self) -> set[str]:
@@ -244,7 +376,67 @@ class TableMetadata:
     def columns_by_name(self) -> dict[str, ColumnMetadata]:
         return {column.name: column for column in self.columns}
 
+    def required_load_columns(self) -> tuple[str, ...]:
+        """
+        Columns that must be present in load data.
+
+        Required when NOT NULL and no database default — the DB cannot fill these in.
+        """
+        return tuple(
+            column.name for column in self.columns if not column.nullable and column.default is None
+        )
+
+    def validate_dataframe_for_load(
+        self,
+        df: pl.DataFrame,
+        *,
+        log: logging.Logger | None = None,
+    ) -> None:
+        """
+        Verify a Polars DataFrame can be loaded into this table.
+
+        - Required columns (NOT NULL, no default): must be present; error if missing.
+          When the frame has rows, required columns must not contain nulls.
+        - Other table columns: may be absent; warning if missing (DB fills NULL/default).
+        """
+        log = log or logger
+        table = self.qualified_name_sql()
+        df_columns = _dataframe_columns_lower(df)
+
+        required = self.required_load_columns()
+        required_set = set(required)
+        missing_required = [column for column in required if column not in df_columns]
+        if missing_required:
+            raise MetadataError(
+                f"DataFrame is missing required columns for {table}: {missing_required}. "
+                f"Required: {list(required)}. Present: {sorted(df_columns)}."
+            )
+
+        optional = tuple(column.name for column in self.columns if column.name not in required_set)
+        missing_optional = [column for column in optional if column not in df_columns]
+        if missing_optional:
+            log.warning(
+                "DataFrame is missing optional columns for %s (nullable and/or DB default): %s.",
+                table,
+                missing_optional,
+            )
+
+        if df.height == 0:
+            return
+
+        null_required = []
+        for column in required:
+            actual = _resolve_dataframe_column(df, column)
+            if df[actual].null_count() > 0:
+                null_required.append(column)
+
+        if null_required:
+            raise MetadataError(
+                f"DataFrame has null values in required columns for {table}: {null_required}."
+            )
+
     def qualified_name_sql(self) -> str:
+        """Return the full name of the table in the format "schema.table"."""
         return f"{quote_ident(self.schema_name)}.{quote_ident(self.table_name)}"
 
     def create_table_sql(self, *, if_not_exists: bool = True) -> str:
@@ -258,6 +450,14 @@ class TableMetadata:
 
         ine = "IF NOT EXISTS " if if_not_exists else ""
         return f"CREATE TABLE {ine}{self.qualified_name_sql()} (\n  {cols_sql}\n);"
+
+    def create_indexes_sql(self) -> list[str]:
+        qname = self.qualified_name_sql()
+        return [
+            f"CREATE INDEX IF NOT EXISTS {quote_ident(index.name)} ON {qname} "
+            f"({', '.join(quote_ident(column) for column in index.columns)});"
+            for index in self.indexes
+        ]
 
     def create_schema_sql(self, *, if_not_exists: bool = True) -> str:
         ine = "IF NOT EXISTS " if if_not_exists else ""

@@ -4,10 +4,10 @@ from dataclasses import dataclass, field
 from threading import Event, Lock, Thread
 from typing import Any
 
-from chess_teacher.pipelines.pipeline_base import Pipeline, PipelineStep
-from chess_teacher.utils.db_client import WriteResult, WriteStrategy
+from chess_teacher.utils.db.client import WriteResult, WriteStrategy
 from chess_teacher.utils.exception_utils import PipelineError
 from chess_teacher.utils.metadata_utils import TableMetadata
+from chess_teacher.utils.pipeline_utils.pipeline_base import Pipeline, PipelineContext, PipelineStep
 
 
 class FakeEngine:
@@ -22,6 +22,9 @@ class FakeDatabaseClient:
     engine: FakeEngine = field(default_factory=FakeEngine)
 
     def ensure_table(self, table: TableMetadata) -> None:
+        return None
+
+    def ensure_metadata(self, table: TableMetadata) -> None:
         return None
 
     def read(
@@ -98,7 +101,7 @@ class BlockingStep(PipelineStep):
         self.started = started
         self.release = release
 
-    def run(self, db_client: FakeDatabaseClient) -> None:
+    def run(self, db_client: FakeDatabaseClient, context: PipelineContext) -> None:
         self.started.set()
         self.release.wait(timeout=5)
 

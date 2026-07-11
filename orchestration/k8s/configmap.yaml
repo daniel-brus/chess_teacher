@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: chess-teacher-config
+  namespace: chess-teacher
+data:
+  ENVIRONMENT: ENVIRONMENT_PLACEHOLDER
+  K8S_NAMESPACE: chess-teacher
+  # Replaced by apply.ps1 / apply.sh
+  PIPELINE_JOB_IMAGE: IMAGE_PLACEHOLDER
+  IMAGE_PULL_POLICY: IMAGE_PULL_POLICY_PLACEHOLDER

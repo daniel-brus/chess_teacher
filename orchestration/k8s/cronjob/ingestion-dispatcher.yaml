@@ -1,0 +1,53 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: ingestion-dispatcher
+  namespace: chess-teacher
+spec:
+  # Every 30 minutes; pairs with per-user cron_time in the database.
+  schedule: "*/30 * * * *"
+  timeZone: Europe/Amsterdam
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      ttlSecondsAfterFinished: 86400
+      template:
+        spec:
+          restartPolicy: Never
+          serviceAccountName: chess-teacher-dispatcher
+          containers:
+            - name: dispatcher
+              image: IMAGE_PLACEHOLDER
+              imagePullPolicy: IMAGE_PULL_POLICY_PLACEHOLDER
+              command: ["python", "scripts/dispatcher.py"]
+              envFrom:
+                - secretRef:
+                    name: chess-teacher-env
+              env:
+                - name: ENVIRONMENT
+                  valueFrom:
+                    configMapKeyRef:
+                      name: chess-teacher-config
+                      key: ENVIRONMENT
+                - name: K8S_NAMESPACE
+                  valueFrom:
+                    configMapKeyRef:
+                      name: chess-teacher-config
+                      key: K8S_NAMESPACE
+                - name: PIPELINE_JOB_IMAGE
+                  valueFrom:
+                    configMapKeyRef:
+                      name: chess-teacher-config
+                      key: PIPELINE_JOB_IMAGE
+                - name: IMAGE_PULL_POLICY
+                  valueFrom:
+                    configMapKeyRef:
+                      name: chess-teacher-config
+                      key: IMAGE_PULL_POLICY
+                - name: HOSTNAME
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.name
