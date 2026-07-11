@@ -4,7 +4,7 @@ description: >-
   Read-only raw object storage inspection for chess_teacher using ObjectStorage
   and get_raw_storage(). Lists keys by prefix, checks object/prefix existence,
   counts files, and shows immediate "folder" children. Works with S3 and local
-  filesystem backends from .env. Use when the user asks what files or folders
+  S3-compatible backend from .env. Use when the user asks what files or folders
   exist under a path, whether a key exists, storage layout, ingested/processed
   prefixes, or S3/object storage contents in this project.
 ---
@@ -51,7 +51,7 @@ On Windows (PowerShell), same commands with `.venv\Scripts\python.exe` if the ve
 
 | Command | Purpose |
 |---------|---------|
-| `info` | Backend (`filesystem` / `s3`), `storage_root`, bucket/endpoint when S3 |
+| `info` | Backend (`s3`), `storage_root`, bucket, endpoint |
 | `list [prefix]` | List object keys (`--no-recursive`, `--suffix`, `--glob`, `--limit`) |
 | `children [prefix]` | Immediate sub-prefixes + direct files under prefix |
 | `exists <key>` | Single object exists? (`read_bytes` is not None) |
@@ -108,7 +108,7 @@ exists = storage.read_bytes("path/to/key.jsonl") is not None
 | Issue | Action |
 |-------|--------|
 | `ModuleNotFoundError: chess_teacher` | Activate `.venv`; `pip install -r requirements-dev.txt` |
-| S3 / connection errors | Check `.env` `STORAGE_BACKEND`, `S3_*`, `STORAGE_ROOT`; try `health` |
+| S3 / connection errors | Check `.env` `S3_*`, `STORAGE_ROOT`; try `health` |
 | Empty `list` / `any: false` | Prefix may be wrong (no leading slash); try `children` at parent prefix |
 | `health` modifies storage | Creates/deletes `_healthcheck/<uuid>.txt` only; mention if user did not ask |
 

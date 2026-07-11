@@ -47,7 +47,13 @@ class ProfilePictureService:
     """App-managed profile images stored in raw object storage under ``assets/profile_pictures/``."""
 
     def __init__(self, storage: ObjectStorage | None = None) -> None:
-        self._storage = storage if storage is not None else get_raw_storage()
+        self.__storage = storage
+
+    @property
+    def _storage(self) -> ObjectStorage:
+        if self.__storage is None:
+            self.__storage = get_raw_storage()
+        return self.__storage
 
     def _object_key(self, filename: str) -> str:
         return ObjectStorage.resolve_key(_UPLOAD_STORAGE_PREFIX, filename)

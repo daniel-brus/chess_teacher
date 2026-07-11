@@ -619,6 +619,13 @@ class StockfishEngine(AbstractContextManager["StockfishEngine"]):
         self._engine: Stockfish | None = None
 
     def __enter__(self) -> StockfishEngine:
+        _logger.info(
+            "Starting Stockfish engine path=%s depth=%s threads=%s hash_mb=%s",
+            self.path,
+            self.depth,
+            self._uci_parameters["Threads"],
+            self._uci_parameters["Hash"],
+        )
         self._engine = Stockfish(
             path=self.path,
             depth=self.depth,
@@ -628,10 +635,15 @@ class StockfishEngine(AbstractContextManager["StockfishEngine"]):
 
     def __exit__(self, *args: object) -> None:
         if self._engine is not None:
+            _logger.info("Stopping Stockfish engine path=%s", self.path)
             try:
                 self._engine.send_quit_command()
             except OSError:
-                pass
+                _logger.warning(
+                    "Stockfish quit command failed path=%s",
+                    self.path,
+                    exc_info=True,
+                )
             self._engine = None
 
     def evaluate_white_pov_pawns(self, fen: str) -> float | None:
@@ -649,7 +661,14 @@ class StockfishEngine(AbstractContextManager["StockfishEngine"]):
             _logger.warning("Stockfish rejected FEN: %s", fen)
             return None
         engine.set_fen_position(fen)
-        return evaluation_to_white_pov_pawns(engine.get_evaluation(), fen)
+        score = evaluation_to_white_pov_pawns(engine.get_evaluation(), fen)
+        _logger.debug(
+            "Stockfish evaluation depth=%s score=%s fen=%s",
+            self.depth,
+            score,
+            fen,
+        )
+        return score
 
     def _require_engine(self) -> Stockfish:
         if self._engine is None:

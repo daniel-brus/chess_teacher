@@ -10,7 +10,7 @@ from uuid import uuid4
 import polars as pl
 from sqlalchemy import text
 
-from chess_teacher.utils.db.engine import EnrichedEngine, get_db_engine
+from chess_teacher.utils.db.engine import EnrichedEngine, get_db_engine, reset_db_engine_for_tests
 from chess_teacher.utils.exception_utils import DatabaseError, MetadataError
 from chess_teacher.utils.general_utils import (
     generate_ident_eq_literal,
@@ -1486,6 +1486,24 @@ class DatabaseClient:
         return matched_count, deleted_count
 
 
+_db_client: DatabaseClient | None = None
+
+
 def get_db_client(engine: EnrichedEngine | None = None) -> DatabaseClient:
-    """Factory function to create a DatabaseClient with optional custom engine."""
-    return DatabaseClient(engine=engine)
+    """Return a shared database client for the process, or a fresh one for a custom engine."""
+    if engine is not None:
+        return DatabaseClient(engine=engine)
+
+    global _db_client
+    if _db_client is not None:
+        return _db_client
+
+    _db_client = DatabaseClient(engine=get_db_engine())
+    return _db_client
+
+
+def reset_db_client_for_tests() -> None:
+    """Clear the module-level client singleton and engine (tests only)."""
+    global _db_client
+    _db_client = None
+    reset_db_engine_for_tests()

@@ -6,6 +6,7 @@ import sys
 from chess_teacher.pipelines.modes import PIPELINE_MODES, PipelineMode
 from chess_teacher.pipelines.runner import run_pipeline
 from chess_teacher.platform.user import User
+from chess_teacher.utils.cache_utils import invalidate_user_games_and_accounts_cache
 from chess_teacher.utils.db.client import get_db_client
 from chess_teacher.utils.logging import get_logger
 from chess_teacher.utils.pipeline_utils.json_lines_progress import JsonLinesProgressWindow
@@ -46,6 +47,8 @@ def main() -> int:
     aggregated = aggregate_pipeline_run_results(results)
     if aggregated.latest_successful_run_id is not None:
         user.update_latest_pipeline_run(db_client, aggregated.latest_successful_run_id)
+
+    invalidate_user_games_and_accounts_cache(user.user_id)
 
     account_count = len({result.account_id for result in results if result.account_id is not None})
     logger.info(

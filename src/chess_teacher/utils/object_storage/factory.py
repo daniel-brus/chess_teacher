@@ -3,9 +3,10 @@ from __future__ import annotations
 from pathlib import Path
 
 from chess_teacher.utils.env_utils import get_env_variable
-from chess_teacher.utils.exception_utils import ConfigError
+from chess_teacher.utils.logging import get_logger
 from chess_teacher.utils.object_storage.base import ObjectStorage
-from chess_teacher.utils.object_storage.filesystem import FilesystemObjectStorage
+
+logger = get_logger()
 
 _raw_storage: ObjectStorage | None = None
 
@@ -37,19 +38,21 @@ def get_log_storage_key(relative_under_buffer: str) -> str:
 
 
 def _create_raw_storage() -> ObjectStorage:
-    backend = get_env_variable("STORAGE_BACKEND")
-    match backend:
-        case "filesystem":
-            return FilesystemObjectStorage(Path(get_env_variable("STORAGE_ROOT")))
-        case "s3":
-            from chess_teacher.utils.object_storage.s3 import S3ObjectStorage
+    from chess_teacher.utils.object_storage.s3 import S3ObjectStorage
 
-            return S3ObjectStorage(
-                bucket=get_env_variable("S3_BUCKET"),
-                key_prefix=get_env_variable("STORAGE_ROOT"),
-                endpoint_url=get_env_variable("S3_ENDPOINT_URL"),
-                access_key=get_env_variable("S3_ACCESS_KEY_ID"),
-                secret_key=get_env_variable("S3_SECRET_ACCESS_KEY"),
-            )
-        case _:
-            raise ConfigError(f"Unsupported STORAGE_BACKEND: {backend!r}")
+    bucket = get_env_variable("S3_BUCKET")
+    key_prefix = get_env_variable("STORAGE_ROOT")
+    endpoint_url = get_env_variable("S3_ENDPOINT_URL")
+    logger.info(
+        "Object storage backend=s3 bucket=%s endpoint=%s key_prefix=%s",
+        bucket,
+        endpoint_url,
+        key_prefix,
+    )
+    return S3ObjectStorage(
+        bucket=bucket,
+        key_prefix=key_prefix,
+        endpoint_url=endpoint_url,
+        access_key=get_env_variable("S3_ACCESS_KEY_ID"),
+        secret_key=get_env_variable("S3_SECRET_ACCESS_KEY"),
+    )

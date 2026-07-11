@@ -10,6 +10,10 @@ from zoneinfo import ZoneInfo
 from chess_teacher.platform.account import Account, AppLogoVariant
 from chess_teacher.platform.profile_picture import clear_upload_image_cache, profile_pictures
 from chess_teacher.platform.user_account import UserAccount
+from chess_teacher.utils.cache_utils import (
+    get_cache_client,
+    invalidate_user_games_and_accounts_cache,
+)
 from chess_teacher.utils.db.client import DatabaseClient
 from chess_teacher.utils.exception_utils import DatabaseError
 from chess_teacher.utils.general_utils import (
@@ -244,6 +248,25 @@ class User(TableDataClass):
 
     def get_linked_accounts(self, db_client: DatabaseClient) -> list[Account]:
         """Fetch platform accounts linked to this user via the bridge table."""
+        cache = get_cache_client()
+        if cache is not None:
+            cached_accounts = cache.get_user_accounts(self.user_id)
+            if cached_accounts is not None:
+                return cached_accounts
+
+        accounts = self._load_linked_accounts_from_db(db_client)
+        logger.info(
+            "Loaded linked accounts from database user_id=%s count=%s",
+            self.user_id,
+            len(accounts),
+        )
+
+        if cache is not None:
+            cache.set_user_accounts(self.user_id, accounts)
+
+        return accounts
+
+    def _load_linked_accounts_from_db(self, db_client: DatabaseClient) -> list[Account]:
         db_client.ensure_table(Account.get_metadata())
 
         br_metadata = UserAccount.get_metadata()
@@ -278,6 +301,7 @@ class User(TableDataClass):
         )
         for user_account in user_accounts:
             UserAccount.from_dict(user_account).delete_from_db(db_client)
+        invalidate_user_games_and_accounts_cache(self.user_id)
 
     def link_account(self, db_client: DatabaseClient, account: Account) -> bool:
         """Persist the account and link it to this user. Returns False if already linked."""
@@ -286,7 +310,10 @@ class User(TableDataClass):
             user_id=self.user_id,
             account_id=account.account_id,
         )
-        return user_account.save_new_to_db(db_client)
+        linked = user_account.save_new_to_db(db_client)
+        if linked:
+            invalidate_user_games_and_accounts_cache(self.user_id)
+        return linked
 
     def unlink_account(self, db_client: DatabaseClient, account: Account) -> bool:
         """Delete the bridge row for this user and account. The account row is kept."""
@@ -299,4 +326,5 @@ class User(TableDataClass):
                 DatabaseError(f"Account {account.account_id} not linked to user {self.user_id}")
             )
         user_account.delete_from_db(db_client)
+        invalidate_user_games_and_accounts_cache(self.user_id)
         return True

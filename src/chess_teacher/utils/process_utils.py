@@ -42,6 +42,9 @@ class _WorkerNoOpLogger:
     def info(self, *args: object, **kwargs: object) -> None:
         del args, kwargs
 
+    def debug(self, *args: object, **kwargs: object) -> None:
+        del args, kwargs
+
     def warning(self, *args: object, **kwargs: object) -> None:
         del args, kwargs
 

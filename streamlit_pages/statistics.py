@@ -77,7 +77,7 @@ if not accounts:
 accounts_by_id = {account.account_id: account for account in accounts}
 all_account_ids = [account.account_id for account in accounts]
 
-games = load_games_for_accounts(db_client, all_account_ids)
+games = load_games_for_accounts(db_client, all_account_ids, user_id=user.user_id)
 
 if games.is_empty():
     logger.info(

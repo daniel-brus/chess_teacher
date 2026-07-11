@@ -1,0 +1,29 @@
+# Production Ingress — applied by apply.sh only (requires cert-manager on cluster).
+# Local dev uses: kubectl port-forward -n chess-teacher svc/streamlit 8501:8501
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: streamlit
+  namespace: chess-teacher
+  labels:
+    app: chess-teacher
+    chess-teacher.io/component: streamlit
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts:
+        - chess-teacher.duckdns.org
+      secretName: streamlit-tls
+  rules:
+    - host: chess-teacher.duckdns.org
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: streamlit
+                port:
+                  name: http
