@@ -83,6 +83,9 @@ class EnrichedEngine(Engine):
             )
 
 
+_db_engine: EnrichedEngine | None = None
+
+
 def get_db_engine(
     *,
     host: str = "",
@@ -93,9 +96,54 @@ def get_db_engine(
     sslmode: str = "",
     echo: bool = False,
 ) -> EnrichedEngine:
-    """
-    Create PostgreSQL SQLAlchemy engine.
-    """
+    """Return a shared PostgreSQL engine for the process, or a fresh one when overridden."""
+    if host or port or database or username or password or sslmode or echo:
+        return _create_db_engine(
+            host=host,
+            port=port,
+            database=database,
+            username=username,
+            password=password,
+            sslmode=sslmode,
+            echo=echo,
+        )
+
+    global _db_engine
+    if _db_engine is not None:
+        logger.debug("Reusing Postgres engine singleton.")
+        return _db_engine
+
+    _db_engine = _create_db_engine(
+        host=host,
+        port=port,
+        database=database,
+        username=username,
+        password=password,
+        sslmode=sslmode,
+        echo=echo,
+    )
+    return _db_engine
+
+
+def reset_db_engine_for_tests() -> None:
+    """Dispose the module-level engine singleton (tests only)."""
+    global _db_engine
+    if _db_engine is not None:
+        _db_engine.dispose()
+    _db_engine = None
+
+
+def _create_db_engine(
+    *,
+    host: str = "",
+    port: str = "",
+    database: str = "",
+    username: str = "",
+    password: str = "",
+    sslmode: str = "",
+    echo: bool = False,
+) -> EnrichedEngine:
+    """Create a new PostgreSQL SQLAlchemy engine."""
 
     try:
         host = host or get_env_variable("POSTGRES_HOST")
