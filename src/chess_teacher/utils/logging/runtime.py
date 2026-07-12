@@ -67,9 +67,11 @@ def attach_handlers(
         file_handler.setFormatter(file_formatter)
         root.addHandler(file_handler)
 
-        register_segment_handler(file_handler)
-        start_log_shipping(buffer_dir)
-        register_shutdown_hooks()
+        if file_handler.owns_active_log:
+            register_segment_handler(file_handler)
+            register_shutdown_hooks()
+        if file_handler.is_primary_writer:
+            start_log_shipping(buffer_dir)
 
 
 def start_log_shipping(buffer_dir: Path) -> LogShipper | None:
