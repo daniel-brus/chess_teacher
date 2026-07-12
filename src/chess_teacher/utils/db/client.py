@@ -132,6 +132,40 @@ def _to_records(data: list[dict] | pl.DataFrame) -> list[dict]:
     raise TypeError(f"Expected list[dict] or pl.DataFrame, got {type(data)}")
 
 
+def _polars_schema_for_table(
+    table: TableMetadata,
+    *,
+    columns: list[str] | None = None,
+    row_keys: set[str] | None = None,
+) -> pl.Schema:
+    """Build a Polars schema from table metadata for DB reads."""
+    columns_by_name = table.columns_by_name()
+    selected = columns if columns is not None else [column.name for column in table.columns]
+    if row_keys is not None:
+        selected = [name for name in selected if name in row_keys]
+    return pl.Schema({
+        name: columns_by_name[name].polars_dtype() for name in selected if name in columns_by_name
+    })
+
+
+def _rows_to_polars_dataframe(
+    rows: list[dict[str, Any]],
+    table: TableMetadata,
+    *,
+    columns: list[str] | None = None,
+) -> pl.DataFrame:
+    """
+    Convert DB rows to a Polars DataFrame with metadata-driven dtypes.
+
+    Avoids Polars schema inference failures, e.g. for nullable columns.
+    """
+    row_keys = set(rows[0].keys()) if rows else None
+    schema = _polars_schema_for_table(table, columns=columns, row_keys=row_keys)
+    if not rows:
+        return pl.DataFrame(schema=schema)
+    return pl.DataFrame(rows, schema=schema)
+
+
 def _require_where(where: str | None, operation: str) -> str:
     """Guard against accidental full-table mutations."""
     if not where or not where.strip():
@@ -1340,7 +1374,7 @@ class DatabaseClient:
         self.logger.debug("read → %s: %d rows returned", table.qualified_name_sql(), len(rows))
 
         if as_polars:
-            return pl.DataFrame(rows)
+            return _rows_to_polars_dataframe(rows, table, columns=columns)
         return rows
 
     # ------------------------------------------------------------------

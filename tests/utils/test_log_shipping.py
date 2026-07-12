@@ -46,9 +46,11 @@ def raw_storage():
 def test_log_buffer_writer_lock_same_process_second_handler_is_follower(buffer_dir: Path) -> None:
     first = SegmentFileHandler(buffer_dir, interval_seconds=3600, instance_id="host")
     assert first.owns_active_log
+    assert first.is_primary_writer
 
     second = SegmentFileHandler(buffer_dir, interval_seconds=3600, instance_id="host")
     assert not second.owns_active_log
+    assert not second.is_primary_writer
 
     first.close()
     third = SegmentFileHandler(buffer_dir, interval_seconds=3600, instance_id="host")
@@ -57,7 +59,26 @@ def test_log_buffer_writer_lock_same_process_second_handler_is_follower(buffer_d
     second.close()
 
 
-def test_log_buffer_writer_lock_blocks_other_process(
+def test_log_buffer_writer_lock_falls_back_to_auxiliary_for_other_process(
+    buffer_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lock_path = buffer_dir / "active" / ".writer.lock"
+    lock_path.parent.mkdir(parents=True)
+    lock_path.write_text("424242", encoding="utf-8")
+    monkeypatch.setattr(
+        "chess_teacher.utils.logging.buffer._pid_is_alive",
+        lambda pid: pid == 424242,
+    )
+
+    handler = SegmentFileHandler(buffer_dir, interval_seconds=3600, instance_id="host")
+    assert not handler.is_primary_writer
+    assert handler.owns_active_log
+    assert handler.active_path.name == f"worker-{os.getpid()}.log"
+    handler.close()
+
+
+def test_log_buffer_writer_lock_blocks_other_process_in_primary_mode(
     buffer_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -70,7 +91,12 @@ def test_log_buffer_writer_lock_blocks_other_process(
     )
 
     with pytest.raises(ConfigError, match="already owned"):
-        SegmentFileHandler(buffer_dir, interval_seconds=3600, instance_id="host")
+        SegmentFileHandler(
+            buffer_dir,
+            interval_seconds=3600,
+            instance_id="host",
+            writer_mode="primary",
+        )
 
 
 def test_log_buffer_writer_lock_reclaims_stale_pid(
