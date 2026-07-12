@@ -18,8 +18,8 @@ docker_check:
 	@echo Checking Docker Desktop...
 	cmd /c "docker --context $(DOCKER_CONTEXT) info >nul 2>&1 || (echo. & echo ERROR: Cannot reach Docker Desktop. & echo Start Docker Desktop, wait until it is ready, then retry. & echo. & exit /b 1)"
 
-streamlit_docker:
-	$(COMPOSE) up -d
+streamlit_docker: docker_check
+	$(COMPOSE) up -d --build
 
 # Optional K8s setup. Requires Docker Desktop, k3d, and kubectl on PATH.
 k8s_check:

@@ -1,3 +1,4 @@
+import polars as pl
 import pytest
 
 from chess_teacher.platform.user import User
@@ -9,6 +10,7 @@ from chess_teacher.utils.db.client import (
     _pg_data_types_equivalent,
     _require_pg_data_type,
     _require_using_expression,
+    _rows_to_polars_dataframe,
 )
 from chess_teacher.utils.metadata_utils import ColumnMetadata, TableMetadata
 
@@ -158,3 +160,28 @@ def test_parse_indexes_skips_primary_key_duplicate() -> None:
         ],
     })
     assert table.indexes == ()
+
+
+def test_rows_to_polars_dataframe_uses_metadata_for_nullable_text() -> None:
+    table = TableMetadata._from_dict_raw({
+        "schema": "games",
+        "table": "moves",
+        "primary_key": ["move_id"],
+        "columns": [
+            {"name": "move_id", "data_type": "text", "nullable": False},
+            {
+                "name": "previous_opponent_move_san",
+                "data_type": "text",
+                "nullable": True,
+            },
+        ],
+    })
+    rows = [{"move_id": f"id-{index}", "previous_opponent_move_san": None} for index in range(120)]
+    rows.append({"move_id": "id-120", "previous_opponent_move_san": "e4"})
+
+    with pytest.raises(pl.exceptions.ComputeError, match='could not append value: "e4"'):
+        pl.DataFrame(rows)
+
+    df = _rows_to_polars_dataframe(rows, table)
+    assert df.schema["previous_opponent_move_san"] == pl.String
+    assert df["previous_opponent_move_san"].item(-1) == "e4"

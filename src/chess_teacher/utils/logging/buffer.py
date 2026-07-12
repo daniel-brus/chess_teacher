@@ -40,11 +40,17 @@ def _pid_is_alive(pid: int) -> bool:
 
 
 class LogBufferWriterLock:
-    """Exclusive claim on the shared active log file for one buffer directory."""
+    """Exclusive claim on one active log file within a buffer directory."""
 
-    def __init__(self, buffer_dir: Path, *, pid: int | None = None) -> None:
+    def __init__(
+        self,
+        buffer_dir: Path,
+        *,
+        lock_name: str = _ACTIVE_WRITER_LOCK,
+        pid: int | None = None,
+    ) -> None:
         self.buffer_dir = Path(buffer_dir)
-        self.lock_path = self.buffer_dir / "active" / _ACTIVE_WRITER_LOCK
+        self.lock_path = self.buffer_dir / "active" / lock_name
         self.pid = pid if pid is not None else os.getpid()
         self.acquired = False
 
@@ -117,6 +123,7 @@ class SegmentFileHandler(logging.Handler):
         max_bytes: int | None = None,
         interval_seconds: int | None = None,
         encoding: str = "utf-8",
+        writer_mode: str = "auto",
     ) -> None:
         super().__init__()
         self.buffer_dir = Path(buffer_dir)
@@ -129,19 +136,63 @@ class SegmentFileHandler(logging.Handler):
         self._lock = threading.Lock()
         self._stream: TextIO | None = None
         self._opened_at = time.monotonic()
+        self.is_primary_writer = False
+        self.owns_active_log = False
+        self._segment_name_prefix = "app"
+        self._writer_lock: LogBufferWriterLock
+
+        if writer_mode == "auxiliary":
+            self._init_auxiliary_writer()
+        elif writer_mode == "primary":
+            self._init_primary_writer(strict=True)
+        elif writer_mode == "auto":
+            if not self._init_primary_writer(strict=False):
+                holder = self._writer_lock.holder_pid()
+                if holder is not None and holder != os.getpid() and _pid_is_alive(holder):
+                    self._init_auxiliary_writer()
+        else:
+            raise ConfigError(f"Unsupported log buffer writer_mode: {writer_mode}")
+
+    def _init_primary_writer(self, *, strict: bool) -> bool:
+        """Return True when this handler owns the primary active log file."""
         self.active_path = self.buffer_dir / "active" / "app.log"
         self._writer_lock = LogBufferWriterLock(self.buffer_dir)
         self.owns_active_log = self._writer_lock.acquire()
-        if not self.owns_active_log:
-            holder = self._writer_lock.holder_pid()
-            if holder is not None and holder != os.getpid():
+        self.is_primary_writer = self.owns_active_log
+        self._segment_name_prefix = "app"
+
+        if self.owns_active_log:
+            self.active_path.parent.mkdir(parents=True, exist_ok=True)
+            self._open_active_stream()
+            return True
+
+        holder = self._writer_lock.holder_pid()
+        if holder is not None and holder != os.getpid():
+            if strict:
                 raise ConfigError(
                     f"Shared log buffer {self.active_path} is already owned by PID {holder}; "
                     f"this process (PID {os.getpid()}) cannot start. "
                     f"Stop the other process using LOG_BUFFER_DIR={self.buffer_dir}."
                 )
-            return
+            return False
+        return False
 
+    def _init_auxiliary_writer(self) -> None:
+        """Use a per-process active log when the primary buffer is already owned."""
+        pid = os.getpid()
+        self.active_path = self.buffer_dir / "active" / f"worker-{pid}.log"
+        self._writer_lock = LogBufferWriterLock(
+            self.buffer_dir,
+            lock_name=f".writer.{pid}.lock",
+        )
+        self.owns_active_log = self._writer_lock.acquire()
+        self.is_primary_writer = False
+        self._segment_name_prefix = f"worker-{pid}"
+        if not self.owns_active_log:
+            raise ConfigError(
+                f"Could not acquire auxiliary log buffer for PID {pid} "
+                f"under LOG_BUFFER_DIR={self.buffer_dir}."
+            )
         self.active_path.parent.mkdir(parents=True, exist_ok=True)
         self._open_active_stream()
 
@@ -181,7 +232,7 @@ class SegmentFileHandler(logging.Handler):
             / "closed"
             / date_path
             / self.instance_id
-            / f"app-{timestamp}.log{READY_SUFFIX}"
+            / f"{self._segment_name_prefix}-{timestamp}.log{READY_SUFFIX}"
         )
 
     def _rotate_locked(self) -> None:

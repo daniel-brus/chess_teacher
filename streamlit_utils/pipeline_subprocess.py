@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
-import threading
 from pathlib import Path
 from typing import IO
 
@@ -55,21 +54,17 @@ def run_pipeline_subprocess(
         progress.error("Pipeline subprocess stdout pipe was not available.")
         return 1
 
-    reader = threading.Thread(
-        target=_drain_progress_stdout,
-        args=(process.stdout, progress),
-        daemon=True,
-    )
-    reader.start()
+    # Read progress on the main thread: Streamlit widgets require ScriptRunContext.
+    stdout = process.stdout
     try:
+        _drain_progress_stdout(stdout, progress)
         exit_code = process.wait()
     except Exception:
         process.kill()
         process.wait()
         raise
     finally:
-        process.stdout.close()
-        reader.join()
+        stdout.close()
 
     if exit_code != 0 and getattr(progress, "_final_state", None) is None:
         progress.error(f"Pipeline subprocess exited with code {exit_code}.")
