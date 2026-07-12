@@ -178,6 +178,9 @@ printf '%s\n' "$streamlit_content" | kubectl_apply apply -f -
 log "Apply Streamlit Ingress (production TLS)"
 kubectl_apply apply -f "$K8S_DIR/deployment/streamlit-ingress.yaml"
 
+log "Restart Streamlit rollout"
+kubectl_apply rollout restart "deployment/streamlit" -n "$NAMESPACE"
+
 log "Wait for Streamlit rollout"
 kubectl_apply rollout status "deployment/streamlit" -n "$NAMESPACE" --timeout=300s
 
