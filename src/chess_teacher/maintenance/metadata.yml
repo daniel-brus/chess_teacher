@@ -1,0 +1,191 @@
+tables:
+  raw_logs:
+    schema: logs
+    table: raw_logs
+    comment: Application log lines loaded from shipped S3 segments (all levels)
+    primary_key:
+      - log_id
+    indexes:
+      - name: idx_raw_logs_ts
+        columns: [ts]
+      - name: idx_raw_logs_environment_ts
+        columns: [environment, ts]
+    columns:
+      - name: log_id
+        data_type: text
+        nullable: false
+        comment: Unique log line identifier (UUID from JSON)
+      - name: ts
+        data_type: timestamptz
+        nullable: false
+        comment: Log event timestamp
+      - name: level
+        data_type: text
+        nullable: false
+        comment: Log level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+      - name: logger
+        data_type: text
+        nullable: false
+        comment: Logger name
+      - name: msg
+        data_type: text
+        nullable: false
+        comment: Log message
+      - name: environment
+        data_type: text
+        nullable: false
+        comment: Deployment environment when the log was emitted
+      - name: exc_type
+        data_type: text
+        nullable: true
+        comment: Exception type when present
+      - name: exc_msg
+        data_type: text
+        nullable: true
+        comment: Exception message when present
+      - name: traceback
+        data_type: text
+        nullable: true
+        comment: Formatted traceback when present
+      - name: source_file
+        data_type: text
+        nullable: false
+        comment: S3 object key the log line was loaded from
+      - name: loaded_at
+        data_type: timestamptz
+        nullable: false
+        comment: Timestamp when the row was loaded into Postgres
+
+  warning_error_logs:
+    schema: logs
+    table: warning_error_logs
+    comment: WARNING, ERROR, and CRITICAL log lines retained longer for analytics
+    primary_key:
+      - log_id
+    indexes:
+      - name: idx_warning_error_logs_ts
+        columns: [ts]
+      - name: idx_warning_error_logs_level_ts
+        columns: [level, ts]
+    columns:
+      - name: log_id
+        data_type: text
+        nullable: false
+        comment: Unique log line identifier (UUID from JSON)
+      - name: ts
+        data_type: timestamptz
+        nullable: false
+        comment: Log event timestamp
+      - name: level
+        data_type: text
+        nullable: false
+        comment: Log level (WARNING, ERROR, or CRITICAL)
+      - name: logger
+        data_type: text
+        nullable: false
+        comment: Logger name
+      - name: msg
+        data_type: text
+        nullable: false
+        comment: Log message
+      - name: environment
+        data_type: text
+        nullable: false
+        comment: Deployment environment when the log was emitted
+      - name: exc_type
+        data_type: text
+        nullable: true
+        comment: Exception type when present
+      - name: exc_msg
+        data_type: text
+        nullable: true
+        comment: Exception message when present
+      - name: traceback
+        data_type: text
+        nullable: true
+        comment: Formatted traceback when present
+      - name: source_file
+        data_type: text
+        nullable: false
+        comment: S3 object key the log line was loaded from
+      - name: loaded_at
+        data_type: timestamptz
+        nullable: false
+        comment: Timestamp when the row was loaded into Postgres
+
+  log_level_hourly_counts:
+    schema: logs
+    table: log_level_hourly_counts
+    comment: Hourly log line counts by environment, level, logger, and host
+    primary_key:
+      - bucket_start
+      - environment
+      - level
+      - logger
+      - hostname
+    indexes:
+      - name: idx_log_level_hourly_counts_bucket_start
+        columns: [bucket_start]
+      - name: idx_log_level_hourly_counts_environment_bucket_start
+        columns: [environment, bucket_start]
+    columns:
+      - name: bucket_start
+        data_type: timestamptz
+        nullable: false
+        comment: Hour bucket start (UTC)
+      - name: environment
+        data_type: text
+        nullable: false
+        comment: Deployment environment
+      - name: level
+        data_type: text
+        nullable: false
+        comment: Log level
+      - name: logger
+        data_type: text
+        nullable: false
+        comment: Logger name
+      - name: hostname
+        data_type: text
+        nullable: false
+        comment: Host or pod name parsed from source_file
+      - name: log_count
+        data_type: integer
+        nullable: false
+        comment: Number of log lines in this hour and dimension group
+
+  exception_hourly_counts:
+    schema: logs
+    table: exception_hourly_counts
+    comment: Hourly WARNING+ counts by environment, level, and exception type (or no exception)
+    primary_key:
+      - bucket_start
+      - environment
+      - level
+      - exc_type
+    indexes:
+      - name: idx_exception_hourly_counts_bucket_start
+        columns: [bucket_start]
+      - name: idx_exception_hourly_counts_exc_type_bucket_start
+        columns: [exc_type, bucket_start]
+    columns:
+      - name: bucket_start
+        data_type: timestamptz
+        nullable: false
+        comment: Hour bucket start (UTC)
+      - name: environment
+        data_type: text
+        nullable: false
+        comment: Deployment environment
+      - name: level
+        data_type: text
+        nullable: false
+        comment: Log level (WARNING, ERROR, or CRITICAL)
+      - name: exc_type
+        data_type: text
+        nullable: false
+        comment: Exception class name, or (no exception) when the log had no traceback
+      - name: exception_count
+        data_type: integer
+        nullable: false
+        comment: Number of log lines with this exception type in the hour
