@@ -42,4 +42,6 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    from chess_teacher.utils.process_utils import run_script_main
+
+    run_script_main(main)
