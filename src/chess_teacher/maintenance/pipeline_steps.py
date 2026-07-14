@@ -15,6 +15,7 @@ from chess_teacher.maintenance.transformations import (
     FilterWarningErrorLevelsTransformation,
     ParseLogTimestampColumnsTransformation,
 )
+from chess_teacher.utils.cache_utils import invalidate_admin_log_aggregates_cache
 from chess_teacher.utils.db.client import DatabaseClient, MergeStrategy
 from chess_teacher.utils.files.file_utils import FileType
 from chess_teacher.utils.general_utils import get_current_datetime
@@ -335,6 +336,18 @@ class DeleteOldS3LogFilesStep(PipelineStep):
         self.logger.info(
             f"[{self.name}] Deleted {len(to_delete)} S3 log file(s) with path date before {cutoff_date}."
         )
+
+
+class InvalidateAdminLogDashboardCacheStep(PipelineStep):
+    """Drop Redis cache for admin log dashboard aggregate tables."""
+
+    def __init__(self) -> None:
+        super().__init__("invalidate_admin_log_dashboard_cache", critical=False)
+
+    def run(self, db_client: DatabaseClient, context: PipelineContext) -> None:
+        invalidate_admin_log_aggregates_cache()
+        context.progress_update("Admin log dashboard cache invalidated.")
+        self.logger.info("[%s] Invalidated admin log dashboard Redis cache.", self.name)
 
 
 class ClearOrphanedPipelineRunLocksStep(DeleteOldRecordsStep):

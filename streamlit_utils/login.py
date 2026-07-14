@@ -44,7 +44,16 @@ class LoginScreen:
     def _fetch_existing_user(self, st_user: dict) -> User:
         """Fetch an existing User object from the database, using an id or st.user (dict)."""
         id = User.generate_id(st_user)
-        return User.fetch_from_db(self.db_client, id=id)
+        user = User.fetch_from_db(self.db_client, id=id)
+        return self._sync_oauth_profile(user, st_user)
+
+    def _sync_oauth_profile(self, user: User, st_user: dict) -> User:
+        """Refresh OAuth identity fields on an existing user when Google provides them."""
+        oauth_email = st_user.get("email")
+        if oauth_email and user.email != oauth_email:
+            user.upsert_field(self.db_client, "email", oauth_email)
+            user.email = oauth_email
+        return user
 
     def display(self):
         self.logger.info("Login screen started.")
