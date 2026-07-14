@@ -16,6 +16,12 @@ permissions:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  # Doppler configs:
+  #   ci   — Docker Hub + deploy SSH (DOPPLER_CICD_SERVICE_TOKEN, config-scoped)
+  #   prod — app/runtime secrets on VPS (DOPPLER_SERVICE_TOKEN, config-scoped)
+  DOPPLER_PROJECT: chess-teacher
+  DOPPLER_CONFIG_CI: ci
+  DOPPLER_CONFIG_PROD: prod
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -39,8 +45,6 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Extract PR number from merge commit message:
-          # "Merge pull request #42 from feature/my-feature"
           PR_NUMBER=$(git log -1 --pretty=%B | grep -oP '(?<=#)\d+' | head -1)
 
           if [ -z "$PR_NUMBER" ]; then
@@ -69,7 +73,6 @@ jobs:
         id: bump
         if: steps.label.outputs.bump != 'none'
         run: |
-          # Read current version
           CURRENT=$(grep '^version = ' pyproject.toml | sed 's/version = "\(.*\)"/\1/')
           echo "Current version: $CURRENT"
 
@@ -86,7 +89,6 @@ jobs:
           NEW_VERSION="$MAJOR.$MINOR.$PATCH"
           echo "New version: $NEW_VERSION"
 
-          # Write back to pyproject.toml
           sed -i "s/^version = \".*\"/version = \"$NEW_VERSION\"/" pyproject.toml
 
           echo "version=$NEW_VERSION" >> $GITHUB_OUTPUT
@@ -151,7 +153,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.ref_name }}  # re-checkout to get bumped pyproject.toml
+          ref: ${{ github.ref_name }}
 
       - name: Resolve version
         id: version
@@ -159,38 +161,45 @@ jobs:
           VERSION=${{ needs.bump-version.outputs.version || needs.read-version.outputs.version }}
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+      - name: Install Doppler CLI
+        uses: dopplerhq/cli-action@v4
 
-      - name: Validate DockerHub credentials
-        shell: bash
+      - name: Load Docker Hub credentials from Doppler
+        id: doppler_dockerhub
         env:
-          DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME }}
-          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          DOPPLER_TOKEN: ${{ secrets.DOPPLER_CICD_SERVICE_TOKEN }}
         run: |
-          if [ -z "$DOCKERHUB_USERNAME" ] || [ -z "$DOCKERHUB_TOKEN" ]; then
-            echo "Missing DockerHub credentials."
-            echo "Set DOCKERHUB_USERNAME as variable and DOCKERHUB_TOKEN as secret."
+          set -euo pipefail
+          if [ -z "${DOPPLER_TOKEN:-}" ]; then
+            echo "Missing GitHub secret DOPPLER_CICD_SERVICE_TOKEN in this environment."
             exit 1
           fi
+          username="$(doppler secrets get DOCKERHUB_USERNAME \
+            --project "$DOPPLER_PROJECT" --config "$DOPPLER_CONFIG_CI" --plain)"
+          token="$(doppler secrets get DOCKERHUB_TOKEN \
+            --project "$DOPPLER_PROJECT" --config "$DOPPLER_CONFIG_CI" --plain)"
+          echo "::add-mask::$token"
+          echo "username=$username" >> "$GITHUB_OUTPUT"
+          echo "token=$token" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
       - name: Login to Docker Hub
         uses: docker/login-action@v3
         with:
-          username: ${{ vars.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          username: ${{ steps.doppler_dockerhub.outputs.username }}
+          password: ${{ steps.doppler_dockerhub.outputs.token }}
 
       - name: Extract Docker metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ vars.DOCKERHUB_USERNAME }}/chess_teacher
+          images: ${{ steps.doppler_dockerhub.outputs.username }}/chess_teacher
           tags: |
-            # develop: develop, v1.1.0-dev, develop-{sha}
             type=raw,value=develop,enable=${{ github.ref_name == 'develop' }}
             type=raw,value=v${{ steps.version.outputs.version }}-dev,enable=${{ github.ref_name == 'develop' }}
             type=sha,format=short,prefix=develop-,enable=${{ github.ref_name == 'develop' }}
-            # main: latest, v1.1.0, main-{sha}
             type=raw,value=latest,enable=${{ github.ref_name == 'main' }}
             type=raw,value=v${{ steps.version.outputs.version }},enable=${{ github.ref_name == 'main' }}
             type=sha,format=short,prefix=main-,enable=${{ github.ref_name == 'main' }}
@@ -225,12 +234,42 @@ jobs:
         id: image
         run: echo "tag=main-${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
 
+      - name: Install Doppler CLI
+        uses: dopplerhq/cli-action@v4
+
+      - name: Load CI/deploy secrets from Doppler
+        id: doppler_ci
+        env:
+          DOPPLER_TOKEN: ${{ secrets.DOPPLER_CICD_SERVICE_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DOPPLER_TOKEN:-}" ]; then
+            echo "Missing GitHub secret DOPPLER_CICD_SERVICE_TOKEN in production environment."
+            exit 1
+          fi
+          fetch() {
+            doppler secrets get "$1" --project "$DOPPLER_PROJECT" --config "$DOPPLER_CONFIG_CI" --plain
+          }
+          host="$(fetch DEPLOY_HOST)"
+          user="$(fetch DEPLOY_USER)"
+          key="$(fetch DEPLOY_SSH_KEY)"
+          dockerhub_username="$(fetch DOCKERHUB_USERNAME)"
+          echo "::add-mask::$key"
+          echo "host=$host" >> "$GITHUB_OUTPUT"
+          echo "user=$user" >> "$GITHUB_OUTPUT"
+          echo "dockerhub_username=$dockerhub_username" >> "$GITHUB_OUTPUT"
+          {
+            echo "ssh_key<<EOF"
+            echo "$key"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Copy k8s manifests to VPS
         uses: appleboy/scp-action@v1
         with:
-          host: ${{ secrets.DEPLOY_HOST }}
-          username: ${{ vars.DEPLOY_USER }}
-          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          host: ${{ steps.doppler_ci.outputs.host }}
+          username: ${{ steps.doppler_ci.outputs.user }}
+          key: ${{ steps.doppler_ci.outputs.ssh_key }}
           source: orchestration/k8s/
           target: /opt/chess_teacher/
           strip_components: 1
@@ -239,35 +278,24 @@ jobs:
       - name: Deploy to Hetzner
         uses: appleboy/ssh-action@v1
         env:
-          POSTGRES_HOST: ${{ vars.POSTGRES_HOST }}
-          POSTGRES_PORT: ${{ vars.POSTGRES_PORT }}
-          POSTGRES_DB: ${{ vars.POSTGRES_DB }}
-          POSTGRES_SSLMODE: ${{ vars.POSTGRES_SSLMODE }}
-          STORAGE_ROOT: ${{ vars.STORAGE_ROOT }}
-          S3_BUCKET: ${{ vars.S3_BUCKET }}
-          S3_ENDPOINT_URL: ${{ vars.S3_ENDPOINT_URL }}
-          LOG_BUFFER_DIR: ${{ vars.LOG_BUFFER_DIR }}
-          LOG_SHIP_ENABLED: ${{ vars.LOG_SHIP_ENABLED }}
-          STOCKFISH_WORKERS: ${{ vars.STOCKFISH_WORKERS }}
-          STOCKFISH_THREADS_PER_ENGINE: ${{ vars.STOCKFISH_THREADS_PER_ENGINE }}
-          STOCKFISH_HASH_MB: ${{ vars.STOCKFISH_HASH_MB }}
-          CERT_MANAGER_ACME_EMAIL: ${{ vars.CERT_MANAGER_ACME_EMAIL }}
-          POSTGRES_USER: ${{ secrets.POSTGRES_USER }}
-          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
-          S3_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
-          S3_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
-          REDIS_URL: ${{ secrets.REDIS_URL }}
-          STREAMLIT_REDIRECT_URI: ${{ secrets.STREAMLIT_REDIRECT_URI }}
-          STREAMLIT_COOKIE_SECRET: ${{ secrets.STREAMLIT_COOKIE_SECRET }}
-          STREAMLIT_GOOGLE_CLIENT_ID: ${{ secrets.STREAMLIT_GOOGLE_CLIENT_ID }}
-          STREAMLIT_GOOGLE_CLIENT_SECRET: ${{ secrets.STREAMLIT_GOOGLE_CLIENT_SECRET }}
+          DOPPLER_TOKEN: ${{ secrets.DOPPLER_SERVICE_TOKEN }}
         with:
-          host: ${{ secrets.DEPLOY_HOST }}
-          username: ${{ vars.DEPLOY_USER }}
-          key: ${{ secrets.DEPLOY_SSH_KEY }}
-          envs: POSTGRES_HOST,POSTGRES_PORT,POSTGRES_DB,POSTGRES_SSLMODE,STORAGE_ROOT,S3_BUCKET,S3_ENDPOINT_URL,LOG_BUFFER_DIR,LOG_SHIP_ENABLED,STOCKFISH_WORKERS,STOCKFISH_THREADS_PER_ENGINE,STOCKFISH_HASH_MB,CERT_MANAGER_ACME_EMAIL,POSTGRES_USER,POSTGRES_PASSWORD,S3_ACCESS_KEY_ID,S3_SECRET_ACCESS_KEY,REDIS_URL,STREAMLIT_REDIRECT_URI,STREAMLIT_COOKIE_SECRET,STREAMLIT_GOOGLE_CLIENT_ID,STREAMLIT_GOOGLE_CLIENT_SECRET
+          host: ${{ steps.doppler_ci.outputs.host }}
+          username: ${{ steps.doppler_ci.outputs.user }}
+          key: ${{ steps.doppler_ci.outputs.ssh_key }}
+          envs: DOPPLER_TOKEN
           script: |
-            export IMAGE="${{ vars.DOCKERHUB_USERNAME }}/chess_teacher:${{ steps.image.outputs.tag }}"
+            set -euo pipefail
+            if ! command -v doppler >/dev/null 2>&1; then
+              echo "ERROR: Doppler CLI not found on VPS. Install it first:"
+              echo "  (curl -Ls --tlsv1.2 --proto \"=https\" --retry 3 https://cli.doppler.com/install.sh || wget -t 3 -qO- https://cli.doppler.com/install.sh) | sudo sh"
+              exit 1
+            fi
+            export IMAGE="${{ steps.doppler_ci.outputs.dockerhub_username }}/chess_teacher:${{ steps.image.outputs.tag }}"
             export IMAGE_PULL_POLICY=Always
             export ENVIRONMENT=PROD
-            bash /opt/chess_teacher/k8s/apply.sh
+            doppler run \
+              --token "$DOPPLER_TOKEN" \
+              --project "${{ env.DOPPLER_PROJECT }}" \
+              --config "${{ env.DOPPLER_CONFIG_PROD }}" \
+              -- bash /opt/chess_teacher/k8s/apply.sh
