@@ -61,14 +61,14 @@ class AggregateLogLevelHourlyTransformation(DataFrameTransformation):
     def transform(self, df: pl.DataFrame) -> pl.DataFrame:
         if df.height == 0:
             return pl.DataFrame(
-                schema={
+                schema=pl.Schema({
                     "bucket_start": pl.Datetime(time_zone="UTC"),
                     "environment": pl.Utf8,
                     "level": pl.Utf8,
                     "logger": pl.Utf8,
                     "hostname": pl.Utf8,
                     "log_count": pl.Int64,
-                }
+                })
             )
 
         required = {"ts", "environment", "level", "logger", "source_file"}
@@ -107,13 +107,13 @@ class AggregateExceptionHourlyTransformation(DataFrameTransformation):
     """Roll up warning/error log rows into hourly counts by level and exception type."""
 
     def transform(self, df: pl.DataFrame) -> pl.DataFrame:
-        empty_schema = {
+        empty_schema = pl.Schema({
             "bucket_start": pl.Datetime(time_zone="UTC"),
             "environment": pl.Utf8,
             "level": pl.Utf8,
             "exc_type": pl.Utf8,
             "exception_count": pl.Int64,
-        }
+        })
         if df.height == 0:
             return pl.DataFrame(schema=empty_schema)
 
