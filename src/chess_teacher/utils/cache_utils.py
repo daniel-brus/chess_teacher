@@ -21,6 +21,7 @@ logger = get_logger()
 CACHE_KEY_VERSION = "v1"
 USER_GAMES_TTL_SECONDS = 3600
 USER_ACCOUNTS_TTL_SECONDS = 1800
+ADMIN_LOG_AGGREGATES_TTL_SECONDS = 3600
 
 _UNSET = object()
 _cache_client: CacheClient | None | object = _UNSET
@@ -32,6 +33,14 @@ def user_games_cache_key(user_id: str) -> str:
 
 def user_accounts_cache_key(user_id: str) -> str:
     return f"user:{user_id}:accounts:{CACHE_KEY_VERSION}"
+
+
+def log_level_hourly_counts_cache_key() -> str:
+    return f"admin:log_level_hourly_counts:{CACHE_KEY_VERSION}"
+
+
+def exception_hourly_counts_cache_key() -> str:
+    return f"admin:exception_hourly_counts:{CACHE_KEY_VERSION}"
 
 
 def _redis_endpoint_label(redis_url: str) -> str:
@@ -88,6 +97,18 @@ class CacheClient(ABC):
 
     @abstractmethod
     def set_user_accounts(self, user_id: str, accounts: Sequence[Account]) -> None: ...
+
+    @abstractmethod
+    def get_log_level_hourly_counts(self) -> pl.DataFrame | None: ...
+
+    @abstractmethod
+    def set_log_level_hourly_counts(self, counts: pl.DataFrame) -> None: ...
+
+    @abstractmethod
+    def get_exception_hourly_counts(self) -> pl.DataFrame | None: ...
+
+    @abstractmethod
+    def set_exception_hourly_counts(self, counts: pl.DataFrame) -> None: ...
 
     @abstractmethod
     def delete(self, *keys: str) -> None: ...
@@ -148,6 +169,52 @@ class RedisCacheClient(CacheClient):
             key,
             len(payload),
             USER_ACCOUNTS_TTL_SECONDS,
+        )
+
+    def get_log_level_hourly_counts(self) -> pl.DataFrame | None:
+        key = log_level_hourly_counts_cache_key()
+        counts = self._get_polars(key)
+        if counts is None:
+            logger.info("Redis log level hourly counts cache miss key=%s", key)
+            return None
+        logger.info(
+            "Redis log level hourly counts cache hit key=%s rows=%s",
+            key,
+            counts.height,
+        )
+        return counts
+
+    def set_log_level_hourly_counts(self, counts: pl.DataFrame) -> None:
+        key = log_level_hourly_counts_cache_key()
+        self._set_polars(key, counts, ADMIN_LOG_AGGREGATES_TTL_SECONDS)
+        logger.debug(
+            "Redis log level hourly counts cache populated key=%s rows=%s ttl=%ss",
+            key,
+            counts.height,
+            ADMIN_LOG_AGGREGATES_TTL_SECONDS,
+        )
+
+    def get_exception_hourly_counts(self) -> pl.DataFrame | None:
+        key = exception_hourly_counts_cache_key()
+        counts = self._get_polars(key)
+        if counts is None:
+            logger.info("Redis exception hourly counts cache miss key=%s", key)
+            return None
+        logger.info(
+            "Redis exception hourly counts cache hit key=%s rows=%s",
+            key,
+            counts.height,
+        )
+        return counts
+
+    def set_exception_hourly_counts(self, counts: pl.DataFrame) -> None:
+        key = exception_hourly_counts_cache_key()
+        self._set_polars(key, counts, ADMIN_LOG_AGGREGATES_TTL_SECONDS)
+        logger.debug(
+            "Redis exception hourly counts cache populated key=%s rows=%s ttl=%ss",
+            key,
+            counts.height,
+            ADMIN_LOG_AGGREGATES_TTL_SECONDS,
         )
 
     def delete(self, *keys: str) -> None:
@@ -312,6 +379,16 @@ def invalidate_user_games_and_accounts_cache(user_id: str) -> None:
     if cache is not None:
         logger.info("Invalidating Redis user games and accounts cache user_id=%s", user_id)
         cache.delete(user_games_cache_key(user_id), user_accounts_cache_key(user_id))
+
+
+def invalidate_admin_log_aggregates_cache() -> None:
+    cache = get_cache_client()
+    if cache is not None:
+        logger.info("Invalidating Redis admin log aggregates cache")
+        cache.delete(
+            log_level_hourly_counts_cache_key(),
+            exception_hourly_counts_cache_key(),
+        )
 
 
 def reset_cache_client_for_tests() -> None:

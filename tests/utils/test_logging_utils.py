@@ -458,3 +458,31 @@ class TestConsoleFormatter:
 
         result = formatter.format(record)
         assert "Hello World" in result
+
+
+class TestEnhancedLoggerLogAndRaise:
+    """Tests for EnhancedLogger.log_and_raise exception metadata in logs."""
+
+    def test_log_and_raise_includes_exc_type_for_new_exception(self, reset_logging):
+        """Newly constructed exceptions must populate exc_type without an active except block."""
+        from io import StringIO
+
+        from chess_teacher.utils.logging.logger import EnhancedLogger
+
+        logging.setLoggerClass(EnhancedLogger)
+        logger = logging.getLogger("test.log_and_raise")
+        stream = StringIO()
+        handler = logging.StreamHandler(stream)
+        handler.setFormatter(JsonLinesFormatter())
+        logger.handlers.clear()
+        logger.addHandler(handler)
+        logger.setLevel(logging.ERROR)
+        logger.propagate = False
+
+        with pytest.raises(ValueError, match="boom"):
+            logger.log_and_raise(ValueError("boom"))
+
+        parsed = json.loads(stream.getvalue().strip())
+        assert parsed["exc_type"] == "ValueError"
+        assert parsed["exc_msg"] == "boom"
+        assert parsed["level"] == "ERROR"

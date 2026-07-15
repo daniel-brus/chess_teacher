@@ -174,6 +174,14 @@ def dispatch_pipeline_jobs(
 
     users = User.fetch_all_from_db(db)
     active_jobs = list_active_pipeline_jobs(namespace=k8s_namespace)
+    cron_due_count = sum(1 for user in users if user.is_cron_due(now))
+    logger.info(
+        "Dispatch scan: namespace=%s users=%s cron_due=%s active_pipeline_jobs=%s",
+        k8s_namespace,
+        len(users),
+        cron_due_count,
+        len(active_jobs),
+    )
 
     spawned: list[str] = []
     skipped_active = 0
@@ -201,6 +209,12 @@ def dispatch_pipeline_jobs(
             )
             continue
 
+        logger.info(
+            "Dispatching pipeline job for user=%s cron_time=%s timezone=%s",
+            user.user_id,
+            user.cron_time.strftime("%H:%M"),
+            user.timezone,
+        )
         job_name = create_pipeline_job(
             namespace=k8s_namespace,
             user_id=user.user_id,
@@ -227,11 +241,19 @@ def dispatch_pipeline_jobs(
 
 
 def main() -> int:
+    from chess_teacher.utils.process_utils import log_script_runtime_context
+
     logger.info("Pipeline dispatcher started.")
+    log_script_runtime_context(logger, script="dispatcher")
     result = dispatch_pipeline_jobs()
+    if result.spawned_jobs:
+        logger.info("Pipeline dispatcher spawned jobs: %s", ", ".join(result.spawned_jobs))
     logger.info(
-        "Pipeline dispatcher completed: spawned=%s jobs.",
+        "Pipeline dispatcher completed: spawned=%s skipped_active=%s skipped_not_due=%s skipped_cooldown=%s",
         len(result.spawned_jobs),
+        result.skipped_active_job,
+        result.skipped_not_due,
+        result.skipped_cooldown,
     )
     return 0
 

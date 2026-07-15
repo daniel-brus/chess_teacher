@@ -1,18 +1,40 @@
+# Streamlit app (use with docker-compose.infra.yml). Start: make streamlit_docker
 services:
   streamlit:
     build: .
 
-    env_file:
-      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
 
     environment:
-      # .env may set a host-specific STOCKFISH_PATH (e.g. Windows); override for Linux image.
+      ENVIRONMENT: ${ENVIRONMENT}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: ${POSTGRES_PORT}
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_SSLMODE: ${POSTGRES_SSLMODE:-}
+      STORAGE_ROOT: ${STORAGE_ROOT}
+      S3_BUCKET: ${S3_BUCKET}
+      S3_ENDPOINT_URL: http://minio:9000
+      S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID}
+      S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY}
+      REDIS_URL: redis://redis:6379/0
+      LOG_BUFFER_DIR: /tmp/chess-teacher-logs
+      LOG_SHIP_ENABLED: ${LOG_SHIP_ENABLED:-}
       STOCKFISH_PATH: /usr/games/stockfish
 
     ports:
-      # APP_PORT from .env: host port for local/Compose access (k3d uses fixed 8501).
       - "${APP_PORT}:8501"
 
     volumes:
-      # secrets.toml is gitignored / excluded from the image (.dockerignore).
       - ./.streamlit/secrets.toml:/app/.streamlit/secrets.toml:ro
+
+networks:
+  default:
+    name: chess-teacher-dev

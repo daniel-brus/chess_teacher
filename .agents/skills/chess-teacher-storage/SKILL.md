@@ -11,6 +11,24 @@ description: >-
 
 # Chess Teacher Storage (read-only)
 
+## Doppler environments
+
+Secrets live in Doppler project **`chess-teacher`**, not in git. Wrap skill commands with the config that matches the target object storage:
+
+| Config | S3 endpoint (typical) | When to use |
+|--------|----------------------|-------------|
+| `dev_local` | `http://localhost:9000` (MinIO Compose) | Default local dev (`make dev_infra`) |
+| `dev_k3d` | `http://host.k3d.internal:9000` | k3d jobs / cluster workloads |
+| `prod` | External S3 / Supabase storage | **Production objects — read-only only** |
+
+Local Compose stack uses MinIO with **`dev_local`**. Production uses external S3 from **`prod`** (source for `make dev_sync_cloud` object copy).
+
+```bash
+doppler run --project chess-teacher --config dev_local -- python .agents/skills/chess-teacher-storage/scripts/storage_query.py --json info
+```
+
+The script loads `.env` when present; prefer **`doppler run --config … --`** so `S3_*` and `STORAGE_ROOT` match the intended environment.
+
 ## Prefixes, not folders
 
 Object storage has **keys**, not directories. Keys look like POSIX paths (`ingested/acct/2026/06/file.jsonl`) relative to `STORAGE_ROOT`. A **prefix** is the same idea as a folder path: listing under `ingested/acct` means all keys that start with that prefix. The `children` command derives immediate sub-prefix names from deeper keys.
@@ -36,11 +54,11 @@ Object storage has **keys**, not directories. Keys look like POSIX paths (`inges
 3. Run the script; summarize results for the user.
 
 ```bash
-python .agents/skills/chess-teacher-storage/scripts/storage_query.py --json info
-python .agents/skills/chess-teacher-storage/scripts/storage_query.py --json children logs/python
-python .agents/skills/chess-teacher-storage/scripts/storage_query.py --json list ingested/acct --suffix jsonl --limit 20
-python .agents/skills/chess-teacher-storage/scripts/storage_query.py --json exists ingested/acct/file.jsonl
-python .agents/skills/chess-teacher-storage/scripts/storage_query.py --json any-under processed/acct
+doppler run --project chess-teacher --config dev_local -- python .agents/skills/chess-teacher-storage/scripts/storage_query.py --json info
+doppler run --project chess-teacher --config dev_local -- python .agents/skills/chess-teacher-storage/scripts/storage_query.py --json children logs/python
+doppler run --project chess-teacher --config dev_local -- python .agents/skills/chess-teacher-storage/scripts/storage_query.py --json list ingested/acct --suffix jsonl --limit 20
+doppler run --project chess-teacher --config dev_local -- python .agents/skills/chess-teacher-storage/scripts/storage_query.py --json exists ingested/acct/file.jsonl
+doppler run --project chess-teacher --config dev_local -- python .agents/skills/chess-teacher-storage/scripts/storage_query.py --json any-under processed/acct
 ```
 
 On Windows (PowerShell), same commands with `.venv\Scripts\python.exe` if the venv is not activated.
@@ -74,6 +92,8 @@ On Windows (PowerShell), same commands with `.venv\Scripts\python.exe` if the ve
 | "How many files under X?" | `count X` |
 | "Which backend / bucket?" | `info` |
 | "Is storage reachable?" | `health` |
+| "List raw log segment keys" | `list logs/python/buffer` |
+| "Search or parse log content" | Use **chess-teacher-logs** (storage lists keys only) |
 
 Interpret `exists`: `exists: true` means the object is present.
 Interpret `any-under`: `any: true` means at least one key starts with that prefix (empty prefix at root lists everything).
@@ -86,7 +106,7 @@ Interpret `children`: `folders` are immediate sub-prefixes; `files` are objects 
 | `ingested/<account_id>/` | New JSONL awaiting ingestion |
 | `processed/<account_id>/` | Successfully ingested JSONL |
 | `failed/<account_id>/` | Failed ingestion JSONL |
-| `logs/python/` | Shipped Python application logs |
+| `logs/python/` | Shipped Python application logs (see **chess-teacher-logs** skill to search/parse JSON segments) |
 | `assets/images/` | Platform asset images |
 
 Account IDs and dates appear as further path segments.
@@ -108,7 +128,7 @@ exists = storage.read_bytes("path/to/key.jsonl") is not None
 | Issue | Action |
 |-------|--------|
 | `ModuleNotFoundError: chess_teacher` | Activate `.venv`; `pip install -r requirements-dev.txt` |
-| S3 / connection errors | Check `.env` `S3_*`, `STORAGE_ROOT`; try `health` |
+| S3 / connection errors | `doppler run --config dev_local`; check `S3_*`, `STORAGE_ROOT`; try `health` |
 | Empty `list` / `any: false` | Prefix may be wrong (no leading slash); try `children` at parent prefix |
 | `health` modifies storage | Creates/deletes `_healthcheck/<uuid>.txt` only; mention if user did not ask |
 

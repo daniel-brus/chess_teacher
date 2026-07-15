@@ -35,5 +35,8 @@ class EnhancedLogger(logging.Logger):
             self.error(f"Invalid log level: {level}. Error: {e}", exc_info=True)
             raise ConfigError(f"Invalid log level: {level}.") from e
 
-        log_fn(log_message, exc_info=include_traceback)
+        if include_traceback:
+            log_fn(log_message, exc_info=(type(exc), exc, exc.__traceback__))
+        else:
+            log_fn(log_message)
         raise exc

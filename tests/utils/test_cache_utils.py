@@ -17,8 +17,11 @@ from chess_teacher.utils.cache_utils import (
     _decode_polars,
     _encode_polars,
     _redis_endpoint_label,
+    exception_hourly_counts_cache_key,
     get_cache_client,
+    invalidate_admin_log_aggregates_cache,
     invalidate_user_games_and_accounts_cache,
+    log_level_hourly_counts_cache_key,
     user_accounts_cache_key,
     user_games_cache_key,
 )
@@ -37,6 +40,10 @@ class TestCacheKeys:
 
     def test_user_accounts_cache_key(self):
         assert user_accounts_cache_key("abc") == "user:abc:accounts:v1"
+
+    def test_admin_log_aggregate_cache_keys(self):
+        assert log_level_hourly_counts_cache_key() == "admin:log_level_hourly_counts:v1"
+        assert exception_hourly_counts_cache_key() == "admin:exception_hourly_counts:v1"
 
     def test_redis_endpoint_label_hides_credentials(self):
         label = _redis_endpoint_label("rediss://default:secret@fancy-marmot.upstash.io:6379")
@@ -118,6 +125,22 @@ class TestRedisCacheClient:
         assert restored is not None
         assert restored.equals(games)
 
+    def test_set_and_get_admin_log_aggregates(self):
+        redis_client = MagicMock()
+        redis_client.get.return_value = None
+        cache = RedisCacheClient(redis_client, endpoint="test-host:6379")
+
+        level_counts = pl.DataFrame({"bucket_start": [1], "log_count": [2]})
+        exception_counts = pl.DataFrame({"bucket_start": [1], "exception_count": [3]})
+        cache.set_log_level_hourly_counts(level_counts)
+        cache.set_exception_hourly_counts(exception_counts)
+
+        assert redis_client.set.call_args_list[0].args[0] == log_level_hourly_counts_cache_key()
+        assert redis_client.set.call_args_list[1].args[0] == exception_hourly_counts_cache_key()
+
+        redis_client.get.return_value = redis_client.set.call_args_list[0].args[1]
+        assert cache.get_log_level_hourly_counts() is not None
+
     def test_delete(self):
         redis_client = MagicMock()
         cache = RedisCacheClient(redis_client, endpoint="test-host:6379")
@@ -133,4 +156,13 @@ class TestInvalidation:
         cache.delete.assert_called_once_with(
             user_games_cache_key("user1"),
             user_accounts_cache_key("user1"),
+        )
+
+    def test_invalidate_admin_log_aggregates_cache(self, monkeypatch):
+        cache = MagicMock()
+        monkeypatch.setattr(cache_utils, "_cache_client", cache)
+        invalidate_admin_log_aggregates_cache()
+        cache.delete.assert_called_once_with(
+            log_level_hourly_counts_cache_key(),
+            exception_hourly_counts_cache_key(),
         )
