@@ -51,21 +51,21 @@ LOGGER_SUBSYSTEMS = (
     ("Streamlit", ("streamlit_pages.", "streamlit_utils.")),
     ("Core utils", ("chess_teacher.utils.", "chess_teacher.other.")),
 )
-_LOG_LEVEL_COLUMNS = (
+_LOG_LEVEL_COLUMNS = [
     "bucket_start",
     "environment",
     "level",
     "logger",
     "hostname",
     "log_count",
-)
-_EXCEPTION_COLUMNS = (
+]
+_EXCEPTION_COLUMNS = [
     "bucket_start",
     "environment",
     "level",
     "exc_type",
     "exception_count",
-)
+]
 
 
 def default_filter_date_from(max_date: date) -> date:

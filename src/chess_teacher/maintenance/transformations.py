@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import cast
+
 import polars as pl
 
 from chess_teacher.utils.exception_utils import TransformationError
@@ -25,6 +27,32 @@ _EXCEPTION_HOURLY_GROUP_COLUMNS = (
     "environment",
     "level",
     "exc_type",
+)
+
+_EMPTY_LOG_LEVEL_HOURLY_SCHEMA = pl.Schema(
+    cast(
+        dict[str, pl.DataType],
+        {
+            "bucket_start": pl.Datetime(time_zone="UTC"),
+            "environment": pl.Utf8,
+            "level": pl.Utf8,
+            "logger": pl.Utf8,
+            "hostname": pl.Utf8,
+            "log_count": pl.Int64,
+        },
+    )
+)
+_EMPTY_EXCEPTION_HOURLY_SCHEMA = pl.Schema(
+    cast(
+        dict[str, pl.DataType],
+        {
+            "bucket_start": pl.Datetime(time_zone="UTC"),
+            "environment": pl.Utf8,
+            "level": pl.Utf8,
+            "exc_type": pl.Utf8,
+            "exception_count": pl.Int64,
+        },
+    )
 )
 
 
@@ -60,16 +88,7 @@ class AggregateLogLevelHourlyTransformation(DataFrameTransformation):
 
     def transform(self, df: pl.DataFrame) -> pl.DataFrame:
         if df.height == 0:
-            return pl.DataFrame(
-                schema=pl.Schema({
-                    "bucket_start": pl.Datetime(time_zone="UTC"),
-                    "environment": pl.Utf8,
-                    "level": pl.Utf8,
-                    "logger": pl.Utf8,
-                    "hostname": pl.Utf8,
-                    "log_count": pl.Int64,
-                })
-            )
+            return pl.DataFrame(schema=_EMPTY_LOG_LEVEL_HOURLY_SCHEMA)
 
         required = {"ts", "environment", "level", "logger", "source_file"}
         missing = required - set(df.columns)
@@ -107,15 +126,8 @@ class AggregateExceptionHourlyTransformation(DataFrameTransformation):
     """Roll up warning/error log rows into hourly counts by level and exception type."""
 
     def transform(self, df: pl.DataFrame) -> pl.DataFrame:
-        empty_schema = pl.Schema({
-            "bucket_start": pl.Datetime(time_zone="UTC"),
-            "environment": pl.Utf8,
-            "level": pl.Utf8,
-            "exc_type": pl.Utf8,
-            "exception_count": pl.Int64,
-        })
         if df.height == 0:
-            return pl.DataFrame(schema=empty_schema)
+            return pl.DataFrame(schema=_EMPTY_EXCEPTION_HOURLY_SCHEMA)
 
         required = {"ts", "environment", "level"}
         missing = required - set(df.columns)
@@ -138,7 +150,7 @@ class AggregateExceptionHourlyTransformation(DataFrameTransformation):
                 else pl.lit(NO_EXC_TYPE_LABEL).alias("exc_type"),
             )
             if prepared.height == 0:
-                return pl.DataFrame(schema=empty_schema)
+                return pl.DataFrame(schema=_EMPTY_EXCEPTION_HOURLY_SCHEMA)
             return (
                 prepared
                 .group_by(list(_EXCEPTION_HOURLY_GROUP_COLUMNS))
