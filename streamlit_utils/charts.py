@@ -112,6 +112,31 @@ def apply_divider_matched_axis_config(chart: alt.Chart) -> alt.Chart:
     return chart.configure_axisXTemporal(**x_kw).configure_axisYQuantitative(**y_kw)
 
 
+def admin_log_chart_panel_bg() -> str:
+    """Solid panel background for admin log charts (readable over chessboard themes)."""
+    return "#1e1e1e" if active_appearance() == "dark" else "#fafafa"
+
+
+def configure_admin_log_chart(chart: alt.Chart, *, height: int) -> alt.Chart:
+    """Opaque chart panel with theme-aware labels — avoids transparent Vega over page bg."""
+    panel_bg = admin_log_chart_panel_bg()
+    label_color = "#e5e7eb" if active_appearance() == "dark" else "#374151"
+    chart = apply_divider_matched_axis_config(chart.properties(height=height))
+    return (
+        chart
+        .configure(background=panel_bg)
+        .configure_view(fill=panel_bg, strokeWidth=0)
+        .configure_axis(
+            labelColor=label_color,
+            titleColor=label_color,
+            gridOpacity=0.35,
+            domainColor=label_color,
+            tickColor=label_color,
+        )
+        .configure_legend(labelColor=label_color, titleColor=label_color)
+    )
+
+
 def _coerce_timestamp(value: datetime | date) -> pd.Timestamp:
     return pd.Timestamp(value)
 

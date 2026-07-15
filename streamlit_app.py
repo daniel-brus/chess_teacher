@@ -2,6 +2,7 @@
 
 import streamlit as st
 
+from streamlit_utils.admin_auth import is_admin
 from streamlit_utils.login import require_authenticated_user
 from streamlit_utils.page_config import configure_page
 from streamlit_utils.page_logging import log_user_action
@@ -19,6 +20,11 @@ pages = [
     st.Page("streamlit_pages/statistics.py", title="Statistics"),
     st.Page("streamlit_pages/settings.py", title="Settings"),
 ]
+if is_admin(user):
+    admin_pages = [
+        st.Page("streamlit_pages/admin.py", title="Admin"),
+    ]
+    pages.append(*admin_pages)
 
 pg = st.navigation(pages, position="hidden")
 

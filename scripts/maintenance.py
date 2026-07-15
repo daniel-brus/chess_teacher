@@ -2,16 +2,50 @@
 
 # Remove orphaned pipeline runs (finished_at EPOCH, started long enough ago)
 
+from __future__ import annotations
+
+import time
+
 from chess_teacher.maintenance.main import run_maintenance
 from chess_teacher.utils.logging import get_logger
+from chess_teacher.utils.pipeline_utils.pipeline_helpers import PipelineResult
+from chess_teacher.utils.process_utils import log_script_runtime_context
 
 logger = get_logger()
 
 
 def main() -> int:
-    logger.info("Maintenance job started: Maintenance pipeline.")
-    run_maintenance()
-    logger.info("Maintenance job completed.")
+    log_script_runtime_context(logger, script="maintenance")
+    logger.info("Maintenance job started.")
+    started_at = time.monotonic()
+    result = run_maintenance()
+    duration_s = time.monotonic() - started_at
+
+    logger.info(
+        "Maintenance job finished result=%s duration_s=%.1f run_id=%s steps=%s",
+        result.result.value,
+        duration_s,
+        result.run_id,
+        len(result.step_results),
+    )
+    for step_result in result.step_results:
+        logger.info(
+            "Maintenance step summary name=%s result=%s duration_s=%.1f",
+            step_result.name,
+            step_result.result.value,
+            step_result.duration_seconds,
+        )
+        if step_result.error_message:
+            logger.warning(
+                "Maintenance step error name=%s message=%s",
+                step_result.name,
+                step_result.error_message,
+            )
+
+    if result.result in {PipelineResult.FAILURE, PipelineResult.PARTIAL}:
+        for error_message in result.error_messages:
+            logger.warning("Maintenance pipeline error: %s", error_message)
+
     return 0
 
 

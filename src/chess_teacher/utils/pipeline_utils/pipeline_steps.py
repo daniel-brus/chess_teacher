@@ -250,7 +250,10 @@ class TransformStep(LoadToDatabaseStep):
         scope_where = self._optional_scope_where_clause(self.table_metadata, context)
         self._incremental_filter.db_client = db_client
         self._incremental_filter.set_scope_where(scope_where)
-        if self.merge_strategy.when_not_matched_by_source == "delete":
+        if (
+            self.loading_strategy == LoadingStrategy.MERGE
+            and self.merge_strategy.when_not_matched_by_source == "delete"
+        ):
             self.match_condition = scope_where
         super().run(db_client, context)
 

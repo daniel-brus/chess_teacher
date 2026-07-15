@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, NoReturn
@@ -23,6 +24,16 @@ def is_parent_process() -> bool:
         return False
 
     return True
+
+
+def log_script_runtime_context(logger: EnhancedLogger, *, script: str) -> None:
+    """Log standard runtime context for orchestrated K8s entrypoint scripts."""
+    logger.info(
+        "%s runtime context environment=%s hostname=%s",
+        script,
+        os.getenv("ENVIRONMENT") or "unknown",
+        os.getenv("HOSTNAME") or "unknown",
+    )
 
 
 def run_script_main(main: Callable[[], int | None]) -> None:
