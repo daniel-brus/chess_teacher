@@ -1,100 +1,106 @@
 # Chess Teacher
 
-An AI-powered chess teaching application with a Streamlit UI for visualizing and analyzing chess games. Built with Python, Docker, and the Anthropic API.
+Streamlit chess teaching app with local dev infra (Postgres, MinIO, Redis via Docker Compose) and production deploy on Hetzner k8s. Secrets are managed in [Doppler](https://www.doppler.com/).
 
 ## Features
 
-- 🎯 Interactive chess board visualization with Streamlit
-- 🤖 AI-powered chess analysis via Anthropic API
-- 📊 Move history and game statistics
-- 💾 Persistent game storage with Supabase (Postgres, session pooler)
-- ⚙️ Stockfish integration for move suggestions
-- 🧪 Comprehensive test suite with pytest
-- 🔧 Pre-commit hooks for code quality
+- Interactive chess board visualization with Streamlit
+- Move history and game statistics
+- Stockfish integration for analysis
+- Pipelines for game ingestion and preprocessing
+- Local dev stack or cloud backends (Supabase, S3, Redis) via Doppler configs
 
-## Setup
+## Prerequisites
 
-### Prerequisites
 - Python 3.12
-- Docker & Docker Compose (optional)
-- Stockfish (included in Docker, or install locally)
+- Docker Desktop (Compose + optional k3d)
+- [Doppler CLI](https://docs.doppler.com/docs/install-cli) (`winget install doppler.doppler`)
+- Stockfish (for local venv runs; included in Docker image)
 
-### Local Development
+## Secrets (Doppler)
 
-1. **Clone the repository:**
-   ```bash
-   git clone https://github.com/daniel-brus/chess_teacher.git
-   cd chess_teacher
-   ```
+| Config | Purpose |
+|--------|---------|
+| `dev_local` | Local venv + Compose (`localhost` hosts) |
+| `dev_k3d` | k3d jobs (`host.k3d.internal` hosts) |
+| `ci` | GitHub Actions (Docker Hub, deploy SSH) |
+| `prod` | Production VPS / cloud sync source |
 
-2. **Create and activate virtual environment:**
-   ```bash
-   py -3.12 -m venv .venv
-   .venv\Scripts\activate  # Windows
-   source .venv/bin/activate  # Linux/macOS
-   ```
+Copy keys from [`.env.example`](.env.example) into Doppler `dev_local`, then duplicate to `dev_k3d` with k3d hostnames (see comments in that file).
 
-3. **Install dependencies:**
-   ```bash
-   pip install -r requirements-dev.txt
-   ```
+```powershell
+doppler login
+# Set secrets in dashboard for config dev_local (and dev_k3d)
+```
 
-4. **Configure environment:**
-   - Create `.env` with your API keys and Supabase Postgres settings (`POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`, `POSTGRES_SSLMODE`, etc.)
-   - No local Postgres container — the app connects to Supabase via the session pooler
+## Local development
 
-5. **Run tests:**
-   ```bash
-   pytest
-   ```
+```powershell
+py -3.12 -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements-dev.txt
+pip install -e .
 
-6. **Start Streamlit app:**
-   ```bash
-   streamlit run app.py
-   ```
-   Opens at `http://localhost:8501`
+# Start local Postgres + MinIO + Redis
+make dev_infra
 
-7. **Or run backend scripts:**
+# Run Streamlit (venv)
+make streamlit_fg
 
-Example:
-   ```bash
-   python scripts/main.py
-   ```
-
-### Docker
-
-Streamlit only (database is Supabase, not in Compose). Smoke-test the production image locally:
-
-```bash
+# Or Streamlit in Docker
 make streamlit_docker
-# or: docker compose up -d
 ```
 
-## Project Structure
+Streamlit opens at `http://localhost:<APP_PORT>` (default `8502` from Doppler `dev_local`).
 
-```CLI entry points
-app.py            # Streamlit web interface
-src/
-  database/       # Database operations
-  utils/          # Utility functions
-config/           # Configuration management
-tests/            # Test suite (mirrors src/)
-scripts/          # Entry points
+### Optional: k3d (local Kubernetes)
+
+```powershell
+make k8s_up          # requires dev_infra + dev_k3d Doppler config
+make streamlit_k8s   # port-forward to http://localhost:8501
 ```
 
-## Development Tools
-- **Web UI:** Streamlit for interactive chess visualization
-- **Linting & Formatting:** Ruff (configured in `pyproject.toml`)
-- **Pre-commit Hooks:** Automatic checks before commits
-- **Testing:** Pytest with fixtures in `tests/conftest.py`
-- **Chess Engine:** Stockfish for move analysis
+### Cloud → local data clone
 
-### Code Quality
+Requires Docker Desktop and AWS CLI on PATH (`pg_dump`/`pg_restore` run in a `postgres:17` container to match Supabase).
 
-Use VS Code with Ruff extension enabled (auto-format on save).
-
-Otherwise, do the following before committing:
-```bash
-ruff check src config tests --fix
-pre-commit run --all-files
+```powershell
+make dev_sync_cloud
 ```
+
+### Empty local DB schema only
+
+```powershell
+make dev_bootstrap_schema
+```
+
+## Makefile targets
+
+| Target | Description |
+|--------|-------------|
+| `dev_infra` | Start Postgres, MinIO, Redis |
+| `dev_down` | Stop Compose stack |
+| `dev_bootstrap` | Start infra and wait until healthy |
+| `streamlit_fg` | Streamlit in venv (Doppler `dev_local`) |
+| `streamlit_docker` | Streamlit container + infra |
+| `k8s_up` | Apply manifests to k3d |
+| `dev_sync_cloud` | Full prod → local Postgres + MinIO sync |
+| `dev_bootstrap_schema` | `ensure_metadata` for all tables |
+
+Override Doppler config: `make streamlit_fg DOPPLER_CONFIG_LOCAL=prod` (uses cloud backends).
+
+## Tests and linting
+
+Run manually in your terminal:
+
+```powershell
+pytest
+ruff check src scripts tests
+mypy src
+```
+
+## Production deploy
+
+Push to `main` triggers CD: build Docker image, SCP k8s manifests, `doppler run --config prod -- apply.sh` on VPS.
+
+GitHub secrets: `DOPPLER_CICD_SERVICE_TOKEN` (repo), `DOPPLER_SERVICE_TOKEN` (production env), `VERSION_BUMP_PAT`.

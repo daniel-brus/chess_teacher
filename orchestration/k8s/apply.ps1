@@ -77,6 +77,21 @@ function Render-K8sManifest {
 Write-Host "Using image: $image (pull: Always)" -ForegroundColor Cyan
 Write-Host "Secrets source: Doppler config dev_k3d" -ForegroundColor Cyan
 
+$postgresHost = Get-RequiredEnv "POSTGRES_HOST"
+$postgresPort = [int](Get-RequiredEnv "POSTGRES_PORT")
+if ($postgresHost -eq "host.k3d.internal") {
+    Write-Host "Preflight: checking local Compose Postgres at ${postgresHost}:${postgresPort}..." -ForegroundColor Cyan
+    $reachable = Test-NetConnection -ComputerName $postgresHost -Port $postgresPort -WarningAction SilentlyContinue
+    if (-not $reachable.TcpTestSucceeded) {
+        throw @"
+Cannot reach Postgres at ${postgresHost}:${postgresPort}.
+Start local infra first: make dev_infra
+Then retry: make k8s_up
+"@
+    }
+    Write-Host "Local infra reachable." -ForegroundColor Green
+}
+
 Invoke-Kubectl @("apply", "-f", (Join-Path $k8sDir "namespace.yaml"))
 
 $configPath = Join-Path $k8sDir "configmap.yaml"

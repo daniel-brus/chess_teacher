@@ -7,7 +7,6 @@ Exits non-zero if required variables (e.g. ``APP_PORT``) are missing.
 """
 
 import os
-import subprocess
 import sys
 from pathlib import Path
 
@@ -28,17 +27,17 @@ def main() -> int:
         return 1
 
     port = os.environ["APP_PORT"]
-    return subprocess.call(
-        [
-            sys.executable,
-            "-m",
-            "streamlit",
-            "run",
-            "streamlit_app.py",
-            f"--server.port={port}",
-        ],
-        cwd=_ROOT,
-    )
+    os.chdir(_ROOT)
+    sys.argv = [
+        "streamlit",
+        "run",
+        "streamlit_app.py",
+        f"--server.port={port}",
+    ]
+    from streamlit.web import cli as stcli
+
+    stcli.main()
+    return 0
 
 
 if __name__ == "__main__":
