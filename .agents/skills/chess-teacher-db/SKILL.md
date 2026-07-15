@@ -10,6 +10,24 @@ description: >-
 
 # Chess Teacher Database (read-only)
 
+## Doppler environments
+
+Secrets live in Doppler project **`chess-teacher`**, not in git. Wrap skill commands with the config that matches the target Postgres:
+
+| Config | `POSTGRES_HOST` (typical) | When to use |
+|--------|---------------------------|-------------|
+| `dev_local` | `localhost` (Compose) | Default local dev (`make dev_infra`) |
+| `dev_k3d` | `host.k3d.internal` | k3d jobs / cluster workloads |
+| `prod` | External (e.g. Supabase) | **Production data — read-only only** |
+
+Local Compose stack: Postgres, MinIO, and Redis from `docker-compose.infra.yml` with **`dev_local`**. Production uses external Postgres from **`prod`** (same config `make dev_sync_cloud` reads from).
+
+```bash
+doppler run --project chess-teacher --config dev_local -- python .agents/skills/chess-teacher-db/scripts/db_query.py --json list-domains
+```
+
+The script loads `.env` when present; prefer **`doppler run --config … --`** so credentials match the intended environment.
+
 ## Who runs what
 
 - **The user asks questions in chat** (e.g. “are columns Y and Z unique?”). They do **not** need to run the script or remember commands.
@@ -31,9 +49,9 @@ description: >-
 3. Run the script; summarize results for the user.
 
 ```bash
-python .agents/skills/chess-teacher-db/scripts/db_query.py --json list-domains
-python .agents/skills/chess-teacher-db/scripts/db_query.py --json list-tables ingestion
-python .agents/skills/chess-teacher-db/scripts/db_query.py --json unique ingestion raw_games --columns account_id,platform_game_id
+doppler run --project chess-teacher --config dev_local -- python .agents/skills/chess-teacher-db/scripts/db_query.py --json list-domains
+doppler run --project chess-teacher --config dev_local -- python .agents/skills/chess-teacher-db/scripts/db_query.py --json list-tables ingestion
+doppler run --project chess-teacher --config dev_local -- python .agents/skills/chess-teacher-db/scripts/db_query.py --json unique ingestion raw_games --columns account_id,platform_game_id
 ```
 
 On Windows (PowerShell), same commands with `.venv\Scripts\python.exe` if the venv is not activated.
@@ -88,7 +106,7 @@ Prefer the script. If needed, set `os.environ["ENVIRONMENT"] = "AGENT"` **before
 | Issue | Action |
 |-------|--------|
 | `ModuleNotFoundError: chess_teacher` | Activate `.venv`; `pip install -r requirements-dev.txt` |
-| Connection errors | Postgres up; `.env` DB vars correct |
+| Connection errors | Postgres up; use `doppler run --config dev_local` or check `.env` DB vars |
 | Unknown domain / table | `list-domains` / `list-tables` |
 | Invalid column | Check that domain's `metadata.yml` |
 
