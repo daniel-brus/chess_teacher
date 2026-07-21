@@ -14,3 +14,5 @@ polars
 boto3
 kubernetes
 redis
+mlflow
+tensorflow
