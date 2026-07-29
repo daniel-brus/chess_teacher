@@ -6,9 +6,8 @@ import pytest
 from chess_teacher.utils.chess_bots import RandomBot, get_bot_preset
 from streamlit_utils.play_game import (
     apply_bot_move,
-    apply_legal_move,
+    apply_uci_move,
     game_status_message,
-    parse_move_uci,
     resolve_user_color,
     start_new_game,
 )
@@ -33,8 +32,7 @@ def test_start_new_game_black_waits_for_bot() -> None:
 
 def test_apply_legal_move_switches_turn() -> None:
     state = start_new_game("White", "random")
-    move = parse_move_uci(state.board, "e2e4")
-    next_state = apply_legal_move(state, move)
+    next_state = apply_uci_move(state, "e2e4")
     assert next_state.board.turn == chess.BLACK
     assert next_state.last_move_uci == "e2e4"
     assert next_state.pending_bot_move is True
@@ -42,7 +40,7 @@ def test_apply_legal_move_switches_turn() -> None:
 
 def test_apply_bot_move_after_user_move() -> None:
     state = start_new_game("White", "random")
-    state = apply_legal_move(state, parse_move_uci(state.board, "e2e4"))
+    state = apply_uci_move(state, "e2e4")
     bot = RandomBot(seed=1)
     bot_state = apply_bot_move(state, bot)
     assert bot_state.board.fullmove_number == 2

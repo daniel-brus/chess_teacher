@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import threading
+from datetime import timedelta
+from typing import Any
+
 import streamlit as st
 
 from chess_teacher.utils.chess_bots import BOT_PRESETS, ChessBot
@@ -10,16 +14,22 @@ from streamlit_utils.page_config import configure_page
 from streamlit_utils.page_logging import log_page_view, log_user_action
 from streamlit_utils.play_game import (
     PlayGameState,
-    apply_bot_move,
-    apply_legal_move,
+    apply_uci_move,
+    apply_user_board_event,
+    bot_job_matches_state,
+    choose_bot_move_uci,
     close_bot,
     create_bot,
     game_status_message,
+    is_bot_thinking,
+    is_game_finished,
     is_user_turn,
-    move_from_board_event,
     orientation_for_user,
+    resign_game,
     start_new_game,
+    state_fen,
     user_color_label,
+    user_won,
 )
 
 configure_page("Play")
@@ -30,7 +40,10 @@ st.title("Play a game of chess")
 
 _PLAY_STATE_KEY = "play_game_state"
 _PLAY_BOT_KEY = "play_game_bot"
+_PLAY_BOT_LOCK_KEY = "play_bot_lock"
+_PLAY_BOT_JOB_KEY = "play_bot_job"
 _PLAY_WIN_CELEBRATED_KEY = "play_win_celebrated_instance"
+_BOT_POLL_INTERVAL = timedelta(milliseconds=400)
 
 _PLAY_STATUS_CSS = """
 div[class*="st-key-play_board_status"] {
@@ -62,22 +75,26 @@ def _set_bot(bot: ChessBot | None) -> None:
     st.session_state[_PLAY_BOT_KEY] = bot
 
 
+def _bot_lock() -> threading.Lock:
+    if _PLAY_BOT_LOCK_KEY not in st.session_state:
+        st.session_state[_PLAY_BOT_LOCK_KEY] = threading.Lock()
+    return st.session_state[_PLAY_BOT_LOCK_KEY]
+
+
+def _clear_bot_job() -> None:
+    st.session_state.pop(_PLAY_BOT_JOB_KEY, None)
+
+
 def _reset_game() -> None:
     close_bot(_get_bot())
     _set_bot(None)
     _set_state(None)
+    _clear_bot_job()
     st.session_state.pop(_PLAY_WIN_CELEBRATED_KEY, None)
 
 
-def _user_won(state: PlayGameState) -> bool:
-    if state.resigned or not state.board.is_game_over():
-        return False
-    outcome = state.board.outcome()
-    return outcome is not None and outcome.winner == state.user_color
-
-
 def _maybe_celebrate_win(state: PlayGameState) -> None:
-    if not _user_won(state):
+    if not user_won(state):
         return
     if st.session_state.get(_PLAY_WIN_CELEBRATED_KEY) == state.instance_id:
         return
@@ -93,6 +110,77 @@ def _ensure_bot(state: PlayGameState) -> ChessBot:
         _set_bot(bot)
         st.session_state["play_game_bot_preset"] = state.preset_key
     return bot
+
+
+def _bot_worker(job: dict[str, Any], bot: ChessBot, lock: threading.Lock) -> None:
+    """Run engine search off the Streamlit script thread to avoid the page dim overlay."""
+    try:
+        with lock:
+            job["uci"] = choose_bot_move_uci(bot, str(job["fen"]))
+    except Exception as exc:
+        job["error"] = str(exc)
+    finally:
+        job["done"] = True
+
+
+def _ensure_bot_job(state: PlayGameState, bot: ChessBot) -> dict[str, Any]:
+    fen = state_fen(state)
+    job = st.session_state.get(_PLAY_BOT_JOB_KEY)
+    if isinstance(job, dict) and bot_job_matches_state(job, state):
+        return job
+
+    job = {
+        "instance_id": state.instance_id,
+        "fen": fen,
+        "done": False,
+        "uci": None,
+        "error": None,
+    }
+    st.session_state[_PLAY_BOT_JOB_KEY] = job
+    thread = threading.Thread(
+        target=_bot_worker,
+        args=(job, bot, _bot_lock()),
+        daemon=True,
+        name="play-bot-move",
+    )
+    thread.start()
+    return job
+
+
+@st.fragment(run_every=_BOT_POLL_INTERVAL)
+def _poll_bot_job() -> None:
+    """Poll background search; full-app rerun only when a move is ready."""
+    state = _get_state()
+    if state is None:
+        return
+
+    job = st.session_state.get(_PLAY_BOT_JOB_KEY)
+    if not isinstance(job, dict) or not job.get("done"):
+        return
+    if not bot_job_matches_state(job, state):
+        return
+
+    error = job.get("error")
+    if error:
+        _clear_bot_job()
+        st.error(f"Bot failed to move: {error}")
+        return
+
+    uci = job.get("uci")
+    if not isinstance(uci, str) or not uci:
+        _clear_bot_job()
+        return
+
+    try:
+        next_state = apply_uci_move(state, uci)
+    except ValueError as exc:
+        _clear_bot_job()
+        st.error(str(exc))
+        return
+
+    _clear_bot_job()
+    _set_state(next_state)
+    st.rerun()
 
 
 def _render_setup() -> None:
@@ -113,6 +201,7 @@ def _render_setup() -> None:
     if submitted:
         state = start_new_game(color_choice, preset_key)
         _set_state(state)
+        _clear_bot_job()
         _ensure_bot(state)
         log_user_action(
             f"Started play game color={color_choice} preset={preset_key}",
@@ -129,7 +218,7 @@ def _render_active_game(state: PlayGameState) -> None:
 
     status = game_status_message(state)
     bot = _ensure_bot(state)
-    thinking = state.pending_bot_move and not state.board.is_game_over() and not state.resigned
+    thinking = is_bot_thinking(state)
 
     ingest_css(_PLAY_STATUS_CSS)
     with st.container(key="play_board_status"):
@@ -143,12 +232,10 @@ def _render_active_game(state: PlayGameState) -> None:
     _maybe_celebrate_win(state)
 
     if thinking:
-        state = apply_bot_move(state, bot)
-        _set_state(state)
-        st.rerun()
+        _ensure_bot_job(state, bot)
 
     board_event = chess_board(
-        state.board,
+        state_fen(state),
         key="play_chess_board",
         orientation=orientation_for_user(state.user_color),
         disabled=not is_user_turn(state),
@@ -157,15 +244,17 @@ def _render_active_game(state: PlayGameState) -> None:
         height=520,
     )
 
-    move = move_from_board_event(state.board, board_event) if board_event else None
-    if move is not None and is_user_turn(state):
-        try:
-            state = apply_legal_move(state, move)
-            _set_state(state)
-            log_user_action(f"Play page user move={move.uci()}", user)
-            st.rerun()
-        except ValueError as exc:
-            st.error(str(exc))
+    try:
+        applied = apply_user_board_event(state, board_event)
+    except ValueError as exc:
+        st.error(str(exc))
+        applied = None
+    if applied is not None:
+        state, move_uci = applied
+        _set_state(state)
+        _clear_bot_job()
+        log_user_action(f"Play page user move={move_uci}", user)
+        st.rerun()
 
     cols = st.columns(2)
     with cols[0]:
@@ -174,21 +263,16 @@ def _render_active_game(state: PlayGameState) -> None:
             _reset_game()
             st.rerun()
     with cols[1]:
-        if st.button(
-            "Resign", width="stretch", disabled=state.resigned or state.board.is_game_over()
-        ):
+        if st.button("Resign", width="stretch", disabled=is_game_finished(state)):
             log_user_action("Play page resignation", user)
-            resigned_state = PlayGameState(
-                board=state.board.copy(),
-                user_color=state.user_color,
-                preset_key=state.preset_key,
-                last_move_uci=state.last_move_uci,
-                instance_id=state.instance_id,
-                pending_bot_move=False,
-                resigned=True,
-            )
-            _set_state(resigned_state)
+            _clear_bot_job()
+            _set_state(resign_game(state))
             st.rerun()
+
+    # Poll after board/buttons. run_every (not scope=fragment) — first fragment
+    # invocation during a full script run cannot use scope="fragment".
+    if thinking:
+        _poll_bot_job()
 
 
 def _render_page() -> None:

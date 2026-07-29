@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import random
 from dataclasses import dataclass
+from typing import Any
 
 import chess
 
@@ -38,12 +39,31 @@ def orientation_for_user(user_color: chess.Color) -> str:
     return "white" if user_color == chess.WHITE else "black"
 
 
+def state_fen(state: PlayGameState) -> str:
+    return state.board.fen(en_passant="fen")
+
+
 def is_user_turn(state: PlayGameState) -> bool:
     return (
         not state.resigned
         and state.board.turn == state.user_color
         and not state.board.is_game_over()
     )
+
+
+def is_bot_thinking(state: PlayGameState) -> bool:
+    return state.pending_bot_move and not state.board.is_game_over() and not state.resigned
+
+
+def is_game_finished(state: PlayGameState) -> bool:
+    return state.resigned or state.board.is_game_over()
+
+
+def user_won(state: PlayGameState) -> bool:
+    if state.resigned or not state.board.is_game_over():
+        return False
+    outcome = state.board.outcome()
+    return outcome is not None and outcome.winner == state.user_color
 
 
 def create_bot(preset_key: str) -> ChessBot:
@@ -68,6 +88,18 @@ def start_new_game(user_color_choice: str, preset_key: str) -> PlayGameState:
     )
 
 
+def resign_game(state: PlayGameState) -> PlayGameState:
+    return PlayGameState(
+        board=state.board.copy(),
+        user_color=state.user_color,
+        preset_key=state.preset_key,
+        last_move_uci=state.last_move_uci,
+        instance_id=state.instance_id,
+        pending_bot_move=False,
+        resigned=True,
+    )
+
+
 def apply_legal_move(state: PlayGameState, move: chess.Move) -> PlayGameState:
     if move not in state.board.legal_moves:
         raise ValueError(f"Illegal move: {move.uci()}")
@@ -81,6 +113,10 @@ def apply_legal_move(state: PlayGameState, move: chess.Move) -> PlayGameState:
         pending_bot_move=not state.board.is_game_over() and state.board.turn != state.user_color,
         resigned=state.resigned,
     )
+
+
+def apply_uci_move(state: PlayGameState, uci: str) -> PlayGameState:
+    return apply_legal_move(state, parse_move_uci(state.board, uci))
 
 
 def apply_bot_move(state: PlayGameState, bot: ChessBot) -> PlayGameState:
@@ -118,6 +154,12 @@ def apply_bot_move(state: PlayGameState, bot: ChessBot) -> PlayGameState:
     )
 
 
+def choose_bot_move_uci(bot: ChessBot, fen: str) -> str:
+    """Pick a legal move for ``fen`` and return its UCI (for background bot jobs)."""
+    board = chess.Board(fen)
+    return bot.choose_move(board).uci()
+
+
 def parse_move_uci(board: chess.Board, uci: str) -> chess.Move:
     move = chess.Move.from_uci(uci)
     if move not in board.legal_moves:
@@ -141,17 +183,37 @@ def game_status_message(state: PlayGameState) -> str | None:
     if outcome.winner is None:
         return f"Draw ({outcome.termination.name.replace('_', ' ').lower()})."
 
-    user_won = outcome.winner == user_color
+    user_won_game = outcome.winner == user_color
     termination = outcome.termination.name.replace("_", " ").lower()
-    if user_won:
+    if user_won_game:
         return f"You win by {termination}!"
     return f"You lose by {termination}."
 
 
-def move_from_board_event(board: chess.Board, event: dict[str, object]) -> chess.Move | None:
+def move_from_board_event(
+    state: PlayGameState, event: dict[str, object] | None
+) -> chess.Move | None:
+    if event is None:
+        return None
     uci = event.get("uci")
     if not isinstance(uci, str) or not uci:
         return None
     if event.get("kind") == "size":
         return None
-    return parse_move_uci(board, uci)
+    return parse_move_uci(state.board, uci)
+
+
+def apply_user_board_event(
+    state: PlayGameState, event: dict[str, object] | None
+) -> tuple[PlayGameState, str] | None:
+    """Apply a legal user board event. Returns ``(new_state, uci)`` or ``None``."""
+    if not is_user_turn(state):
+        return None
+    move = move_from_board_event(state, event)
+    if move is None:
+        return None
+    return apply_legal_move(state, move), move.uci()
+
+
+def bot_job_matches_state(job: dict[str, Any], state: PlayGameState) -> bool:
+    return job.get("instance_id") == state.instance_id and job.get("fen") == state_fen(state)

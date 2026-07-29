@@ -24,7 +24,7 @@ USER_ACCOUNTS_TTL_SECONDS = 1800
 ADMIN_LOG_AGGREGATES_TTL_SECONDS = 3600
 
 _UNSET = object()
-_cache_client: CacheClient | None | object = _UNSET
+_cache_client: CacheClient | object | None = _UNSET
 
 
 def user_games_cache_key(user_id: str) -> str:
