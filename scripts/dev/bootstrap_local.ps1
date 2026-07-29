@@ -39,11 +39,16 @@ foreach ($service in $services) {
 Write-Host "Waiting for minio-init to complete..." -ForegroundColor DarkGray
 $initDone = $false
 for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
-    $initStatus = & docker --context desktop-linux compose -f $composeInfra ps --format json minio-init 2>$null
+    # -a: one-shot init container exits after creating the bucket; default ps hides it.
+    $initStatus = & docker --context desktop-linux compose -f $composeInfra ps -a --format json minio-init 2>$null
     if ($initStatus) {
         $row = $initStatus | ConvertFrom-Json
         $state = if ($row -is [array]) { $row[0].State } else { $row.State }
+        $exitCode = if ($row -is [array]) { $row[0].ExitCode } else { $row.ExitCode }
         if ($state -eq "exited") {
+            if ($exitCode -ne 0) {
+                throw "minio-init exited with code $exitCode."
+            }
             $initDone = $true
             break
         }

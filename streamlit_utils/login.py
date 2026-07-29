@@ -56,8 +56,8 @@ class LoginScreen:
         return user
 
     def display(self):
-        self.logger.info("Login screen started.")
         if not st_user_is_logged_in():
+            self.logger.info("Login screen started.")
             apply_app_theme(None)
             st.header("Log in to app")
             if st.button("Log in with Google"):
