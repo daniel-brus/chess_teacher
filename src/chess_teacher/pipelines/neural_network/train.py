@@ -21,7 +21,7 @@ HEAD_TYPE_POLICY = "policy"
 
 def _masked_sparse_categorical_crossentropy(vocab_size: int = POLICY_VOCAB_SIZE):
     """Build loss: ``y_true`` is ``(batch, V+1)`` = legal mask floats + class index."""
-    import tensorflow as tf
+    import tensorflow as tf  # type: ignore[import-untyped]
 
     def loss_fn(y_true: Any, y_pred: Any) -> Any:
         mask = y_true[:, :vocab_size]
@@ -37,7 +37,7 @@ def _masked_sparse_categorical_crossentropy(vocab_size: int = POLICY_VOCAB_SIZE)
 
 
 def _masked_top_k_accuracy(k: int, vocab_size: int = POLICY_VOCAB_SIZE):
-    import tensorflow as tf
+    import tensorflow as tf  # type: ignore[import-untyped]
 
     def metric_fn(y_true: Any, y_pred: Any) -> Any:
         mask = y_true[:, :vocab_size]
@@ -73,7 +73,7 @@ def load_policy_keras(
     compile_model: bool = False,
 ) -> Any:
     """Load a ``.keras`` policy model with masked CE custom objects."""
-    from tensorflow import keras
+    from tensorflow import keras  # type: ignore[import-untyped]
 
     return keras.models.load_model(
         path,
@@ -148,9 +148,9 @@ class BaselineTrainer:
 
     def build(self, input_dim: int, output_dim: int | None = None) -> Any:
         """Small MLP: state → policy logits over fixed move vocab."""
-        from tensorflow import keras
-        from tensorflow.keras import layers
+        from tensorflow import keras  # type: ignore[import-untyped]
 
+        layers = keras.layers
         out_dim = int(output_dim or self.vocab_size)
         inputs = keras.Input(shape=(input_dim,), name="state")
         x = layers.Dense(self.hidden, activation="relu")(inputs)
@@ -175,7 +175,7 @@ class BaselineTrainer:
         weights_path: Path | None = None,
     ) -> Any:
         """Load Keras weights if policy-compatible; else cold-start."""
-        from tensorflow import keras
+        from tensorflow import keras  # type: ignore[import-untyped]
 
         out_dim = int(output_dim or self.vocab_size)
         if weights_path is not None and weights_path.is_file():

@@ -106,7 +106,7 @@ class ActionMaeScorer(ModelScorer):
         if not datums:
             raise ValueError("ActionMaeScorer.score requires a non-empty eval set")
 
-        from tensorflow import keras
+        from tensorflow import keras  # type: ignore[import-untyped]
 
         weights_path = self._tracker.require_keras_weights(model_uri)
         model = keras.models.load_model(weights_path)

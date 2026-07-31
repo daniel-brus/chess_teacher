@@ -133,13 +133,16 @@ def list_baseline_presets(db_client: DatabaseClient) -> list[BotPreset]:
 
     presets: list[BotPreset] = []
     for row in rows:
+        model_uri = row.model_uri
+        if model_uri is None:
+            continue
         status_label = "current" if row.status == BaselineModelStatus.PRODUCTION else "archived"
         presets.append(
             BotPreset(
                 key=baseline_preset_key(row.version),
                 label=f"Baseline {row.version}",
                 description=f"Neural policy ({status_label}).",
-                factory=_baseline_factory(row.model_uri, row.version),
+                factory=_baseline_factory(model_uri, row.version),
             )
         )
     return presets

@@ -11,6 +11,8 @@ Planes per from-square:
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+
 import chess
 import numpy as np
 
@@ -203,7 +205,7 @@ class MoveEncoder:
         return MoveEncoder.mask_from_ucis(m.uci() for m in board.legal_moves)
 
     @staticmethod
-    def mask_from_ucis(legal_ucis: list[str] | tuple[str, ...] | object) -> np.ndarray:
+    def mask_from_ucis(legal_ucis: Iterable[str]) -> np.ndarray:
         mask = np.zeros(POLICY_VOCAB_SIZE, dtype=np.bool_)
         for uci in legal_ucis:
             try:

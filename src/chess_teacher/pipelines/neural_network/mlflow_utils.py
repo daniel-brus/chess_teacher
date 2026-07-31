@@ -54,8 +54,8 @@ class MLflowTracker:
         self.tracking_uri = (
             tracking_uri or os.getenv("MLFLOW_TRACKING_URI") or postgres_url_string()
         )
-        self.experiment_name = experiment_name or os.getenv(
-            "MLFLOW_EXPERIMENT_NAME", self.DEFAULT_EXPERIMENT
+        self.experiment_name: str = (
+            experiment_name or os.getenv("MLFLOW_EXPERIMENT_NAME") or self.DEFAULT_EXPERIMENT
         )
 
     @staticmethod
