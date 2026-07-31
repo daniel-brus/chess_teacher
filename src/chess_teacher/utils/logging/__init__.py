@@ -1,4 +1,13 @@
-"""Application logging: configuration, buffering, and shipping."""
+"""Application logging: configuration, buffering, and shipping.
+
+Core logging (logger, config, buffer) is a low utils layer.
+Shipping talks to object storage and must not be imported by core at module load —
+import ``chess_teacher.utils.logging.shipping`` or use the lazy re-exports below.
+"""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any
 
 from chess_teacher.utils.logging.buffer import (
     LogBufferWriterLock,
@@ -14,7 +23,9 @@ from chess_teacher.utils.logging.runtime import (
     shutdown_logging,
     start_log_shipping,
 )
-from chess_teacher.utils.logging.shipping import LogShipper, log_storage_key_for_segment
+
+if TYPE_CHECKING:
+    from chess_teacher.utils.logging.shipping import LogShipper
 
 __all__ = [
     "EnhancedLogger",
@@ -31,3 +42,13 @@ __all__ = [
     "shutdown_logging",
     "start_log_shipping",
 ]
+
+_SHIPPING_EXPORTS = frozenset({"LogShipper", "log_storage_key_for_segment"})
+
+
+def __getattr__(name: str) -> Any:
+    if name in _SHIPPING_EXPORTS:
+        from chess_teacher.utils.logging import shipping as _shipping
+
+        return getattr(_shipping, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

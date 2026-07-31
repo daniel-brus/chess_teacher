@@ -6,7 +6,7 @@ from typing import Any
 
 import streamlit as st
 
-from chess_teacher.utils.chess_bots import (
+from chess_teacher.bots import (
     OPPONENT_CATEGORY_LABELS,
     STOCKFISH_DEPTH_DEFAULT,
     STOCKFISH_DEPTH_MAX,

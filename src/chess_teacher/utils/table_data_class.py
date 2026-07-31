@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import MISSING, Field, fields, is_dataclass
-from datetime import UTC, date, datetime, time
+from datetime import date, datetime, time
 from enum import StrEnum
 from pathlib import Path
 from types import UnionType
@@ -23,6 +23,7 @@ from chess_teacher.utils.general_utils import (
     generate_hash,
     generate_ident_is_literal,
     generate_idents_are_literals,
+    get_current_datetime,
 )
 from chess_teacher.utils.logging import get_logger
 from chess_teacher.utils.metadata_utils import TableMetadata
@@ -501,7 +502,7 @@ class TableDataClass(ABC):
                     f"must be one of: {', '.join(allowed_fields)}."
                 )
             )
-        self.upsert_field(db_client, field, ts or datetime.now(UTC))
+        self.upsert_field(db_client, field, ts or get_current_datetime())
 
     def delete_from_db(self, db_client: DatabaseClient) -> None:
         try:

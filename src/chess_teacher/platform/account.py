@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal, Self
 
 from chess_teacher.utils.object_storage.images import asset_image_key
 from chess_teacher.utils.table_data_class import TableDataClass
@@ -50,6 +50,30 @@ class Account(TableDataClass):
             account_id=cls.generate_id({"username": username, "platform": platform}),
             username=username,
             platform=platform,
+        )
+
+    def to_cache_dict(self) -> dict[str, Any]:
+        """Serialize for Redis / JSON caches (platform layer owns Account shape)."""
+        return {
+            "account_id": self.account_id,
+            "username": self.username,
+            "platform": self.platform.value,
+            "latest_ingestion": (
+                self.latest_ingestion.isoformat() if self.latest_ingestion is not None else None
+            ),
+        }
+
+    @classmethod
+    def from_cache_dict(cls, data: dict[str, Any]) -> Self:
+        """Restore from ``to_cache_dict`` payload."""
+        latest_ingestion = data.get("latest_ingestion")
+        return cls(
+            account_id=data["account_id"],
+            username=data["username"],
+            platform=AccountPlatform(data["platform"]),
+            latest_ingestion=(
+                datetime.fromisoformat(latest_ingestion) if latest_ingestion is not None else None
+            ),
         )
 
     @classmethod

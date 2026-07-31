@@ -10,7 +10,10 @@ import chess
 import chess.pgn
 import polars as pl
 
-from chess_teacher.other.chess_com_openings import load_slug_title_lookup
+from chess_teacher.other.chess_com_openings import (
+    chess_com_opening_slug_from_eco_url,
+    load_slug_title_lookup,
+)
 from chess_teacher.platform.account import AccountPlatform
 from chess_teacher.utils.chess_utils import Color, Reason, Result
 from chess_teacher.utils.exception_utils import DataError, TransformationError
@@ -419,9 +422,7 @@ class ExtractGameMetadataTransformation(DataFrameTransformation):
             "start_time": start_time,
             "end_time": cls._unix_seconds_to_datetime(end_time_unix_s),
             "eco_code": parse_pgn_tag(cls._PGN_ECO_RE, raw_pgn),
-            "chess_com_opening_slug": ApplyChessComOpeningLookupTransformation._chess_com_opening_slug_from_eco_url(
-                eco_url_tag
-            ),
+            "chess_com_opening_slug": chess_com_opening_slug_from_eco_url(eco_url_tag),
             "platform_opening_name": None,
         }
 
@@ -1095,22 +1096,6 @@ class ApplyChessComOpeningLookupTransformation(DataFrameTransformation):
     SLUG_COLUMN = "chess_com_opening_slug"
     OUTPUT_COLUMN = "opening_name"
     FAMILY_COLUMN = "opening_family"
-    _CHESS_COM_OPENINGS_PATH = "/openings/"
-    _PGN_ECO_URL_SLUG_RE = re.compile(r'\[ECOUrl\s+"([^"]+)"\]', re.IGNORECASE)
-
-    @classmethod
-    def _chess_com_opening_slug_from_eco_url(cls, eco_url: str | None) -> str | None:
-        if not eco_url or cls._CHESS_COM_OPENINGS_PATH not in eco_url:
-            return None
-        slug = eco_url.rstrip("/").split(cls._CHESS_COM_OPENINGS_PATH, maxsplit=1)[-1]
-        return slug or None
-
-    @classmethod
-    def _chess_com_opening_slug_from_pgn(cls, pgn: str | None) -> str | None:
-        if not pgn:
-            return None
-        match = cls._PGN_ECO_URL_SLUG_RE.search(pgn)
-        return cls._chess_com_opening_slug_from_eco_url(match.group(1)) if match else None
 
     def __init__(self, lookup: dict[str, str] | None = None) -> None:
         self._lookup = lookup

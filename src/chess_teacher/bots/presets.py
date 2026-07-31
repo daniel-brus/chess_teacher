@@ -4,9 +4,9 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
 
-from chess_teacher.utils.chess_bots.base import ChessBot
-from chess_teacher.utils.chess_bots.random_bot import RandomBot
-from chess_teacher.utils.chess_bots.stockfish_bot import StockfishBot
+from chess_teacher.bots.base import ChessBot
+from chess_teacher.bots.random_bot import RandomBot
+from chess_teacher.bots.stockfish_bot import StockfishBot
 from chess_teacher.utils.db.client import DatabaseClient
 from chess_teacher.utils.exception_utils import ConfigError, DatabaseError, MetadataError
 from chess_teacher.utils.logging import get_logger
@@ -72,7 +72,7 @@ def _stockfish_preset(depth: int) -> BotPreset:
 
 def _baseline_factory(model_uri: str, version: str) -> Callable[[], ChessBot]:
     def factory() -> ChessBot:
-        from chess_teacher.utils.chess_bots.neural_baseline_bot import NeuralBaselineBot
+        from chess_teacher.bots.neural_baseline_bot import NeuralBaselineBot
 
         return NeuralBaselineBot(model_uri=model_uri, version=version)
 

@@ -12,8 +12,6 @@ from chess_teacher.platform.account import Account, AccountPlatform
 from chess_teacher.utils import cache_utils
 from chess_teacher.utils.cache_utils import (
     RedisCacheClient,
-    _account_from_cache_dict,
-    _account_to_cache_dict,
     _decode_polars,
     _encode_polars,
     _redis_endpoint_label,
@@ -59,12 +57,12 @@ class TestAccountSerialization:
             platform=AccountPlatform.CHESS_COM,
             latest_ingestion=datetime(2024, 1, 2, 3, 4, 5, tzinfo=UTC),
         )
-        restored = _account_from_cache_dict(_account_to_cache_dict(account))
+        restored = Account.from_cache_dict(account.to_cache_dict())
         assert restored == account
 
     def test_round_trip_without_latest_ingestion(self):
         account = Account.from_username_and_platform("hikaru", AccountPlatform.LICHESS)
-        restored = _account_from_cache_dict(_account_to_cache_dict(account))
+        restored = Account.from_cache_dict(account.to_cache_dict())
         assert restored == account
 
 
@@ -98,7 +96,7 @@ class TestRedisCacheClient:
         cache = RedisCacheClient(redis_client, endpoint="test-host:6379")
 
         account = Account.from_username_and_platform("hikaru", AccountPlatform.CHESS_COM)
-        cache.set_user_accounts("user1", [account])
+        cache.set_user_accounts("user1", [account.to_cache_dict()])
 
         set_args = redis_client.set.call_args
         assert set_args.args[0] == user_accounts_cache_key("user1")
@@ -106,7 +104,7 @@ class TestRedisCacheClient:
 
         stored = set_args.args[1].decode("utf-8")
         redis_client.get.return_value = stored.encode("utf-8")
-        assert cache.get_user_accounts("user1") == [account]
+        assert cache.get_user_accounts("user1") == [account.to_cache_dict()]
 
     def test_set_and_get_user_games(self):
         redis_client = MagicMock()

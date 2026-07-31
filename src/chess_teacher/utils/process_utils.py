@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-import os
 import sys
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, NoReturn
+
+from chess_teacher.utils.env_utils import get_environment, get_hostname
 
 if TYPE_CHECKING:
     from chess_teacher.utils.logging.logger import EnhancedLogger
@@ -31,8 +32,8 @@ def log_script_runtime_context(logger: EnhancedLogger, *, script: str) -> None:
     logger.info(
         "%s runtime context environment=%s hostname=%s",
         script,
-        os.getenv("ENVIRONMENT") or "unknown",
-        os.getenv("HOSTNAME") or "unknown",
+        get_environment() or "unknown",
+        get_hostname() or "unknown",
     )
 
 
@@ -80,7 +81,7 @@ class WorkerSafeLogger:
             if not is_parent_process():
                 self._logger = WORKER_NO_OP_LOGGER
             else:
-                from chess_teacher.utils.logging import get_logger
+                from chess_teacher.utils.logging.config import get_logger
 
                 self._logger = get_logger(self._name)
         return self._logger

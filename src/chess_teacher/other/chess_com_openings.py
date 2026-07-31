@@ -23,6 +23,8 @@ _CHESS_COM_OPENING_TITLE_RE = re.compile(
     re.IGNORECASE,
 )
 _CHESS_COM_TITLE_SUFFIX_RE = re.compile(r"\s*-\s*Chess Openings.*$", re.IGNORECASE)
+_CHESS_COM_OPENINGS_PATH = "/openings/"
+_PGN_ECO_URL_SLUG_RE = re.compile(r'\[ECOUrl\s+"([^"]+)"\]', re.IGNORECASE)
 _CHESS_COM_REQUEST_HEADERS = {
     "User-Agent": "chess-teacher/1.0 (opening-slug-lookup)",
 }
@@ -35,6 +37,22 @@ class SlugLookupRefreshResult:
     already_cached: int
     fetched: int
     unresolved: int
+
+
+def chess_com_opening_slug_from_eco_url(eco_url: str | None) -> str | None:
+    """Extract a Chess.com openings slug from an ECOUrl value."""
+    if not eco_url or _CHESS_COM_OPENINGS_PATH not in eco_url:
+        return None
+    slug = eco_url.rstrip("/").split(_CHESS_COM_OPENINGS_PATH, maxsplit=1)[-1]
+    return slug or None
+
+
+def chess_com_opening_slug_from_pgn(pgn: str | None) -> str | None:
+    """Extract a Chess.com openings slug from a PGN ``ECOUrl`` tag."""
+    if not pgn:
+        return None
+    match = _PGN_ECO_URL_SLUG_RE.search(pgn)
+    return chess_com_opening_slug_from_eco_url(match.group(1)) if match else None
 
 
 def fetch_chess_com_opening_title(
@@ -78,9 +96,6 @@ def load_slug_title_lookup(db_client: DatabaseClient | None = None) -> dict[str,
 def collect_distinct_slugs_from_database(db_client: DatabaseClient) -> set[str]:
     """Collect every Chess.com opening slug seen in ``games.games``."""
     from chess_teacher.pipelines.preprocessing.games import Game
-    from chess_teacher.pipelines.preprocessing.transformations import (
-        ApplyChessComOpeningLookupTransformation,
-    )
 
     metadata = Game.get_metadata()
     db_client.ensure_metadata(metadata)
@@ -105,9 +120,7 @@ def collect_distinct_slugs_from_database(db_client: DatabaseClient) -> set[str]:
     )
     if not pgn_rows.is_empty():
         for raw_pgn in pgn_rows["raw_pgn"].drop_nulls().to_list():
-            slug = ApplyChessComOpeningLookupTransformation._chess_com_opening_slug_from_pgn(
-                raw_pgn
-            )
+            slug = chess_com_opening_slug_from_pgn(raw_pgn)
             if slug:
                 slugs.add(slug)
 

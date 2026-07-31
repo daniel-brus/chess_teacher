@@ -9,17 +9,14 @@ import threading
 from pathlib import Path
 
 from chess_teacher.utils.logging.buffer import SegmentFileHandler
-from chess_teacher.utils.logging.shipping import (
-    SHIP_SHUTDOWN_TIMEOUT_SECONDS,
-    LogShipper,
-    is_log_ship_enabled,
-)
 from chess_teacher.utils.process_utils import is_parent_process
 
 _configure_lock = threading.Lock()
 _logging_configured = False
 
-_shipper: LogShipper | None = None
+# Shipper type is intentionally not imported at module load: shipping → object_storage
+# sits above core logging in the utils DAG. Import shipping only inside ship lifecycle fns.
+_shipper: object | None = None
 _segment_handler: SegmentFileHandler | None = None
 _shutdown_registered = False
 _shutdown_done = False
@@ -74,9 +71,11 @@ def attach_handlers(
             start_log_shipping(buffer_dir)
 
 
-def start_log_shipping(buffer_dir: Path) -> LogShipper | None:
+def start_log_shipping(buffer_dir: Path) -> object | None:
     """Start the background log shipper if enabled."""
     global _shipper
+    from chess_teacher.utils.logging.shipping import LogShipper, is_log_ship_enabled
+
     if not is_log_ship_enabled():
         return None
     if _shipper is None:
@@ -120,6 +119,8 @@ def shutdown_logging() -> None:
             _segment_handler.close_active_segment()
 
         if _shipper is not None:
+            from chess_teacher.utils.logging.shipping import SHIP_SHUTDOWN_TIMEOUT_SECONDS
+
             _shipper.stop_and_drain(SHIP_SHUTDOWN_TIMEOUT_SECONDS)
             _shipper = None
 

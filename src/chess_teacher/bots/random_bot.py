@@ -4,7 +4,7 @@ import random
 
 import chess
 
-from chess_teacher.utils.chess_bots.base import ChessBot
+from chess_teacher.bots.base import ChessBot
 
 
 class RandomBot(ChessBot):

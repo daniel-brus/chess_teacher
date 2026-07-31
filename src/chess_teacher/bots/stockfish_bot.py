@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import chess
 
-from chess_teacher.utils.chess_bots.base import ChessBot
+from chess_teacher.bots.base import ChessBot
 from chess_teacher.utils.chess_utils import StockfishEngine
 
 

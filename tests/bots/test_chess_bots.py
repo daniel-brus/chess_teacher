@@ -3,7 +3,7 @@ from __future__ import annotations
 import chess
 import pytest
 
-from chess_teacher.utils.chess_bots import RandomBot, get_bot_preset
+from chess_teacher.bots import RandomBot, get_bot_preset
 from streamlit_utils.play_game import (
     apply_bot_move,
     apply_uci_move,

@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from chess_teacher.utils.chess_bots.base import ChessBot
-from chess_teacher.utils.chess_bots.presets import (
+from chess_teacher.bots.base import ChessBot
+from chess_teacher.bots.presets import (
     BASELINE_PRESET_PREFIX,
     BOT_PRESET_BY_KEY,
     BOT_PRESETS,
@@ -25,11 +25,11 @@ from chess_teacher.utils.chess_bots.presets import (
     list_play_presets,
     stockfish_preset_key,
 )
-from chess_teacher.utils.chess_bots.random_bot import RandomBot
-from chess_teacher.utils.chess_bots.stockfish_bot import StockfishBot
+from chess_teacher.bots.random_bot import RandomBot
+from chess_teacher.bots.stockfish_bot import StockfishBot
 
 if TYPE_CHECKING:
-    from chess_teacher.utils.chess_bots.neural_baseline_bot import NeuralBaselineBot
+    from chess_teacher.bots.neural_baseline_bot import NeuralBaselineBot
 
 __all__ = [
     "BASELINE_PRESET_PREFIX",
@@ -59,7 +59,7 @@ __all__ = [
 
 def __getattr__(name: str) -> Any:
     if name == "NeuralBaselineBot":
-        from chess_teacher.utils.chess_bots.neural_baseline_bot import NeuralBaselineBot
+        from chess_teacher.bots.neural_baseline_bot import NeuralBaselineBot
 
         return NeuralBaselineBot
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

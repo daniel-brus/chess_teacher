@@ -6,7 +6,7 @@ from typing import Any
 
 import chess
 
-from chess_teacher.utils.chess_bots import ChessBot, get_bot_preset
+from chess_teacher.bots import ChessBot, get_bot_preset
 from chess_teacher.utils.db.client import DatabaseClient, get_db_client
 
 

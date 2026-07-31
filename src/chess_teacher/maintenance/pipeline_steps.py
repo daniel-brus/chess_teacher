@@ -1,8 +1,8 @@
 from datetime import date, timedelta
-from pathlib import PurePosixPath
 
 import polars as pl
 
+from chess_teacher.maintenance import log_paths
 from chess_teacher.maintenance.dataclasses import (
     ExceptionHourlyCount,
     LogLevelHourlyCount,
@@ -78,10 +78,9 @@ class DeleteOldRecordsStep(PipelineStep):
 class LoadRawLogsStep(StorageToTableStep):
     """Load shipped JSON-lines log segments from object storage into logs.raw_logs."""
 
-    CLOSED_LOG_STORAGE_PREFIX = "logs/python/buffer/closed"
+    CLOSED_LOG_STORAGE_PREFIX = log_paths.CLOSED_LOG_STORAGE_PREFIX
     QUARANTINE_LOG_STORAGE_PREFIX = "logs/python/quarantine"
     LOG_FILE_SUFFIX = "log"
-    _UNKNOWN_HOSTNAME = "unknown"
 
     def __init__(self, *, storage: ObjectStorage | None = None) -> None:
         super().__init__(
@@ -105,10 +104,7 @@ class LoadRawLogsStep(StorageToTableStep):
     @staticmethod
     def relative_closed_log_key(source_file: str) -> str:
         """Return the path under ``CLOSED_LOG_STORAGE_PREFIX`` for a storage key."""
-        prefix = f"{LoadRawLogsStep.CLOSED_LOG_STORAGE_PREFIX}/"
-        if source_file.startswith(prefix):
-            return source_file[len(prefix) :]
-        return source_file
+        return log_paths.relative_closed_log_key(source_file)
 
     @staticmethod
     def parse_closed_log_hostname(source_file: str) -> str:
@@ -117,13 +113,7 @@ class LoadRawLogsStep(StorageToTableStep):
 
         Expected layout: ``.../closed/{YYYY}/{MM}/{DD}/{hostname}/{segment}.log``
         """
-        relative = LoadRawLogsStep.relative_closed_log_key(source_file)
-        if DeleteOldS3LogFilesStep.parse_closed_log_path_date(relative) is None:
-            return LoadRawLogsStep._UNKNOWN_HOSTNAME
-        parts = PurePosixPath(relative).parts
-        if len(parts) >= 4:
-            return parts[3]
-        return LoadRawLogsStep._UNKNOWN_HOSTNAME
+        return log_paths.parse_closed_log_hostname(source_file)
 
     def _load_records(self, db_client: DatabaseClient, context: PipelineContext) -> pl.DataFrame:
         storage = self._get_storage()
@@ -280,7 +270,7 @@ class DeleteOldWarningErrorLogsStep(DeleteOldRecordsStep):
 class DeleteOldS3LogFilesStep(PipelineStep):
     """Delete shipped log segments older than the retention window (by path date)."""
 
-    CLOSED_LOG_STORAGE_PREFIX = "logs/python/buffer/closed"
+    CLOSED_LOG_STORAGE_PREFIX = log_paths.CLOSED_LOG_STORAGE_PREFIX
     LOG_FILE_SUFFIX = "log"
 
     def __init__(self, *, storage: ObjectStorage | None = None) -> None:
@@ -294,13 +284,7 @@ class DeleteOldS3LogFilesStep(PipelineStep):
 
         Expected layout: ``{YYYY}/{MM}/{DD}/{hostname}/{segment}.log``
         """
-        parts = PurePosixPath(relative_key).parts
-        if len(parts) < 4:
-            return None
-        try:
-            return date(int(parts[0]), int(parts[1]), int(parts[2]))
-        except ValueError:
-            return None
+        return log_paths.parse_closed_log_path_date(relative_key)
 
     def _get_storage(self) -> ObjectStorage:
         return self._storage if self._storage is not None else get_raw_storage()

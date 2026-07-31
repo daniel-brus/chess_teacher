@@ -5,6 +5,7 @@ from __future__ import annotations
 import chess
 import numpy as np
 
+from chess_teacher.bots.base import ChessBot
 from chess_teacher.pipelines.neural_network.live_state import LiveStateEncoder
 from chess_teacher.pipelines.neural_network.mlflow_utils import MLflowTracker
 from chess_teacher.pipelines.neural_network.move_encoding import (
@@ -12,7 +13,6 @@ from chess_teacher.pipelines.neural_network.move_encoding import (
     select_move_from_logits,
 )
 from chess_teacher.pipelines.neural_network.train import load_policy_from_uri
-from chess_teacher.utils.chess_bots.base import ChessBot
 from chess_teacher.utils.logging import get_logger
 
 logger = get_logger()

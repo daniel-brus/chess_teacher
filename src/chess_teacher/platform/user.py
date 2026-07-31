@@ -250,9 +250,9 @@ class User(TableDataClass):
         """Fetch platform accounts linked to this user via the bridge table."""
         cache = get_cache_client()
         if cache is not None:
-            cached_accounts = cache.get_user_accounts(self.user_id)
-            if cached_accounts is not None:
-                return cached_accounts
+            cached_payload = cache.get_user_accounts(self.user_id)
+            if cached_payload is not None:
+                return [Account.from_cache_dict(item) for item in cached_payload]
 
         accounts = self._load_linked_accounts_from_db(db_client)
         logger.info(
@@ -262,7 +262,10 @@ class User(TableDataClass):
         )
 
         if cache is not None:
-            cache.set_user_accounts(self.user_id, accounts)
+            cache.set_user_accounts(
+                self.user_id,
+                [account.to_cache_dict() for account in accounts],
+            )
 
         return accounts
 
