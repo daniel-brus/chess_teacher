@@ -6,6 +6,7 @@ import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from uuid import uuid4
 
 from chess_teacher.utils.db.client import DatabaseClient, get_db_client
@@ -55,6 +56,8 @@ class PipelineContext:
     account_id: str | None = None
     progress_window: ProgressWindow | None = None
     loaded_storage_keys: list[str] = field(default_factory=list)
+    # Mutable bag for cross-step state (frozen dataclass; mutate the dict, not the field).
+    extras: dict[str, Any] = field(default_factory=dict)
 
     def progress_next(self, message: str) -> None:
         if self.progress_window is not None:

@@ -89,6 +89,7 @@ class PipelineRunner:
             account.account_id,
             preprocessing_result.result.value,
         )
+        # Follow-up: run_user_finetune_pipeline(self.user.user_id) after baseline exists.
         return [ingestion_result, preprocessing_result]
 
     def _run_accounts_sequential(self, accounts: list[Account]) -> list[PipelineRunResult]:

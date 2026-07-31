@@ -2,10 +2,13 @@
 
 from chess_teacher.utils.object_storage.base import ObjectStorage
 from chess_teacher.utils.object_storage.factory import (
+    S3StorageSettings,
+    build_s3_storage_settings,
     get_local_log_dir,
     get_log_storage_key,
     get_raw_storage,
     reset_raw_storage,
+    s3_url_string,
 )
 from chess_teacher.utils.object_storage.filesystem import FilesystemObjectStorage
 from chess_teacher.utils.object_storage.health import check_raw_storage_health
@@ -32,7 +35,9 @@ __all__ = [
     "FilesystemObjectStorage",
     "ObjectStorage",
     "S3ObjectStorage",
+    "S3StorageSettings",
     "asset_image_key",
+    "build_s3_storage_settings",
     "bytes_to_data_uri",
     "check_raw_storage_health",
     "clear_storage_image_data_uri_cache",
@@ -46,6 +51,7 @@ __all__ = [
     "read_raw_object",
     "relative_key_under",
     "reset_raw_storage",
+    "s3_url_string",
     "sibling_temp_key",
     "storage_image_data_uri",
     "unique_key_variant",
