@@ -9,11 +9,23 @@ from typing import Any, Literal
 import chess
 import numpy as np
 
+from chess_teacher.pipelines.neural_network.move_encoding import (
+    POLICY_VOCAB_SIZE,
+    MoveEncoder,
+)
 from chess_teacher.pipelines.preprocessing.games import Game
 from chess_teacher.pipelines.preprocessing.moves import Move, MoveCharacteristics
 from chess_teacher.utils.chess_utils import Color
 from chess_teacher.utils.db.client import DatabaseClient, get_db_client
 from chess_teacher.utils.general_utils import generate_ident_is_literal, quote_literal
+
+# Shared FROM/WHERE for moves that have characteristics + a known game end_time.
+_SQL_MOVES_WITH_CHARS = """
+            FROM games.moves m
+            INNER JOIN games.games g ON g.game_id = m.game_id
+            INNER JOIN games.move_characteristics mc ON mc.move_id = m.move_id
+            WHERE g.end_time IS NOT NULL
+"""
 
 # Domain scales tuned against local games.move_characteristics (n=825, dev_local).
 # Absolute mate-like evals (~±100) intentionally saturate under tanh.
@@ -273,6 +285,11 @@ def _piece_name(piece: chess.Piece | None) -> str | None:
     return _PIECE_NAME[piece.piece_type]
 
 
+def piece_type_name(piece: chess.Piece | None) -> str | None:
+    """Public alias of piece-type string used in training identity features."""
+    return _piece_name(piece)
+
+
 def _square_file_rank(square: chess.Square) -> tuple[int, int]:
     return chess.square_file(square), chess.square_rank(square)
 
@@ -333,7 +350,6 @@ class TrainingDatumBuilder:
             "move_distance_chebyshev": chebyshev,
             "is_kingside_castle": board.is_kingside_castling(move),
             "is_queenside_castle": board.is_queenside_castling(move),
-            "opponent_piece_type": opponent_piece_type,
             "legal_move_ucis": tuple(sorted(m.uci() for m in board.legal_moves)),
             "is_knight_move": moved is not None and moved.piece_type == chess.KNIGHT,
             "is_bishop_move": moved is not None and moved.piece_type == chess.BISHOP,
@@ -341,12 +357,7 @@ class TrainingDatumBuilder:
             "is_queen_move": moved is not None and moved.piece_type == chess.QUEEN,
             "is_king_move": moved is not None and moved.piece_type == chess.KING,
             "is_pawn_move": moved is not None and moved.piece_type == chess.PAWN,
-            "opponent_move_was_pawn": opponent_piece_type == "pawn",
-            "opponent_move_was_knight": opponent_piece_type == "knight",
-            "opponent_move_was_bishop": opponent_piece_type == "bishop",
-            "opponent_move_was_rook": opponent_piece_type == "rook",
-            "opponent_move_was_queen": opponent_piece_type == "queen",
-            "opponent_move_was_king": opponent_piece_type == "king",
+            **opponent_piece_type_flags(opponent_piece_type),
         }
 
     @staticmethod
@@ -465,6 +476,62 @@ def _append_feature_keys(
                 out.append(np.float32(1.0 if raw is None else 0.0))
 
 
+def opponent_piece_type_flags(piece_type: str | None) -> dict[str, Any]:
+    """Six opponent-piece one-hots + ``opponent_piece_type`` string (shared train/live)."""
+    return {
+        "opponent_piece_type": piece_type,
+        "opponent_move_was_pawn": piece_type == "pawn",
+        "opponent_move_was_knight": piece_type == "knight",
+        "opponent_move_was_bishop": piece_type == "bishop",
+        "opponent_move_was_rook": piece_type == "rook",
+        "opponent_move_was_queen": piece_type == "queen",
+        "opponent_move_was_king": piece_type == "king",
+    }
+
+
+def assemble_state_vector(
+    *,
+    opponent_move_was_pawn: bool,
+    opponent_move_was_knight: bool,
+    opponent_move_was_bishop: bool,
+    opponent_move_was_rook: bool,
+    opponent_move_was_queen: bool,
+    opponent_move_was_king: bool,
+    color_is_white: bool,
+    ply: int,
+    features: dict[str, Any],
+    normalize: bool = True,
+    include_missing_indicators: bool = True,
+) -> np.ndarray:
+    """Shared layout for ``TrainingDatum.state_vector`` and live board encoding."""
+    opponent_piece_flags = [
+        _float32_or_zero(opponent_move_was_pawn),
+        _float32_or_zero(opponent_move_was_knight),
+        _float32_or_zero(opponent_move_was_bishop),
+        _float32_or_zero(opponent_move_was_rook),
+        _float32_or_zero(opponent_move_was_queen),
+        _float32_or_zero(opponent_move_was_king),
+    ]
+    color_flag = [_float32_or_zero(color_is_white)]
+    if normalize:
+        ply_part = [np.float32(min(ply / _PLY_NORM_SCALE, 1.0))]
+    else:
+        ply_part = [_float32_or_zero(ply)]
+
+    feature_values: list[np.float32] = []
+    _append_feature_keys(
+        feature_values,
+        features,
+        _STATE_FEATURE_KEYS,
+        normalize=normalize,
+        include_missing_indicators=include_missing_indicators,
+    )
+    return np.asarray(
+        opponent_piece_flags + color_flag + ply_part + feature_values,
+        dtype=np.float32,
+    )
+
+
 @dataclass(frozen=True)
 class TrainingDatum:
     """One labeled user-move example for move-choice / style models."""
@@ -519,35 +586,22 @@ class TrainingDatum:
         include_missing_indicators: bool = True,
     ) -> np.ndarray:
         """Pre-move context features only (no chosen-move geometry / post-move metrics)."""
-        opponent_piece_flags = [
-            _float32_or_zero(self.opponent_move_was_pawn),
-            _float32_or_zero(self.opponent_move_was_knight),
-            _float32_or_zero(self.opponent_move_was_bishop),
-            _float32_or_zero(self.opponent_move_was_rook),
-            _float32_or_zero(self.opponent_move_was_queen),
-            _float32_or_zero(self.opponent_move_was_king),
-        ]
-        color_flag = [_float32_or_zero(self.color == Color.WHITE)]
-        if normalize:
-            ply_part = [np.float32(min(self.ply / _PLY_NORM_SCALE, 1.0))]
-        else:
-            ply_part = [_float32_or_zero(self.ply)]
-
-        feature_values: list[np.float32] = []
-        _append_feature_keys(
-            feature_values,
-            self.features,
-            _STATE_FEATURE_KEYS,
+        return assemble_state_vector(
+            opponent_move_was_pawn=self.opponent_move_was_pawn,
+            opponent_move_was_knight=self.opponent_move_was_knight,
+            opponent_move_was_bishop=self.opponent_move_was_bishop,
+            opponent_move_was_rook=self.opponent_move_was_rook,
+            opponent_move_was_queen=self.opponent_move_was_queen,
+            opponent_move_was_king=self.opponent_move_was_king,
+            color_is_white=self.color == Color.WHITE,
+            ply=self.ply,
+            features=self.features,
             normalize=normalize,
             include_missing_indicators=include_missing_indicators,
         )
-        return np.asarray(
-            opponent_piece_flags + color_flag + ply_part + feature_values,
-            dtype=np.float32,
-        )
 
     def action_label(self, *, normalize: bool = True) -> np.ndarray:
-        """Chosen-move target: board coords + moved-piece one-hot."""
+        """Legacy MSE target: board coords + moved-piece one-hot (unused by policy trainer)."""
         if normalize:
             coords = [
                 np.float32(self.from_file / _BOARD_SPAN),
@@ -563,6 +617,18 @@ class TrainingDatum:
                 _float32_or_zero(self.to_rank),
             ]
         return np.asarray(coords + _one_hot_piece_type(self.piece_type), dtype=np.float32)
+
+    def policy_class_index(self) -> int:
+        """Fixed-vocab index of the played move (user-style imitation target)."""
+        return MoveEncoder.encode(self.move_uci)
+
+    def policy_legal_mask(self) -> np.ndarray:
+        """Boolean mask over the fixed move vocab for legal moves in ``fen_before``."""
+        return MoveEncoder.mask_from_ucis(self.legal_move_ucis)
+
+    def policy_target(self) -> tuple[int, np.ndarray]:
+        """Return ``(class_index, legal_mask)`` for masked policy training."""
+        return self.policy_class_index(), self.policy_legal_mask()
 
     def to_keras_input_vector(
         self,
@@ -738,6 +804,23 @@ class TrainingBatch:
             axis=0,
         ).astype(np.float32)
 
+    def policy_class_indices(self) -> np.ndarray:
+        if not self.datums:
+            return np.zeros((0,), dtype=np.int32)
+        return np.asarray(
+            [d.policy_class_index() for d in self.datums],
+            dtype=np.int32,
+        )
+
+    def policy_legal_masks(self) -> np.ndarray:
+        if not self.datums:
+            return np.zeros((0, POLICY_VOCAB_SIZE), dtype=np.bool_)
+        return np.stack([d.policy_legal_mask() for d in self.datums], axis=0)
+
+    def policy_targets(self) -> tuple[np.ndarray, np.ndarray]:
+        """Return ``(y_index shape (N,), legal_mask shape (N, V))``."""
+        return self.policy_class_indices(), self.policy_legal_masks()
+
     def legacy_matrix(
         self,
         *,
@@ -800,6 +883,16 @@ class TrainingDataStore:
                 continue
         return datums
 
+    def _datums_for_move_ids(self, move_ids: list[str]) -> list[TrainingDatum]:
+        """Hydrate ordered ``move_id`` list into datums (missing ids skipped)."""
+        if not move_ids:
+            return []
+        move_id_list = ", ".join(quote_literal(mid) for mid in move_ids)
+        moves = Move.fetch_all_from_db(self._db, where=f'"move_id" IN ({move_id_list})')
+        by_id = {m.move_id: m for m in moves}
+        ordered_moves = [by_id[mid] for mid in move_ids if mid in by_id]
+        return self._datums_from_moves(ordered_moves)
+
     def fetch_one(self, move_id: str) -> TrainingDatum:
         move = Move.fetch_from_db(self._db, id=move_id)
         chars = MoveCharacteristics.fetch_from_db(self._db, id=move_id)
@@ -822,13 +915,7 @@ class TrainingDataStore:
 
     def count_since(self, cutoff: datetime | None) -> int:
         """Count platform moves with characteristics and ``games.end_time`` after cutoff."""
-        sql = """
-            SELECT COUNT(*) AS n
-            FROM games.moves m
-            INNER JOIN games.games g ON g.game_id = m.game_id
-            INNER JOIN games.move_characteristics mc ON mc.move_id = m.move_id
-            WHERE g.end_time IS NOT NULL
-        """
+        sql = f"SELECT COUNT(*) AS n{_SQL_MOVES_WITH_CHARS}"
         params: dict[str, Any] = {}
         if cutoff is not None:
             sql += " AND g.end_time > :cutoff"
@@ -845,14 +932,13 @@ class TrainingDataStore:
         """Load new rows ordered by ``games.end_time`` (oldest first).
 
         Returns ``(datums, max_end_time)``.
+
+        When ``limit`` truncates mid-``end_time`` group (all moves in a game share
+        ``games.end_time``), the batch is expanded to include **every** move at
+        that boundary timestamp so the next cutoff ``end_time > max`` cannot skip
+        the rest of the game / same-second games.
         """
-        sql = """
-            SELECT m.move_id AS move_id, g.end_time AS end_time
-            FROM games.moves m
-            INNER JOIN games.games g ON g.game_id = m.game_id
-            INNER JOIN games.move_characteristics mc ON mc.move_id = m.move_id
-            WHERE g.end_time IS NOT NULL
-        """
+        sql = f"SELECT m.move_id AS move_id, g.end_time AS end_time{_SQL_MOVES_WITH_CHARS}"
         params: dict[str, Any] = {}
         if cutoff is not None:
             sql += " AND g.end_time > :cutoff"
@@ -866,14 +952,52 @@ class TrainingDataStore:
         if not rows:
             return [], None
 
+        # LIMIT may cut inside a shared end_time group — finish that group.
+        if limit is not None and len(rows) >= limit:
+            max_end_time = max(r["end_time"] for r in rows if r["end_time"] is not None)
+            prefix = [r for r in rows if r["end_time"] is not None and r["end_time"] < max_end_time]
+            expand_sql = (
+                f"SELECT m.move_id AS move_id, g.end_time AS end_time{_SQL_MOVES_WITH_CHARS}"
+                " AND g.end_time = :boundary"
+                " ORDER BY m.game_id ASC, m.move_nr ASC"
+            )
+            at_boundary = self._db.engine.execute_parameterized_query(
+                expand_sql,
+                {"boundary": max_end_time},
+            )
+            rows = prefix + list(at_boundary)
+
         move_ids = [str(r["move_id"]) for r in rows]
         end_times = [r["end_time"] for r in rows if r["end_time"] is not None]
         max_end_time = max(end_times) if end_times else None
-        move_id_list = ", ".join(quote_literal(mid) for mid in move_ids)
-        moves = Move.fetch_all_from_db(self._db, where=f'"move_id" IN ({move_id_list})')
-        by_id = {m.move_id: m for m in moves}
-        ordered_moves = [by_id[mid] for mid in move_ids if mid in by_id]
-        return self._datums_from_moves(ordered_moves), max_end_time
+        return self._datums_for_move_ids(move_ids), max_end_time
+
+    def fetch_random(
+        self,
+        *,
+        limit: int,
+        seed: int | None = None,
+    ) -> list[TrainingDatum]:
+        """Sample up to ``limit`` moves with characteristics.
+
+        With ``seed``, ordering is deterministic via ``md5(move_id || seed)``
+        (safe with pooled connections — unlike session ``setseed``).
+        Without ``seed``, uses ``ORDER BY random()``.
+        """
+        if limit <= 0:
+            return []
+        params: dict[str, Any] = {"limit": limit}
+        if seed is not None:
+            order = "ORDER BY md5(m.move_id || :seed_text)"
+            params["seed_text"] = str(seed)
+        else:
+            order = "ORDER BY random()"
+        sql = f"SELECT m.move_id AS move_id{_SQL_MOVES_WITH_CHARS} {order} LIMIT :limit"
+        rows = self._db.engine.execute_parameterized_query(sql, params)
+        if not rows:
+            return []
+        move_ids = [str(r["move_id"]) for r in rows]
+        return self._datums_for_move_ids(move_ids)
 
 
 def training_datum_feature_keys() -> list[str]:

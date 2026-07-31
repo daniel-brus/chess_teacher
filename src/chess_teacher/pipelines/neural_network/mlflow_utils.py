@@ -6,16 +6,41 @@ import os
 from pathlib import Path
 from typing import Any
 
-from chess_teacher.utils.env_utils import get_env_variable
+from chess_teacher.utils.db.engine import postgres_url_string
 from chess_teacher.utils.logging import get_logger
+from chess_teacher.utils.object_storage.factory import (
+    build_s3_storage_settings,
+    s3_url_string,
+)
 
 logger = get_logger()
+
+
+def _log_tracking_uri(uri: str) -> str:
+    """Hide password in tracking URI logs (SQLAlchemy render when possible)."""
+    try:
+        from sqlalchemy.engine import make_url
+
+        return make_url(uri).render_as_string(hide_password=True)
+    except Exception:
+        return uri
+
+
+def _apply_mlflow_s3_env() -> None:
+    """MLflow artifact store uses boto env vars; our ObjectStorage passes keys explicitly.
+
+    Maps project ``S3_*`` into what MLflow/boto expect (setdefault only).
+    """
+    cfg = build_s3_storage_settings()
+    os.environ.setdefault("AWS_ACCESS_KEY_ID", cfg.access_key)
+    os.environ.setdefault("AWS_SECRET_ACCESS_KEY", cfg.secret_key)
+    os.environ.setdefault("MLFLOW_S3_ENDPOINT_URL", cfg.endpoint_url)
+    os.environ.setdefault("AWS_DEFAULT_REGION", "us-east-1")
 
 
 class MLflowTracker:
     """Owns MLflow env wiring, experiment setup, runs, and artifact download."""
 
-    DEFAULT_TRACKING_URI = "file:./storage/mlflow/tracking"
     DEFAULT_EXPERIMENT = "baseline"
 
     _configured = False
@@ -26,8 +51,8 @@ class MLflowTracker:
         tracking_uri: str | None = None,
         experiment_name: str | None = None,
     ) -> None:
-        self.tracking_uri = tracking_uri or os.getenv(
-            "MLFLOW_TRACKING_URI", self.DEFAULT_TRACKING_URI
+        self.tracking_uri = (
+            tracking_uri or os.getenv("MLFLOW_TRACKING_URI") or postgres_url_string()
         )
         self.experiment_name = experiment_name or os.getenv(
             "MLFLOW_EXPERIMENT_NAME", self.DEFAULT_EXPERIMENT
@@ -39,25 +64,18 @@ class MLflowTracker:
         explicit = os.getenv("MLFLOW_ARTIFACT_ROOT")
         if explicit:
             return explicit.rstrip("/")
-        bucket = get_env_variable("S3_BUCKET")
-        root = get_env_variable("STORAGE_ROOT").strip("/")
-        return f"s3://{bucket}/{root}/mlflow"
+        return s3_url_string("mlflow")
 
     def configure(self) -> None:
-        """Map project S3_* into MLflow/boto env and set tracking URI (idempotent)."""
+        """Set tracking URI + artifact root; adapt S3 env for MLflow boto (idempotent)."""
         if MLflowTracker._configured:
             return
 
-        os.environ.setdefault("AWS_ACCESS_KEY_ID", get_env_variable("S3_ACCESS_KEY_ID"))
-        os.environ.setdefault("AWS_SECRET_ACCESS_KEY", get_env_variable("S3_SECRET_ACCESS_KEY"))
-        os.environ.setdefault("MLFLOW_S3_ENDPOINT_URL", get_env_variable("S3_ENDPOINT_URL"))
-        os.environ.setdefault("AWS_DEFAULT_REGION", "us-east-1")
-
-        if self.tracking_uri.startswith("file:"):
-            Path(self.tracking_uri.removeprefix("file:")).mkdir(parents=True, exist_ok=True)
+        _apply_mlflow_s3_env()
 
         import mlflow
 
+        log_uri = _log_tracking_uri(self.tracking_uri)
         mlflow.set_tracking_uri(self.tracking_uri)
         artifact_root = self.artifact_root()
         existing = mlflow.get_experiment_by_name(self.experiment_name)
@@ -67,7 +85,13 @@ class MLflowTracker:
                 "Created MLflow experiment=%s artifact_root=%s tracking_uri=%s",
                 self.experiment_name,
                 artifact_root,
-                self.tracking_uri,
+                log_uri,
+            )
+        else:
+            logger.info(
+                "Using MLflow experiment=%s tracking_uri=%s",
+                self.experiment_name,
+                log_uri,
             )
         mlflow.set_experiment(self.experiment_name)
         MLflowTracker._configured = True
@@ -100,6 +124,13 @@ class MLflowTracker:
             matches = list(downloaded.glob("*.keras")) + list(downloaded.rglob("*.keras"))
             return matches[0] if matches else None
         return None
+
+    def require_keras_weights(self, model_uri: str) -> Path:
+        """Like ``download_keras_weights`` but raises when the artifact cannot be resolved."""
+        weights_path = self.download_keras_weights(model_uri)
+        if weights_path is None or not weights_path.is_file():
+            raise FileNotFoundError(f"Could not resolve Keras weights from uri={model_uri!r}")
+        return weights_path
 
     def log_training_run(
         self,

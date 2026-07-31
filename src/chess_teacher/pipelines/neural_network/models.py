@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
 
 from chess_teacher.utils.db.client import DatabaseClient
 from chess_teacher.utils.general_utils import generate_ident_is_literal, get_current_datetime
+from chess_teacher.utils.logging import get_logger
 from chess_teacher.utils.table_data_class import TableDataClass
+
+logger = get_logger()
 
 
 class BaselineModelStatus(StrEnum):
@@ -70,6 +74,36 @@ class BaselineModel(TableDataClass):
         return cls.latest_with_status(db_client, BaselineModelStatus.PRODUCTION)
 
     @classmethod
+    def fetch_all_ordered(cls, db_client: DatabaseClient) -> list[BaselineModel]:
+        """All baseline rows, newest first (any status)."""
+        db_client.ensure_metadata(cls.get_metadata())
+        return cls.fetch_all_from_db(db_client, order_by='"trained_at" DESC')
+
+    def looks_like_policy(self) -> bool:
+        """True when eval_metrics suggest a fixed-vocab policy head (not legacy MSE)."""
+        from chess_teacher.pipelines.neural_network.move_encoding import (
+            POLICY_VOCAB_SIZE,
+        )
+
+        if not self.eval_metrics:
+            return False
+        try:
+            blob = json.loads(self.eval_metrics)
+        except (TypeError, json.JSONDecodeError):
+            return False
+        if not isinstance(blob, dict):
+            return False
+        if blob.get("head_policy") == 1.0 or blob.get("head") == "policy":
+            return True
+        vocab = blob.get("vocab_size")
+        if vocab is None:
+            return False
+        try:
+            return int(float(vocab)) == POLICY_VOCAB_SIZE
+        except (TypeError, ValueError):
+            return False
+
+    @classmethod
     def next_version(cls, db_client: DatabaseClient) -> str:
         rows = cls.fetch_all_from_db(db_client, order_by='"trained_at" DESC', limit=50)
         max_n = 0
@@ -91,6 +125,30 @@ class BaselineModel(TableDataClass):
             return result.stdout.strip() or None
         except (OSError, subprocess.SubprocessError):
             return None
+
+    def promote_over(
+        self,
+        db_client: DatabaseClient,
+        *,
+        current_production: BaselineModel | None,
+        eval_metrics: str | None = None,
+    ) -> BaselineModel:
+        """Archive ``current_production`` (if any) and mark this row production."""
+        if current_production is not None and current_production.id != self.id:
+            archived = replace(current_production, status=BaselineModelStatus.ARCHIVED)
+            archived.save_to_db(db_client)
+            logger.info(
+                "Archived baseline version=%s (was production)",
+                current_production.version,
+            )
+        promoted = replace(
+            self,
+            status=BaselineModelStatus.PRODUCTION,
+            eval_metrics=eval_metrics if eval_metrics is not None else self.eval_metrics,
+        )
+        promoted.save_to_db(db_client)
+        logger.info("Promoted baseline version=%s to production", promoted.version)
+        return promoted
 
 
 @dataclass(frozen=True)

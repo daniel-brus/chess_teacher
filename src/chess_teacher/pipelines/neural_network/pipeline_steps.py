@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 import tempfile
 from datetime import datetime
 from pathlib import Path
@@ -18,7 +17,8 @@ from chess_teacher.pipelines.neural_network.models import (
     BaselineModelStatus,
     TrainingState,
 )
-from chess_teacher.pipelines.neural_network.train import BaselineTrainer
+from chess_teacher.pipelines.neural_network.move_encoding import POLICY_VOCAB_SIZE
+from chess_teacher.pipelines.neural_network.train import HEAD_TYPE_POLICY, BaselineTrainer
 from chess_teacher.utils.db.client import DatabaseClient
 from chess_teacher.utils.general_utils import get_current_datetime
 from chess_teacher.utils.logging import get_logger
@@ -26,14 +26,10 @@ from chess_teacher.utils.pipeline_utils.pipeline_base import PipelineContext, Pi
 
 logger = get_logger()
 
-_DEFAULT_MIN_NEW_MOVES = 1000
-
-
-def _min_new_moves() -> int:
-    raw = os.getenv("MIN_NEW_MOVES_BASELINE")
-    if raw is None or raw.strip() == "":
-        return _DEFAULT_MIN_NEW_MOVES
-    return int(raw)
+# Train only when at least this many new moves exist since last cutoff.
+MIN_NEW_MOVES_BASELINE = 1000
+# Cap each incremental train batch (oldest-first); avoids first-run OOM on huge backlog.
+MAX_MOVES_PER_BASELINE_BATCH = 10_000
 
 
 def _should_skip(context: PipelineContext) -> bool:
@@ -53,7 +49,7 @@ class CheckSufficientNewDataStep(PipelineStep):
         cutoff = state.last_trained_data_cutoff
         store = TrainingDataStore(db_client)
         n_new = store.count_since(cutoff)
-        min_needed = _min_new_moves()
+        min_needed = MIN_NEW_MOVES_BASELINE
         updated = state.with_check_at(get_current_datetime())
         updated.save_to_db(db_client)
 
@@ -116,15 +112,18 @@ class LoadNewDataStep(PipelineStep):
             return
 
         state: TrainingState = context.extras["training_state"]
+        limit = MAX_MOVES_PER_BASELINE_BATCH
         datums, max_end_time = TrainingDataStore(db_client).fetch_since(
-            state.last_trained_data_cutoff
+            state.last_trained_data_cutoff,
+            limit=limit,
         )
         context.extras["training_datums"] = datums
         context.extras["batch_data_cutoff_at"] = max_end_time
         logger.info(
-            "Loaded training datums=%s batch_cutoff=%s",
+            "Loaded training datums=%s batch_cutoff=%s limit=%s",
             len(datums),
             max_end_time,
+            limit,
         )
         if not datums:
             context.extras["baseline_skip"] = True
@@ -180,6 +179,8 @@ class LogToMLflowStep(PipelineStep):
                 "parent_version": parent_version or "",
                 "n_samples": int(metrics.get("n_samples", 0)),
                 "min_new_moves": context.extras.get("min_new_moves"),
+                "head": HEAD_TYPE_POLICY,
+                "vocab_size": POLICY_VOCAB_SIZE,
             },
             metrics=metrics,
         )

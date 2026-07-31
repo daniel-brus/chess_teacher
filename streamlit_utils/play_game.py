@@ -7,6 +7,7 @@ from typing import Any
 import chess
 
 from chess_teacher.utils.chess_bots import ChessBot, get_bot_preset
+from chess_teacher.utils.db.client import DatabaseClient, get_db_client
 
 
 @dataclass
@@ -66,8 +67,13 @@ def user_won(state: PlayGameState) -> bool:
     return outcome is not None and outcome.winner == state.user_color
 
 
-def create_bot(preset_key: str) -> ChessBot:
-    return get_bot_preset(preset_key).factory()
+def create_bot(
+    preset_key: str,
+    *,
+    db_client: DatabaseClient | None = None,
+) -> ChessBot:
+    client = db_client if db_client is not None else get_db_client()
+    return get_bot_preset(preset_key, db_client=client).factory()
 
 
 def close_bot(bot: ChessBot | None) -> None:
