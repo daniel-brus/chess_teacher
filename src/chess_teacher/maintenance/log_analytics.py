@@ -48,8 +48,10 @@ STALE_BUCKET_THRESHOLD_HOURS = 25
 LOGGER_SUBSYSTEMS = (
     ("Maintenance", ("chess_teacher.maintenance.",)),
     ("Pipelines", ("chess_teacher.pipelines.",)),
+    ("Analytics", ("chess_teacher.analytics.",)),
+    ("Bots", ("chess_teacher.bots.",)),
     ("Streamlit", ("streamlit_pages.", "streamlit_utils.")),
-    ("Core utils", ("chess_teacher.utils.", "chess_teacher.other.")),
+    ("Core utils", ("chess_teacher.utils.",)),
 )
 _LOG_LEVEL_COLUMNS = [
     "bucket_start",

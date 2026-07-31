@@ -7,7 +7,7 @@ from datetime import date, datetime
 
 import polars as pl
 
-from chess_teacher.other.dataclasses import TimeControlCategory
+from chess_teacher.analytics.dataclasses import TimeControlCategory
 from chess_teacher.pipelines.preprocessing.games import Game
 from chess_teacher.platform.account import Account
 from chess_teacher.utils.cache_utils import get_cache_client

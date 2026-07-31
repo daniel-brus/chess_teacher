@@ -10,7 +10,7 @@ import chess
 import chess.pgn
 import polars as pl
 
-from chess_teacher.other.chess_com_openings import (
+from chess_teacher.pipelines.preprocessing.chess_com_openings import (
     chess_com_opening_slug_from_eco_url,
     load_slug_title_lookup,
 )

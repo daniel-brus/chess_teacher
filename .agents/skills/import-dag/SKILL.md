@@ -24,11 +24,14 @@ Lower may not import higher. Same-layer: prefer depending downward.
 2. `platform` — accounts/users; may use `utils` only
 3. `pipelines` — ingestion / preprocessing / neural_network; may use `utils`, `platform`
 4. `bots` — interactive opponents; may use `utils`, `platform`, `pipelines` (including NN)
-5. Orchestration / one-off: `maintenance`, `backfill`, thin CLIs — may use lower layers; must not be imported by `utils`, `platform`, or `bots`
+5. `analytics` — game statistics and related reference enums; may use `utils`, `platform`, `pipelines`
+6. Orchestration / one-off: `maintenance`, `backfill`, thin CLIs — may use lower layers; must not be imported by `utils`, `platform`, `bots`, or `analytics`
 
-Avoid new code in `other/`. Place by layer instead (domain type → `platform` / `pipelines` / `utils`; script → `maintenance` / `backfill`).
+Do **not** recreate a catch-all package (the old `other/`). Place by layer.
 
-**Hard rule:** `utils` never imports `platform`, `pipelines`, `bots`, `maintenance`, `backfill`, or `other`.
+**Hard rule:** `utils` never imports `platform`, `pipelines`, `bots`, `analytics`, `maintenance`, or `backfill`.
+
+Postgres schema names (e.g. schema ``other`` in YAML) are independent of Python package layout — do not invent a Python package just because a DB schema has that name.
 
 ## Utils sub-DAG (low → high)
 
@@ -62,8 +65,11 @@ Be sceptical of non-`chess_teacher` imports in feature code:
 | Pipeline step base / transforms plumbing | `utils/pipeline_utils` |
 | Account / user identity | `platform` |
 | Batch transforms on games / moves / models | matching `pipelines/*` |
+| Opening lookups / ECO / Chess.com slug tables | `pipelines/preprocessing` |
 | NN train / load / encode | `pipelines/neural_network` (not `utils`) |
 | Interactive chess bots (incl. NN policy bots) | `bots` |
+| Game statistics for dashboards | `analytics` |
+| Log maintenance aggregates / admin log views | `maintenance` |
 
 If unsure: place at the **highest** layer that still keeps the DAG (prefer feature folder over `utils`). Wrong folder in `utils` is worse than wrong feature subfolder.
 
@@ -72,10 +78,9 @@ If unsure: place at the **highest** layer that still keeps the DAG (prefer featu
 1. Does this edge point **down** the layer list?
 2. Would this create / worsen a cycle (esp. logging core ↔ storage ↔ files)?
 3. Is this third-party call a one-off, or should it be a named helper in utils?
-4. Am I dumping into `other/` because unsure? Stop — pick a layer.
+4. Am I inventing a dump package because unsure? Stop — pick a layer.
 
 ## Known remaining debt
 
-- `other/` still exists as a catch-all (freeze: no new files; relocate over time)
-- `other` → `pipelines` one-way edges remain (e.g. openings slug scan uses `Game` metadata) — prefer moving openings fully under preprocessing later
 - Module-level `get_logger()` in some mid/high modules can still pull shipping early via `configure_logging` — prefer lazy loggers when adding new utils
+- Postgres schema ``other`` remains a historical DB schema name; Python package `other` is gone

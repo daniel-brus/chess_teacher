@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 
 import requests
 
-from chess_teacher.other.dataclasses import RawChessComOpening
+from chess_teacher.pipelines.preprocessing.opening_tables import RawChessComOpening
 from chess_teacher.utils.logging import EnhancedLogger, get_logger
 
 if TYPE_CHECKING:

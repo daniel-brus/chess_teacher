@@ -4,8 +4,10 @@ from io import StringIO
 
 import requests
 
-from chess_teacher.other.chess_com_openings import refresh_slug_title_lookup_from_database
-from chess_teacher.other.dataclasses import RawEcoCode
+from chess_teacher.pipelines.preprocessing.chess_com_openings import (
+    refresh_slug_title_lookup_from_database,
+)
+from chess_teacher.pipelines.preprocessing.opening_tables import RawEcoCode
 from chess_teacher.utils.db.client import DatabaseClient
 from chess_teacher.utils.files.file_utils import FileType, TextStreamSource
 from chess_teacher.utils.pipeline_utils.pipeline_base import Pipeline, PipelineContext, PipelineStep

@@ -7,8 +7,7 @@ from datetime import UTC, datetime, timedelta
 import polars as pl
 import pytest
 
-from chess_teacher.maintenance.transformations import NO_EXC_TYPE_LABEL
-from chess_teacher.other.log_analytics import (
+from chess_teacher.maintenance.log_analytics import (
     ERROR_PLUS_LEVELS,
     SEVERITY_LEVELS,
     LogDashboardFilters,
@@ -35,6 +34,7 @@ from chess_teacher.other.log_analytics import (
     top_loggers,
     truncate_log_message,
 )
+from chess_teacher.maintenance.transformations import NO_EXC_TYPE_LABEL
 
 _BUCKET = datetime(2026, 6, 7, 12, 0, tzinfo=UTC)
 _LEVEL_ROWS = pl.DataFrame({

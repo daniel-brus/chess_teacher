@@ -1,4 +1,4 @@
-from chess_teacher.other.chess_com_openings import chess_com_opening_slug_from_pgn
+from chess_teacher.pipelines.preprocessing.chess_com_openings import chess_com_opening_slug_from_pgn
 from chess_teacher.pipelines.preprocessing.transformations import CleanPGNTransformation
 
 CHESS_COM_SAMPLE = (
