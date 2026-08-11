@@ -86,7 +86,15 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/python-setup
       - name: Run security audit
-        run: pip-audit
+        run: |
+          ignore_args=()
+          while IFS= read -r line || [ -n "$line" ]; do
+            case "$line" in
+              ''|#*) continue ;;
+            esac
+            ignore_args+=(--ignore-vuln "$line")
+          done < pip-audit-ignore.txt
+          pip-audit "${ignore_args[@]}"
 
   vulnerability-scan:
     runs-on: ubuntu-latest
