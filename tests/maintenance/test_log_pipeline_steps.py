@@ -51,6 +51,20 @@ def _closed_log_key(
     return f"{LoadRawLogsStep.CLOSED_LOG_STORAGE_PREFIX}/{year:04d}/{month:02d}/{day:02d}/{hostname}/{filename}"
 
 
+def _processed_log_key(
+    *,
+    year: int = 2026,
+    month: int = 6,
+    day: int = 7,
+    hostname: str = "test-host",
+    filename: str = "app-120000Z.log",
+) -> str:
+    return (
+        f"{LoadRawLogsStep.PROCESSED_LOG_STORAGE_PREFIX}/"
+        f"{year:04d}/{month:02d}/{day:02d}/{hostname}/{filename}"
+    )
+
+
 class TestLogStorageHelpers:
     def test_parse_closed_log_path_date(self) -> None:
         relative = "2026/06/07/test-host/app-120000Z.log"
@@ -58,6 +72,10 @@ class TestLogStorageHelpers:
 
     def test_parse_closed_log_path_date_invalid(self) -> None:
         assert DeleteOldS3LogFilesStep.parse_closed_log_path_date("bad/path.log") is None
+
+    def test_processed_key_for_closed(self) -> None:
+        closed = _closed_log_key()
+        assert LoadRawLogsStep.processed_key_for_closed(closed) == _processed_log_key()
 
 
 class TestLogTransformations:
@@ -86,11 +104,64 @@ class TestLoadRawLogsStep:
         payload = json.dumps(_log_line(log_id="log-1")) + "\n"
         storage.write_bytes(key, payload.encode("utf-8"))
 
+        db_client = MagicMock()
+        db_client.table_exists.return_value = False
+
         step = LoadRawLogsStep(storage=storage)
-        df = step._load_records(MagicMock(), PipelineContext())
+        df = step._load_records(db_client, PipelineContext())
         assert df.height == 1
         assert df["log_id"][0] == "log-1"
         assert df["_source_file"][0] == key
+
+    def test_skips_and_moves_already_loaded_segments(
+        self,
+        isolate_raw_storage: FilesystemObjectStorage,
+    ) -> None:
+        storage = isolate_raw_storage
+        stale_key = _closed_log_key(filename="old.log")
+        new_key = _closed_log_key(filename="new.log")
+        storage.write_bytes(stale_key, (json.dumps(_log_line(log_id="old")) + "\n").encode())
+        storage.write_bytes(new_key, (json.dumps(_log_line(log_id="new")) + "\n").encode())
+
+        db_client = MagicMock()
+        db_client.table_exists.return_value = True
+        db_client.engine.execute_parameterized_query.return_value = [{"source_file": stale_key}]
+
+        step = LoadRawLogsStep(storage=storage)
+        df = step._load_records(db_client, PipelineContext())
+
+        assert df.height == 1
+        assert df["log_id"][0] == "new"
+        assert storage.read_bytes(stale_key) is None
+        assert storage.read_bytes(LoadRawLogsStep.processed_key_for_closed(stale_key)) is not None
+        assert storage.read_bytes(new_key) is not None
+
+    def test_moves_segments_to_processed_after_successful_run(
+        self,
+        isolate_raw_storage: FilesystemObjectStorage,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        storage = isolate_raw_storage
+        key = _closed_log_key()
+        storage.write_bytes(key, (json.dumps(_log_line(log_id="log-1")) + "\n").encode())
+
+        db_client = MagicMock()
+        db_client.table_exists.return_value = False
+        db_client.ensure_metadata.return_value = None
+
+        step = LoadRawLogsStep(storage=storage)
+        monkeypatch.setattr(
+            step,
+            "_save_records",
+            lambda *_args, **_kwargs: WriteResult(
+                strategy=WriteStrategy.INSERT_IGNORE, rows_inserted=1
+            ),
+        )
+        step.run(db_client, PipelineContext())
+
+        processed = LoadRawLogsStep.processed_key_for_closed(key)
+        assert storage.read_bytes(key) is None
+        assert storage.read_bytes(processed) is not None
 
     def test_quarantines_unparseable_file(
         self,
@@ -100,8 +171,11 @@ class TestLoadRawLogsStep:
         key = _closed_log_key(filename="bad.log")
         storage.write_bytes(key, b"not json\n")
 
+        db_client = MagicMock()
+        db_client.table_exists.return_value = False
+
         step = LoadRawLogsStep(storage=storage)
-        df = step._load_records(MagicMock(), PipelineContext())
+        df = step._load_records(db_client, PipelineContext())
         assert df.height == 0
 
         quarantined = storage.list_keys(
@@ -154,16 +228,18 @@ class TestPromoteWarningErrorLogsStep:
 
 
 class TestDeleteOldS3LogFilesStep:
-    def test_deletes_old_log_files_by_path_date(
+    def test_deletes_old_processed_and_closed_log_files(
         self,
         isolate_raw_storage: FilesystemObjectStorage,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         storage = isolate_raw_storage
-        old_key = _closed_log_key(year=2020, month=1, day=1)
-        recent_key = _closed_log_key(year=2026, month=6, day=7)
-        storage.write_bytes(old_key, b"{}\n")
-        storage.write_bytes(recent_key, b"{}\n")
+        old_processed = _processed_log_key(year=2020, month=1, day=1)
+        recent_processed = _processed_log_key(year=2026, month=6, day=7)
+        old_closed = _closed_log_key(year=2020, month=1, day=1, filename="orphan.log")
+        recent_closed = _closed_log_key(year=2026, month=6, day=7, filename="pending.log")
+        for key in (old_processed, recent_processed, old_closed, recent_closed):
+            storage.write_bytes(key, b"{}\n")
 
         fixed_now = datetime(2026, 6, 7, 12, 0, tzinfo=UTC)
         monkeypatch.setattr(
@@ -174,8 +250,10 @@ class TestDeleteOldS3LogFilesStep:
         step = DeleteOldS3LogFilesStep(storage=storage)
         step.run(MagicMock(), PipelineContext())
 
-        assert storage.read_bytes(old_key) is None
-        assert storage.read_bytes(recent_key) is not None
+        assert storage.read_bytes(old_processed) is None
+        assert storage.read_bytes(old_closed) is None
+        assert storage.read_bytes(recent_processed) is not None
+        assert storage.read_bytes(recent_closed) is not None
 
 
 class TestTableMetadataSync:
