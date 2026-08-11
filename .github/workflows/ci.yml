@@ -89,9 +89,10 @@ jobs:
         run: |
           ignore_args=()
           while IFS= read -r line || [ -n "$line" ]; do
-            case "$line" in
-              ''|#*) continue ;;
-            esac
+            line="${line%%#*}"
+            line="${line#"${line%%[![:space:]]*}"}"
+            line="${line%"${line##*[![:space:]]}"}"
+            [ -z "$line" ] && continue
             ignore_args+=(--ignore-vuln "$line")
           done < pip-audit-ignore.txt
           pip-audit "${ignore_args[@]}"
