@@ -1,16 +1,20 @@
+from collections.abc import Sequence
 from typing import Literal
 
 import polars as pl
 
 from chess_teacher.utils.db.client import DatabaseClient, get_db_client
 from chess_teacher.utils.exception_utils import ConfigError, TransformationError
-from chess_teacher.utils.general_utils import quote_ident
+from chess_teacher.utils.general_utils import quote_ident, quote_literal
 from chess_teacher.utils.logging import get_logger
 from chess_teacher.utils.metadata_utils import ColumnMetadata
 from chess_teacher.utils.pipeline_utils.dataframe_transformation import DataFrameTransformation
 from chess_teacher.utils.table_data_class import TableDataClass
 
 logger = get_logger()
+
+# Probe existing keys in chunks so large incremental batches stay under statement_timeout.
+_EXISTING_KEYS_CHUNK_SIZE = 5_000
 
 
 class IncrementalFilterTransformation(DataFrameTransformation):
@@ -19,6 +23,9 @@ class IncrementalFilterTransformation(DataFrameTransformation):
 
     When ``on`` is ``None``, no rows are filtered and a warning is logged.
     Target lookup can be scoped via :meth:`set_scope_where` (typically from ``PipelineContext``).
+
+    Existing keys are probed only for values present in the current DataFrame (chunked
+    ``IN`` lookups), not by downloading every key in the target scope.
     """
 
     def __init__(
@@ -39,7 +46,7 @@ class IncrementalFilterTransformation(DataFrameTransformation):
         """Limit the target lookup to rows matching this SQL ``WHERE`` clause (without ``WHERE``)."""
         self.scope_where = where
 
-    def _existing_values(self) -> set[str]:
+    def _existing_values(self, candidates: Sequence[object]) -> set[str]:
         db_client = self.db_client or get_db_client()
         if not db_client.table_exists(self.target_metadata):
             return set()
@@ -53,14 +60,23 @@ class IncrementalFilterTransformation(DataFrameTransformation):
                 )
             )
 
-        where_sql = f" WHERE {self.scope_where}" if self.scope_where else ""
-        sql = (
-            f"SELECT DISTINCT {quote_ident(self.on)} "
-            f"FROM {self.target_metadata.qualified_name_sql()}"
-            f"{where_sql};"
-        )
-        rows = db_client.engine.execute_parameterized_query(sql, {})
-        return {str(row[self.on]) for row in rows}
+        unique_candidates = list(dict.fromkeys(str(value) for value in candidates))
+        if not unique_candidates:
+            return set()
+
+        existing: set[str] = set()
+        on_sql = quote_ident(self.on)
+        table_sql = self.target_metadata.qualified_name_sql()
+        for start in range(0, len(unique_candidates), _EXISTING_KEYS_CHUNK_SIZE):
+            chunk = unique_candidates[start : start + _EXISTING_KEYS_CHUNK_SIZE]
+            values_sql = ", ".join(quote_literal(value) for value in chunk)
+            sql = f"SELECT {on_sql} FROM {table_sql} WHERE {on_sql} IN ({values_sql})"
+            if self.scope_where:
+                sql += f" AND ({self.scope_where})"
+            sql += ";"
+            rows = db_client.engine.execute_parameterized_query(sql, {})
+            existing.update(str(row[self.on]) for row in rows)
+        return existing
 
     def transform(self, df: pl.DataFrame) -> pl.DataFrame:
         if self.on is None:
@@ -79,7 +95,7 @@ class IncrementalFilterTransformation(DataFrameTransformation):
         if df.height == 0:
             return df
 
-        existing_values = self._existing_values()
+        existing_values = self._existing_values(df[self.source_column].to_list())
         if not existing_values:
             return df
 
