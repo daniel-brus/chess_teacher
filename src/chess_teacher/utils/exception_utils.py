@@ -22,6 +22,12 @@ class AdapterError(Exception):
     pass
 
 
+class AdapterClientError(AdapterError):
+    """Non-retryable client-side adapter failure (e.g. HTTP 4xx except 429)."""
+
+    pass
+
+
 class FileError(Exception):
     pass
 

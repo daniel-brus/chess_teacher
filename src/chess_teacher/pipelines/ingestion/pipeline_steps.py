@@ -117,6 +117,8 @@ class IngestionFromAPIStreamStep(PipelineStep):
                 self.logger.info(f"[{self.name}] No records to write.")
                 context.progress_update("No new games from the platform.")
                 return
+        except AdapterError:
+            raise
         except Exception as e:
             self.logger.log_and_raise(AdapterError(f"Error getting records: {e}"))
 

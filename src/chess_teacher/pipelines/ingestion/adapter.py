@@ -7,9 +7,11 @@ from typing import Literal
 import requests
 
 from chess_teacher.platform.account import Account, AccountPlatform
-from chess_teacher.utils.exception_utils import AdapterError
+from chess_teacher.utils.exception_utils import AdapterClientError, AdapterError
 from chess_teacher.utils.general_utils import get_current_datetime
 from chess_teacher.utils.logging import get_logger
+
+_USER_AGENT = "chess-teacher/1.0 (https://github.com/chess-teacher/chess-teacher)"
 
 
 class Adapter(ABC):
@@ -44,6 +46,13 @@ class Adapter(ABC):
             )
             self.logger.info(f"Response status: {response.status_code}.")
             response.raise_for_status()
+        except requests.HTTPError as e:
+            status = e.response.status_code if e.response is not None else None
+            message = f"Error getting response: {e}"
+            # 4xx (except 429 rate-limit) will not succeed on retry.
+            if status is not None and 400 <= status < 500 and status != 429:
+                self.logger.log_and_raise(AdapterClientError(message))
+            self.logger.log_and_raise(AdapterError(message))
         except Exception as e:
             self.logger.log_and_raise(AdapterError(f"Error getting response: {e}"))
         return response
@@ -88,7 +97,7 @@ class ChessComAdapter(Adapter):
     def _get_headers(self) -> dict:
         return {
             "Accept": "application/json",
-            "User-Agent": "chess-teacher/1.0 (https://github.com/chess-teacher/chess-teacher)",
+            "User-Agent": _USER_AGENT,
         }
 
     def _try_get_joined_date(self) -> datetime:
@@ -142,6 +151,7 @@ class LichessAdapter(Adapter):
     def _get_headers(self) -> dict:
         return {
             "Accept": "application/x-ndjson",
+            "User-Agent": _USER_AGENT,
         }
 
     def _parse_ndjson(self, response: requests.Response) -> list[dict]:

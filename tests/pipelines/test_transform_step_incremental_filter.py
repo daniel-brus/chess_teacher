@@ -99,7 +99,9 @@ def test_transform_step_incremental_filter_on_skips_rows_in_target_table(
 
     sql = db_client.engine.execute_parameterized_query.call_args[0][0]
     assert 'FROM "games"."games"' in sql
+    assert '"game_id" IN (' in sql
     assert "\"account_id\" = 'acct-1'" in sql
+    assert "DISTINCT" not in sql
 
 
 def test_transform_step_incremental_filter_off_keeps_all_source_rows(
@@ -149,3 +151,46 @@ def test_transform_step_skips_save_when_incremental_filter_removes_all_rows(
     step.run(db_client, PipelineContext(account_id=_ACCOUNT_ID))
 
     assert saved_frames == []
+
+
+def test_transform_step_load_records_applies_incremental_anti_join() -> None:
+    db_client = MagicMock()
+    db_client.table_exists.return_value = True
+    db_client.read.return_value = pl.DataFrame()
+
+    step = TransformStep(
+        name="TestRawGamesToGames",
+        source_data_class=RawGame,
+        target_data_class=Game,
+        on="game_id",
+        transformations=[],
+        loading_strategy=LoadingStrategy.MERGE,
+    )
+    step._incremental_filter.set_scope_where("\"account_id\" = 'acct-1'")
+    step._load_records(db_client, PipelineContext(account_id=_ACCOUNT_ID))
+
+    where = db_client.read.call_args.kwargs["where"]
+    assert "\"account_id\" = 'acct-1'" in where
+    assert "NOT EXISTS" in where
+    assert 'FROM "games"."games" AS _inc_tgt' in where
+    assert '_inc_tgt."game_id" = "games"."raw_games"."game_id"' in where
+
+
+def test_transform_step_load_records_skips_anti_join_when_on_none() -> None:
+    db_client = MagicMock()
+    db_client.table_exists.return_value = True
+    db_client.read.return_value = pl.DataFrame()
+
+    step = TransformStep(
+        name="TestRawGamesToGames",
+        source_data_class=RawGame,
+        target_data_class=Game,
+        on=None,
+        transformations=[],
+        loading_strategy=LoadingStrategy.MERGE,
+    )
+    step._load_records(db_client, PipelineContext(account_id=_ACCOUNT_ID))
+
+    where = db_client.read.call_args.kwargs["where"]
+    assert where == "\"account_id\" = 'acct-1'"
+    assert "NOT EXISTS" not in where
