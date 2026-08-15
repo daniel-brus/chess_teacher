@@ -1,6 +1,7 @@
 """Swappable promotion strategies: eval set, scoring, decide.
 
-Default scorer: user-move top-k accuracy (style imitation). ActionMaeScorer kept for legacy MSE.
+Default scorer: candidate-style top-k accuracy (user move among SF-featured legals).
+ActionMaeScorer kept for legacy MSE.
 """
 
 from __future__ import annotations
@@ -10,17 +11,20 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from chess_teacher.pipelines.neural_network.candidate_eval import MAX_CANDIDATES
 from chess_teacher.pipelines.neural_network.create_training_set import (
     TrainingBatch,
     TrainingDataStore,
     TrainingDatum,
 )
 from chess_teacher.pipelines.neural_network.mlflow_utils import MLflowTracker
-from chess_teacher.pipelines.neural_network.move_encoding import POLICY_VOCAB_SIZE
+from chess_teacher.pipelines.neural_network.ply_weights import ply_sample_weights
+from chess_teacher.pipelines.neural_network.tf_runtime import ensure_tensorflow_logging
 from chess_teacher.utils.db.client import DatabaseClient
 from chess_teacher.utils.logging import get_logger
 
 logger = get_logger()
+ensure_tensorflow_logging()
 
 # Thin-promotion defaults (not env — swap via constructor / subclasses later).
 DEFAULT_EVAL_SAMPLE_SIZE = 2_000
@@ -63,7 +67,7 @@ class EvalSetProvider(ABC):
 
 
 class RandomEvalSetProvider(EvalSetProvider):
-    """Temporary shortcut: random moves with characteristics.
+    """Temporary shortcut: random moves with candidate_evaluations.
 
     Replace later with a fixed / rotating held-out set that training excludes.
     """
@@ -106,8 +110,10 @@ class ActionMaeScorer(ModelScorer):
         if not datums:
             raise ValueError("ActionMaeScorer.score requires a non-empty eval set")
 
+        ensure_tensorflow_logging()
         from tensorflow import keras  # type: ignore[import-untyped]
 
+        ensure_tensorflow_logging()
         weights_path = self._tracker.require_keras_weights(model_uri)
         model = keras.models.load_model(weights_path)
         batch = TrainingBatch(datums)
@@ -123,11 +129,11 @@ class ActionMaeScorer(ModelScorer):
         )
 
 
-class TopKMoveAccuracyScorer(ModelScorer):
-    """User-move top-k hit rate after illegal-move mask (higher is better).
+class CandidateStyleTopKScorer(ModelScorer):
+    """User-move top-k among SF-featured candidates (higher is better).
 
-    Measures style imitation: would the model rank the user's played move in its
-    top-k legal predictions — not Stockfish best-move agreement.
+    Prefer precomputed ``candidate_evaluations`` on eval datums (fast). Uses the
+    same ply exponential sample weights as training for the reported primary.
     """
 
     def __init__(
@@ -135,61 +141,81 @@ class TopKMoveAccuracyScorer(ModelScorer):
         *,
         k: int = DEFAULT_TOP_K,
         tracker: MLflowTracker | None = None,
-        vocab_size: int = POLICY_VOCAB_SIZE,
+        max_candidates: int = MAX_CANDIDATES,
     ) -> None:
         if k < 1:
             raise ValueError(f"k must be >= 1, got {k}")
         self.k = k
-        self.vocab_size = vocab_size
+        self.max_candidates = max_candidates
         self._tracker = tracker or MLflowTracker()
 
     def score(self, *, model_uri: str, datums: list[TrainingDatum]) -> ModelScore:
         if not datums:
-            raise ValueError("TopKMoveAccuracyScorer.score requires a non-empty eval set")
+            raise ValueError("CandidateStyleTopKScorer.score requires a non-empty eval set")
 
-        from chess_teacher.pipelines.neural_network.train import load_policy_from_uri
+        from chess_teacher.pipelines.neural_network.train import (
+            load_candidate_style_from_uri,
+        )
 
-        model = load_policy_from_uri(
+        model = load_candidate_style_from_uri(
             model_uri,
             tracker=self._tracker,
-            vocab_size=self.vocab_size,
+            max_candidates=self.max_candidates,
         )
 
         batch = TrainingBatch(datums)
-        x = batch.state_matrix()
-        y_index, legal_mask = batch.policy_targets()
-        logits = np.asarray(model.predict(x, verbose=0), dtype=np.float64)
-        if logits.ndim != 2 or logits.shape[1] != self.vocab_size:
+        feats, mask, labels, kept = batch.candidate_style_targets()
+        if not kept:
+            raise ValueError(
+                "CandidateStyleTopKScorer: no eval datums with usable candidate_evaluations"
+            )
+        kept_datums = [datums[i] for i in kept]
+        x_state = TrainingBatch(kept_datums).state_matrix()
+        logits = np.asarray(
+            model.predict({"state": x_state, "move_feats": feats}, verbose=0),
+            dtype=np.float64,
+        )
+        if logits.ndim != 2 or logits.shape[1] != self.max_candidates:
             raise ValueError(f"Unexpected logits shape {logits.shape}")
 
-        masked = np.where(legal_mask, logits, -np.inf)
+        masked = np.where(mask > 0.5, logits, -np.inf)
+        y_index = labels
         if self.k == 1:
-            top = np.argmax(masked, axis=1)
-            hits = top == y_index
+            hits = np.argmax(masked, axis=1) == y_index
         else:
-            k_eff = min(self.k, self.vocab_size)
+            k_eff = min(self.k, self.max_candidates)
             part = np.argpartition(masked, -k_eff, axis=1)[:, -k_eff:]
             hits = np.any(part == y_index.reshape(-1, 1), axis=1)
 
         top1 = np.argmax(masked, axis=1) == y_index
-        k5 = min(5, self.vocab_size)
-        part5 = np.argpartition(masked, -k5, axis=1)[:, -k5:]
-        top5 = np.any(part5 == y_index.reshape(-1, 1), axis=1)
+        k3 = min(3, self.max_candidates)
+        part3 = np.argpartition(masked, -k3, axis=1)[:, -k3:]
+        top3 = np.any(part3 == y_index.reshape(-1, 1), axis=1)
 
-        acc = float(np.mean(hits))
+        weights = ply_sample_weights([d.ply for d in kept_datums])
+        w_sum = float(np.sum(weights))
+        acc_w = float(np.sum(hits.astype(np.float64) * weights) / w_sum) if w_sum else 0.0
         acc1 = float(np.mean(top1))
-        acc5 = float(np.mean(top5))
+        acc3 = float(np.mean(top3))
+        acc = float(np.mean(hits))
         return ModelScore(
-            primary=acc,
+            primary=acc_w,
             higher_is_better=True,
             details={
                 f"top{self.k}_accuracy": acc,
+                f"top{self.k}_accuracy_ply_weighted": acc_w,
                 "top1_accuracy": acc1,
-                "top5_accuracy": acc5,
-                "n_eval": float(len(datums)),
-                "vocab_size": float(self.vocab_size),
+                "top3_accuracy": acc3,
+                "n_eval": float(len(kept_datums)),
+                "n_dropped": float(len(datums) - len(kept_datums)),
+                "max_candidates": float(self.max_candidates),
+                "head_candidate_style": 1.0,
             },
         )
+
+
+# Backward-compatible name used by older imports / PromotionStrategies default.
+TopKMoveAccuracyScorer = CandidateStyleTopKScorer
 
 
 class PromotionPolicy(ABC):
@@ -267,5 +293,5 @@ class PromotionStrategies:
     """Bundle of interchangeable promotion collaborators."""
 
     eval_set: EvalSetProvider = field(default_factory=RandomEvalSetProvider)
-    scorer: ModelScorer = field(default_factory=TopKMoveAccuracyScorer)
+    scorer: ModelScorer = field(default_factory=CandidateStyleTopKScorer)
     policy: PromotionPolicy = field(default_factory=BetterOrEqualPromotionPolicy)
