@@ -31,10 +31,20 @@ def test_is_parent_process_false_when_parent_process_set(
 def test_is_parent_process_false_for_spawn_worker_name(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(
-        "multiprocessing.current_process",
-        lambda: MagicMock(name="SpawnProcess-1"),
-    )
+    worker = MagicMock()
+    worker.name = "SpawnProcess-1"
+    monkeypatch.setattr("multiprocessing.current_process", lambda: worker)
+    monkeypatch.setattr("multiprocessing.parent_process", lambda: None)
+    assert is_parent_process() is False
+
+
+def test_is_parent_process_false_for_spawn_pool_worker_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worker = MagicMock()
+    worker.name = "SpawnPoolWorker-2"
+    monkeypatch.setattr("multiprocessing.current_process", lambda: worker)
+    monkeypatch.setattr("multiprocessing.parent_process", lambda: None)
     assert is_parent_process() is False
 
 
