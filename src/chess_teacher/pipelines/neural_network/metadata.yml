@@ -1,0 +1,74 @@
+tables:
+  baseline_models:
+    schema: ml
+    table: baseline_models
+    comment: Incremental baseline model candidates and production checkpoints
+    primary_key:
+      - id
+    indexes:
+      - name: idx_baseline_models_status
+        columns: [status]
+      - name: idx_baseline_models_version
+        columns: [version]
+    columns:
+      - name: id
+        data_type: text
+        nullable: false
+        comment: Hashed ID from version
+      - name: version
+        data_type: text
+        nullable: false
+        comment: Monotonic version label (e.g. v12)
+      - name: mlflow_run_id
+        data_type: text
+        nullable: true
+        comment: MLflow run id for this training session
+      - name: model_uri
+        data_type: text
+        nullable: true
+        comment: Artifact URI / S3 key for model weights
+      - name: status
+        data_type: text
+        nullable: false
+        default: "candidate"
+        comment: candidate | production | archived
+      - name: parent_version
+        data_type: text
+        nullable: true
+        comment: Previous candidate version this was finetuned from
+      - name: data_cutoff_at
+        data_type: timestamptz
+        nullable: true
+        comment: Max games.end_time included in this training batch
+      - name: trained_at
+        data_type: timestamptz
+        nullable: false
+        comment: When this row was written
+      - name: eval_metrics
+        data_type: text
+        nullable: true
+        comment: JSON metrics blob (held-out eval later)
+      - name: git_commit_hash
+        data_type: text
+        nullable: true
+        comment: Git commit at train time if available
+
+  training_state:
+    schema: ml
+    table: training_state
+    comment: Per-chain bookkeeping for incremental training cutoffs
+    primary_key:
+      - scope
+    columns:
+      - name: scope
+        data_type: text
+        nullable: false
+        comment: baseline or user:{user_id}
+      - name: last_trained_data_cutoff
+        data_type: timestamptz
+        nullable: true
+        comment: Last games.end_time consumed by training
+      - name: last_min_data_check_at
+        data_type: timestamptz
+        nullable: true
+        comment: Last time the min-data gate was evaluated

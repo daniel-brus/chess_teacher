@@ -86,6 +86,61 @@ class EnrichedEngine(Engine):
 _db_engine: EnrichedEngine | None = None
 
 
+def build_postgres_url(
+    *,
+    host: str = "",
+    port: str = "",
+    database: str = "",
+    username: str = "",
+    password: str = "",
+    sslmode: str = "",
+) -> URL:
+    """Build a SQLAlchemy Postgres URL from args, falling back to ``POSTGRES_*`` env."""
+    try:
+        host = host or get_env_variable("POSTGRES_HOST")
+        port = port or get_env_variable("POSTGRES_PORT")
+        database = database or get_env_variable("POSTGRES_DB")
+        username = username or get_env_variable("POSTGRES_USER")
+        password = password or get_env_variable("POSTGRES_PASSWORD")
+        sslmode = sslmode or get_env_variable("POSTGRES_SSLMODE", default="")
+    except Exception as e:
+        logger.log_and_raise(
+            ConfigError(f"Error occurred while fetching database credentials: {e}")
+        )
+
+    query = {"sslmode": sslmode} if sslmode else {}
+    return URL.create(
+        drivername="postgresql+psycopg",
+        username=username,
+        password=password,
+        host=host,
+        port=int(port),
+        database=database,
+        query=query,
+    )
+
+
+def postgres_url_string(
+    *,
+    host: str = "",
+    port: str = "",
+    database: str = "",
+    username: str = "",
+    password: str = "",
+    sslmode: str = "",
+    hide_password: bool = False,
+) -> str:
+    """Render the app Postgres URL as a string (e.g. for MLflow tracking)."""
+    return build_postgres_url(
+        host=host,
+        port=port,
+        database=database,
+        username=username,
+        password=password,
+        sslmode=sslmode,
+    ).render_as_string(hide_password=hide_password)
+
+
 def get_db_engine(
     *,
     host: str = "",
@@ -144,30 +199,14 @@ def _create_db_engine(
     echo: bool = False,
 ) -> EnrichedEngine:
     """Create a new PostgreSQL SQLAlchemy engine."""
-
     try:
-        host = host or get_env_variable("POSTGRES_HOST")
-        port = port or get_env_variable("POSTGRES_PORT")
-        database = database or get_env_variable("POSTGRES_DB")
-        username = username or get_env_variable("POSTGRES_USER")
-        password = password or get_env_variable("POSTGRES_PASSWORD")
-        sslmode = sslmode or get_env_variable("POSTGRES_SSLMODE", default="")
-
-    except Exception as e:
-        logger.log_and_raise(
-            ConfigError(f"Error occurred while fetching database credentials: {e}")
-        )
-
-    try:
-        query = {"sslmode": sslmode} if sslmode else {}
-        url = URL.create(
-            drivername="postgresql+psycopg",
+        url = build_postgres_url(
+            host=host,
+            port=port,
+            database=database,
             username=username,
             password=password,
-            host=host,
-            port=int(port),
-            database=database,
-            query=query,
+            sslmode=sslmode,
         )
         engine = create_engine(
             url,
@@ -177,11 +216,11 @@ def _create_db_engine(
         enriched = EnrichedEngine(engine.pool, engine.dialect, engine.url)
         logger.info(
             "Postgres engine created host=%s port=%s database=%s user=%s sslmode=%s",
-            host,
-            port,
-            database,
-            username,
-            sslmode or "default",
+            url.host,
+            url.port,
+            url.database,
+            url.username,
+            (url.query.get("sslmode") if url.query else None) or "default",
         )
     except Exception as e:
         logger.log_and_raise(DatabaseError(f"Error occurred while creating database engine: {e}"))

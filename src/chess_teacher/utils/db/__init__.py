@@ -12,7 +12,13 @@ from chess_teacher.utils.db.client import (
     get_db_client,
     reset_db_client_for_tests,
 )
-from chess_teacher.utils.db.engine import EnrichedEngine, get_db_engine, reset_db_engine_for_tests
+from chess_teacher.utils.db.engine import (
+    EnrichedEngine,
+    build_postgres_url,
+    get_db_engine,
+    postgres_url_string,
+    reset_db_engine_for_tests,
+)
 
 __all__ = [
     "DatabaseClient",
@@ -24,8 +30,10 @@ __all__ = [
     "WhenNotMatchedByTarget",
     "WriteResult",
     "WriteStrategy",
+    "build_postgres_url",
     "get_db_client",
     "get_db_engine",
+    "postgres_url_string",
     "reset_db_client_for_tests",
     "reset_db_engine_for_tests",
 ]
