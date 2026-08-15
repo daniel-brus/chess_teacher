@@ -4,6 +4,7 @@
 storage/
 .streamlit/secrets.toml
 testnotebook.ipynb
+training_develop.ipynb
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

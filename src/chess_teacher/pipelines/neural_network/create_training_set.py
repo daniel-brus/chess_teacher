@@ -650,12 +650,21 @@ class TrainingDatum:
         if payload is None:
             return None
         evals = payload["evals_white_pov"]
+        color_is_white = self.color == Color.WHITE
+        eval_user = self.features.get("evaluation_before_user_pov")
+        evaluation_before_white: float | None
+        if eval_user is None:
+            evaluation_before_white = None
+        else:
+            evaluation_before_white = float(eval_user) if color_is_white else float(-eval_user)
         return pack_candidate_tensors(
             evals,
             fen_before=self.fen_before,
-            color_is_white=self.color == Color.WHITE,
+            color_is_white=color_is_white,
             user_move_uci=self.move_uci,
             legal_ucis=self.legal_move_ucis,
+            opponent_move_was_capture=bool(self.features.get("opponent_move_was_capture") or False),
+            evaluation_before_white=evaluation_before_white,
         )
 
     def to_keras_input_vector(

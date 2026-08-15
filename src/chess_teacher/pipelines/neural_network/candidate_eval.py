@@ -9,11 +9,12 @@ All legal moves are scored with **one MultiPV search** on ``fen_before`` via
 
 Non-SF candidate features (train + live must match)
 ---------------------------------------------------
-Capture / openness / geometry / etc. are **not** backfilled. They are computed
-on the fly from ``fen_before`` + UCI when packing tensors (same code path for
-training batches, promotion eval, and live play). Changing
-``CANDIDATE_MOVE_FEAT_VERSION`` / ``MOVE_FEAT_DIM`` requires a **cold-start**
-(parent weights with a different feat dim are refused).
+Computed on the fly from ``fen_before`` + UCI (not backfilled). Layout mirrors
+``games.move_characteristics`` **move-dependent** fields (user/opponent POV
+after + delta, move flags) plus piece/geometry identity. Position-only
+``*_before`` / phase flags stay on the shared state vector.
+Changing ``CANDIDATE_MOVE_FEAT_VERSION`` / ``MOVE_FEAT_DIM`` requires a
+**cold-start**.
 
 Delta convention (SF)
 ---------------------
@@ -33,11 +34,17 @@ import chess
 import numpy as np
 
 from chess_teacher.utils.chess_utils import (
-    PIECE_VALUES,
     StockfishEngine,
+    fen_attack_pressure,
     fen_diagonal_openness,
+    fen_hanging_value,
+    fen_king_safety,
+    fen_legal_moves,
+    fen_mean_rank,
     fen_pawn_tension,
+    fen_pin_value,
     fen_vertical_openness,
+    material_balance_white_pov,
     move_created_fork,
     move_gave_check,
     move_is_capture,
@@ -83,13 +90,23 @@ HEAD_TYPE_CANDIDATE_STYLE = "candidate_style"
 MAX_CANDIDATES = 128
 
 # Bump when move-feat layout changes → forces cold-start / play listing gate.
-CANDIDATE_MOVE_FEAT_VERSION = 2
+CANDIDATE_MOVE_FEAT_VERSION = 3
 
+# Scales aligned with create_training_set TrainingDatum norms.
 _EVAL_FEAT_TANH_SCALE = 5.0
 _MATERIAL_TANH_SCALE = 15.0
-_BOARD_SPAN = 7.0
+_LEGAL_MOVES_SCALE = 50.0
+_KING_SAFETY_MAX = 8.25
+_KING_SAFETY_DELTA_SCALE = 4.0
+_ATTACK_PRESSURE_TANH_SCALE = 8.0
+_HANGING_VALUE_TANH_SCALE = 5.0
+_PIN_VALUE_TANH_SCALE = 4.0
+_MEAN_RANK_MAX = 1.0
+_VERTICAL_OPENNESS_MAX = 8.0
+_DIAGONAL_OPENNESS_MAX = 6.0
 _OPENNESS_DELTA_SCALE = 1.0
-_PAWN_TENSION_DELTA_SCALE = 2.0
+_PAWN_TENSION_SCALE = 2.0
+_BOARD_SPAN = 7.0
 
 _PIECE_TYPES: tuple[chess.PieceType, ...] = (
     chess.PAWN,
@@ -100,21 +117,57 @@ _PIECE_TYPES: tuple[chess.PieceType, ...] = (
     chess.KING,
 )
 
-# Layout (keep stable; document for MLflow / debugging):
-# 0-1   SF: tanh(eval_after_user), tanh(delta_vs_best)
-# 2-6   flags: capture, castle, check, promotion, en_passant
-# 7-12  mover piece one-hot (P,N,B,R,Q,K)
-# 13-17 geometry: from_file, from_rank, to_file, to_rank, chebyshev (/7)
-# 18-21 after-move deltas (user POV / scaled): material, vertical_open, diagonal_open, pawn_tension
-# 22    created_fork
+# Layout v3: MC move-dependent fields (user POV) + piece/geometry.
+# SF from MultiPV; other metrics from fen_before → push candidate → fen_after.
 CANDIDATE_MOVE_FEAT_KEYS: tuple[str, ...] = (
-    "eval_after_user_tanh",
-    "delta_vs_best_tanh",
+    # SF (user POV)
+    "evaluation_after_user_pov",
+    "evaluation_delta_user_pov",
+    "delta_vs_best",
+    # Material (user POV)
+    "material_balance_after_user_pov",
+    "material_balance_delta_user_pov",
+    # Board-wide structure
+    "vertical_openness_after",
+    "vertical_openness_delta",
+    "diagonal_openness_after",
+    "diagonal_openness_delta",
+    "pawn_tension_after",
+    "pawn_tension_delta",
+    # Side metrics after + delta (user / opponent)
+    "user_legal_moves_after",
+    "opponent_legal_moves_after",
+    "user_legal_moves_delta",
+    "opponent_legal_moves_delta",
+    "user_king_safety_after",
+    "opponent_king_safety_after",
+    "user_king_safety_delta",
+    "opponent_king_safety_delta",
+    "user_mean_rank_after",
+    "opponent_mean_rank_after",
+    "user_mean_rank_delta",
+    "opponent_mean_rank_delta",
+    "user_attack_pressure_after",
+    "opponent_attack_pressure_after",
+    "user_attack_pressure_delta",
+    "opponent_attack_pressure_delta",
+    "user_hanging_value_after",
+    "opponent_hanging_value_after",
+    "user_hanging_value_delta",
+    "opponent_hanging_value_delta",
+    "user_pin_value_after",
+    "opponent_pin_value_after",
+    "user_pin_value_delta",
+    "opponent_pin_value_delta",
+    # Move flags (MC)
     "is_capture",
     "is_castle",
     "gave_check",
+    "created_fork",
     "is_promotion",
     "is_en_passant",
+    "is_recapture",
+    # Identity / geometry (derive; not MC columns but needed to tell moves apart)
     "piece_pawn",
     "piece_knight",
     "piece_bishop",
@@ -125,13 +178,12 @@ CANDIDATE_MOVE_FEAT_KEYS: tuple[str, ...] = (
     "from_rank",
     "to_file",
     "to_rank",
+    "delta_file",
+    "delta_rank",
     "move_distance_chebyshev",
-    "material_delta_user_tanh",
-    "vertical_openness_delta",
-    "diagonal_openness_delta",
-    "pawn_tension_delta",
-    "created_fork",
 )
+# Never a magic literal — always len(keys). Logged as move_feat_dim so parent
+# resume / Play listing reject old layouts after you edit the tuple above.
 MOVE_FEAT_DIM = len(CANDIDATE_MOVE_FEAT_KEYS)
 
 PAYLOAD_KEY_DEPTH = "depth"
@@ -251,20 +303,51 @@ def candidate_move_rows(
     return rows
 
 
-def _material_white_pov(board: chess.Board) -> float:
-    white = 0.0
-    black = 0.0
-    for piece in board.piece_map().values():
-        value = float(PIECE_VALUES.get(piece.piece_type, 0))
-        if piece.color == chess.WHITE:
-            white += value
-        else:
-            black += value
-    return white - black
-
-
 def _piece_one_hot(piece_type: chess.PieceType | None) -> list[float]:
     return [1.0 if piece_type == pt else 0.0 for pt in _PIECE_TYPES]
+
+
+def _tanh(x: float, scale: float) -> float:
+    return float(np.tanh(x / scale))
+
+
+def _unit01(x: float, max_v: float) -> float:
+    if max_v <= 0:
+        return 0.0
+    return float(np.clip(x / max_v, 0.0, 1.0))
+
+
+def _div(x: float, scale: float) -> float:
+    if scale == 0:
+        return 0.0
+    return float(x / scale)
+
+
+def _position_metric_snapshot(board: chess.Board, fen: str) -> dict[str, float]:
+    """White/black + board-wide metrics for one FEN (board must match fen)."""
+    w_legal, b_legal = fen_legal_moves(fen)
+    return {
+        "material_white": float(material_balance_white_pov(fen)),
+        "vertical": float(fen_vertical_openness(fen)),
+        "diagonal": float(fen_diagonal_openness(fen)),
+        "tension": float(fen_pawn_tension(fen)),
+        "w_legal": float(w_legal),
+        "b_legal": float(b_legal),
+        "w_ks": float(fen_king_safety(board, chess.WHITE)),
+        "b_ks": float(fen_king_safety(board, chess.BLACK)),
+        "w_rank": float(fen_mean_rank(board, chess.WHITE)),
+        "b_rank": float(fen_mean_rank(board, chess.BLACK)),
+        "w_atk": float(fen_attack_pressure(board, chess.WHITE)),
+        "b_atk": float(fen_attack_pressure(board, chess.BLACK)),
+        "w_hang": float(fen_hanging_value(board, chess.WHITE)),
+        "b_hang": float(fen_hanging_value(board, chess.BLACK)),
+        "w_pin": float(fen_pin_value(board, chess.WHITE)),
+        "b_pin": float(fen_pin_value(board, chess.BLACK)),
+    }
+
+
+def _user_opp(white: float, black: float, *, color_is_white: bool) -> tuple[float, float]:
+    return (white, black) if color_is_white else (black, white)
 
 
 def candidate_move_feature_vector(
@@ -273,14 +356,13 @@ def candidate_move_feature_vector(
     *,
     eval_after_user: float,
     delta_vs_best: float,
+    evaluation_before_user: float | None,
     fen_before: str,
-    material_before_white: float,
-    vertical_before: float,
-    diagonal_before: float,
-    tension_before: float,
+    before: dict[str, float],
+    color_is_white: bool,
+    opponent_move_was_capture: bool,
 ) -> np.ndarray:
     """Build ``MOVE_FEAT_DIM`` features for one legal candidate (board at fen_before)."""
-    color_is_white = board.turn == chess.WHITE
     piece = board.piece_at(move.from_square)
     piece_type = piece.piece_type if piece is not None else None
 
@@ -289,44 +371,100 @@ def candidate_move_feature_vector(
     gave_check = move_gave_check(board, move)
     is_promo = move_is_promotion(move)
     is_ep = move_is_en_passant(board, move)
+    is_recapture = bool(is_capture and opponent_move_was_capture)
 
     from_file = chess.square_file(move.from_square)
     from_rank = chess.square_rank(move.from_square)
     to_file = chess.square_file(move.to_square)
     to_rank = chess.square_rank(move.to_square)
-    chebyshev = max(abs(to_file - from_file), abs(to_rank - from_rank))
+    delta_file = to_file - from_file
+    delta_rank = to_rank - from_rank
+    chebyshev = max(abs(delta_file), abs(delta_rank))
 
     board.push(move)
     fen_after = board.fen(en_passant="fen")
-    material_after_white = _material_white_pov(board)
-    vertical_after = fen_vertical_openness(fen_after)
-    diagonal_after = fen_diagonal_openness(fen_after)
-    tension_after = fen_pawn_tension(fen_after)
+    after = _position_metric_snapshot(board, fen_after)
     created_fork = move_created_fork(fen_before, fen_after, move.uci())
     board.pop()
 
-    material_delta_white = material_after_white - material_before_white
-    material_delta_user = material_delta_white if color_is_white else -material_delta_white
+    eval_delta_user = (
+        float(eval_after_user - evaluation_before_user)
+        if evaluation_before_user is not None
+        else 0.0
+    )
+
+    # material_white is signed white-POV; flip for Black user.
+    mat_after_user = after["material_white"] if color_is_white else -after["material_white"]
+    mat_before_user = before["material_white"] if color_is_white else -before["material_white"]
+    mat_delta_user = mat_after_user - mat_before_user
+
+    def side_after_delta(key_w: str, key_b: str) -> tuple[float, float, float, float]:
+        u0, o0 = _user_opp(before[key_w], before[key_b], color_is_white=color_is_white)
+        u1, o1 = _user_opp(after[key_w], after[key_b], color_is_white=color_is_white)
+        return u1, o1, u1 - u0, o1 - o0
+
+    u_leg, o_leg, u_leg_d, o_leg_d = side_after_delta("w_legal", "b_legal")
+    u_ks, o_ks, u_ks_d, o_ks_d = side_after_delta("w_ks", "b_ks")
+    u_rk, o_rk, u_rk_d, o_rk_d = side_after_delta("w_rank", "b_rank")
+    u_at, o_at, u_at_d, o_at_d = side_after_delta("w_atk", "b_atk")
+    u_hg, o_hg, u_hg_d, o_hg_d = side_after_delta("w_hang", "b_hang")
+    u_pn, o_pn, u_pn_d, o_pn_d = side_after_delta("w_pin", "b_pin")
+
+    v_after, v_delta = after["vertical"], after["vertical"] - before["vertical"]
+    d_after, d_delta = after["diagonal"], after["diagonal"] - before["diagonal"]
+    t_after, t_delta = after["tension"], after["tension"] - before["tension"]
 
     feats = [
-        float(np.tanh(eval_after_user / _EVAL_FEAT_TANH_SCALE)),
-        float(np.tanh(delta_vs_best / _EVAL_FEAT_TANH_SCALE)),
+        _tanh(eval_after_user, _EVAL_FEAT_TANH_SCALE),
+        _tanh(eval_delta_user, _EVAL_FEAT_TANH_SCALE),
+        _tanh(delta_vs_best, _EVAL_FEAT_TANH_SCALE),
+        _tanh(mat_after_user, _MATERIAL_TANH_SCALE),
+        _tanh(mat_delta_user, _MATERIAL_TANH_SCALE),
+        _unit01(v_after, _VERTICAL_OPENNESS_MAX),
+        _div(v_delta, _OPENNESS_DELTA_SCALE),
+        _unit01(d_after, _DIAGONAL_OPENNESS_MAX),
+        _div(d_delta, _OPENNESS_DELTA_SCALE),
+        _div(t_after, _PAWN_TENSION_SCALE),
+        _div(t_delta, _PAWN_TENSION_SCALE),
+        _div(u_leg, _LEGAL_MOVES_SCALE),
+        _div(o_leg, _LEGAL_MOVES_SCALE),
+        _div(u_leg_d, _LEGAL_MOVES_SCALE),
+        _div(o_leg_d, _LEGAL_MOVES_SCALE),
+        _unit01(u_ks, _KING_SAFETY_MAX),
+        _unit01(o_ks, _KING_SAFETY_MAX),
+        _div(u_ks_d, _KING_SAFETY_DELTA_SCALE),
+        _div(o_ks_d, _KING_SAFETY_DELTA_SCALE),
+        _unit01(u_rk, _MEAN_RANK_MAX),
+        _unit01(o_rk, _MEAN_RANK_MAX),
+        _div(u_rk_d, _MEAN_RANK_MAX),
+        _div(o_rk_d, _MEAN_RANK_MAX),
+        _tanh(u_at, _ATTACK_PRESSURE_TANH_SCALE),
+        _tanh(o_at, _ATTACK_PRESSURE_TANH_SCALE),
+        _tanh(u_at_d, _ATTACK_PRESSURE_TANH_SCALE),
+        _tanh(o_at_d, _ATTACK_PRESSURE_TANH_SCALE),
+        _tanh(u_hg, _HANGING_VALUE_TANH_SCALE),
+        _tanh(o_hg, _HANGING_VALUE_TANH_SCALE),
+        _tanh(u_hg_d, _HANGING_VALUE_TANH_SCALE),
+        _tanh(o_hg_d, _HANGING_VALUE_TANH_SCALE),
+        _tanh(u_pn, _PIN_VALUE_TANH_SCALE),
+        _tanh(o_pn, _PIN_VALUE_TANH_SCALE),
+        _tanh(u_pn_d, _PIN_VALUE_TANH_SCALE),
+        _tanh(o_pn_d, _PIN_VALUE_TANH_SCALE),
         1.0 if is_capture else 0.0,
         1.0 if is_castle else 0.0,
         1.0 if gave_check else 0.0,
+        1.0 if created_fork else 0.0,
         1.0 if is_promo else 0.0,
         1.0 if is_ep else 0.0,
+        1.0 if is_recapture else 0.0,
         *_piece_one_hot(piece_type),
         from_file / _BOARD_SPAN,
         from_rank / _BOARD_SPAN,
         to_file / _BOARD_SPAN,
         to_rank / _BOARD_SPAN,
+        delta_file / _BOARD_SPAN,
+        delta_rank / _BOARD_SPAN,
         chebyshev / _BOARD_SPAN,
-        float(np.tanh(material_delta_user / _MATERIAL_TANH_SCALE)),
-        (vertical_after - vertical_before) / _OPENNESS_DELTA_SCALE,
-        (diagonal_after - diagonal_before) / _OPENNESS_DELTA_SCALE,
-        (tension_after - tension_before) / _PAWN_TENSION_DELTA_SCALE,
-        1.0 if created_fork else 0.0,
     ]
     out = np.asarray(feats, dtype=np.float32)
     if out.shape != (MOVE_FEAT_DIM,):
@@ -342,6 +480,8 @@ def pack_candidate_tensors(
     user_move_uci: str,
     legal_ucis: tuple[str, ...] | list[str] | None = None,
     max_candidates: int = MAX_CANDIDATES,
+    opponent_move_was_capture: bool = False,
+    evaluation_before_white: float | None = None,
 ) -> tuple[np.ndarray, np.ndarray, int] | None:
     """Pack padded ``(feats[MAX,F], mask[MAX], label_index)``.
 
@@ -372,10 +512,12 @@ def pack_candidate_tensors(
         rows = [user_row, *others[: max_candidates - 1]]
         rows.sort(key=lambda r: r[0])
 
-    material_before = _material_white_pov(board)
-    vertical_before = fen_vertical_openness(fen_before)
-    diagonal_before = fen_diagonal_openness(fen_before)
-    tension_before = fen_pawn_tension(fen_before)
+    before = _position_metric_snapshot(board, fen_before)
+    evaluation_before_user = (
+        None
+        if evaluation_before_white is None
+        else white_to_user_pov(evaluation_before_white, color_is_white=color_is_white)
+    )
 
     feats = np.zeros((max_candidates, MOVE_FEAT_DIM), dtype=np.float32)
     mask = np.zeros((max_candidates,), dtype=np.float32)
@@ -392,11 +534,11 @@ def pack_candidate_tensors(
             move,
             eval_after_user=ev,
             delta_vs_best=delta,
+            evaluation_before_user=evaluation_before_user,
             fen_before=fen_before,
-            material_before_white=material_before,
-            vertical_before=vertical_before,
-            diagonal_before=diagonal_before,
-            tension_before=tension_before,
+            before=before,
+            color_is_white=color_is_white,
+            opponent_move_was_capture=opponent_move_was_capture,
         )
         mask[i] = 1.0
         if uci == user_move_uci:
@@ -413,6 +555,8 @@ def live_candidate_tensors(
     max_candidates: int = MAX_CANDIDATES,
     num_nodes: int | None = CANDIDATE_STOCKFISH_NODES,
     evals: dict[str, float] | None = None,
+    opponent_move_was_capture: bool = False,
+    evaluation_before_white: float | None = None,
 ) -> tuple[list[str], np.ndarray, np.ndarray]:
     """Evaluate live legal moves; return ``(ucis, feats, mask)`` (ucis = valid slots).
 
@@ -438,7 +582,6 @@ def live_candidate_tensors(
     else:
         rows = list(rows)
 
-    # Label unused at play; pass first UCI so packer accepts the set.
     packed = pack_candidate_tensors(
         evals,
         fen_before=fen,
@@ -446,6 +589,8 @@ def live_candidate_tensors(
         user_move_uci=rows[0][0],
         legal_ucis=[u for u, _, _ in rows],
         max_candidates=max_candidates,
+        opponent_move_was_capture=opponent_move_was_capture,
+        evaluation_before_white=evaluation_before_white,
     )
     if packed is None:
         return empty

@@ -93,12 +93,17 @@ class NeuralBaselineBot(ChessBot):
         t_sf = time.perf_counter()
 
         last_uci = board.peek().uci() if board.move_stack else None
+        root_eval_white = _root_eval_white_pov_from_candidates(evals, color_is_white=color_is_white)
+        opponent_move_was_capture = False
+        if board.move_stack:
+            probe = board.copy(stack=True)
+            last = probe.pop()
+            opponent_move_was_capture = probe.is_capture(last)
+
         state = self._encoder.encode(
             board,
             last_opponent_move_uci=last_uci,
-            evaluation_white_pov=_root_eval_white_pov_from_candidates(
-                evals, color_is_white=color_is_white
-            ),
+            evaluation_white_pov=root_eval_white,
         )
         t_state = time.perf_counter()
 
@@ -107,6 +112,8 @@ class NeuralBaselineBot(ChessBot):
             board,
             num_nodes=self.candidate_nodes,
             evals=evals,
+            opponent_move_was_capture=opponent_move_was_capture,
+            evaluation_before_white=root_eval_white,
         )
         t_feats = time.perf_counter()
         if not ucis:
