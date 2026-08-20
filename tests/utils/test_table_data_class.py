@@ -59,6 +59,7 @@ def test_fetch_all_from_db_maps_rows_and_ensures_table() -> None:
     db_client.ensure_table.assert_called_once_with(Account.get_metadata())
     db_client.read.assert_called_once_with(
         Account.get_metadata(),
+        columns=None,
         where=None,
         order_by="account_id",
         limit=None,
@@ -66,3 +67,30 @@ def test_fetch_all_from_db_maps_rows_and_ensures_table() -> None:
     assert len(accounts) == 1
     assert accounts[0].account_id == "acct-1"
     assert accounts[0].username == "player"
+
+
+def test_fetch_all_from_db_passes_column_projection() -> None:
+    db_client = MagicMock()
+    db_client.read.return_value = [
+        {
+            "account_id": "acct-1",
+            "username": "player",
+            "platform": "Chess.com",
+        }
+    ]
+
+    accounts = Account.fetch_all_from_db(
+        db_client,
+        columns=["account_id", "username", "platform"],
+        where="\"platform\" = 'Chess.com'",
+        limit=10,
+    )
+
+    db_client.read.assert_called_once_with(
+        Account.get_metadata(),
+        columns=["account_id", "username", "platform"],
+        where="\"platform\" = 'Chess.com'",
+        order_by=None,
+        limit=10,
+    )
+    assert accounts[0].latest_ingestion is None

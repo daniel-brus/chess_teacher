@@ -318,6 +318,7 @@ class TableDataClass(ABC):
         *,
         id: str | None = None,
         source: dict[str, Any] | None = None,
+        columns: list[str] | None = None,
     ) -> Self:
         """
         Method to fetch an object from a databse that have ONE id column.
@@ -325,6 +326,8 @@ class TableDataClass(ABC):
             db_client: DatabaseClient
             id: value of the hash-id to fetch. If not provided: try to generate from source.
             source: dict that the id can be generated from. Should contain alls the columns to hash.
+            columns: Optional column projection (defaults to SELECT *). Omitted fields must
+                have dataclass defaults, or :meth:`from_dict` raises.
         Returns:
             Object as generated from the fetched DB entry.
         Raises:
@@ -334,7 +337,10 @@ class TableDataClass(ABC):
         try:
             tablemetadata = cls.get_metadata()
             where = cls._where_for_id(row_id)
-            result = cast(list[dict[str, Any]], db_client.read(tablemetadata, where=where))
+            result = cast(
+                list[dict[str, Any]],
+                db_client.read(tablemetadata, columns=columns, where=where),
+            )
             if len(result) != 1:
                 logger.log_and_raise(
                     DatabaseError(
@@ -353,8 +359,14 @@ class TableDataClass(ABC):
         where: str | None = None,
         order_by: str | None = None,
         limit: int | None = None,
+        columns: list[str] | None = None,
     ) -> list[Self]:
-        """Load rows from the table as dataclass instances."""
+        """Load rows from the table as dataclass instances.
+
+        Args:
+            columns: Optional column projection (defaults to SELECT *). Omitted fields must
+                have dataclass defaults, or :meth:`from_dict` raises.
+        """
         try:
             table_metadata = cls.get_metadata()
             db_client.ensure_table(table_metadata)
@@ -362,6 +374,7 @@ class TableDataClass(ABC):
                 list[dict[str, Any]],
                 db_client.read(
                     table_metadata,
+                    columns=columns,
                     where=where,
                     order_by=order_by,
                     limit=limit,

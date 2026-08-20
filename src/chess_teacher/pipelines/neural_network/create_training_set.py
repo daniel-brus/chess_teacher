@@ -165,6 +165,33 @@ _PASSTHROUGH_BOOL_ATTRS: tuple[str, ...] = (
     "opponent_move_was_capture",
 )
 
+# Avoid SELECT * / PGN egress when hydrating training rows.
+_GAME_TRAINING_COLUMNS: list[str] = ["game_id", "color"]
+_MOVE_TRAINING_COLUMNS: list[str] = [
+    "move_id",
+    "game_id",
+    "account_id",
+    "move_nr",
+    "ply",
+    "move_san",
+    "move_uci",
+    "fen_before",
+    "fen_after",
+    "previous_opponent_move_uci",
+]
+_CHARS_TRAINING_COLUMNS: list[str] = list(
+    dict.fromkeys([
+        "move_id",
+        "game_id",
+        "account_id",
+        *_SIGNED_WHITE_POV_ATTRS,
+        *(white for white, _, _, _ in _SIDE_METRIC_PAIRS),
+        *(black for _, black, _, _ in _SIDE_METRIC_PAIRS),
+        *_PASSTHROUGH_NUMERIC_ATTRS,
+        *_PASSTHROUGH_BOOL_ATTRS,
+    ])
+)
+
 # Pre-move / context features only (no chosen-move leakage for move prediction).
 _STATE_FEATURE_KEYS: tuple[str, ...] = (
     "evaluation_before_user_pov",
@@ -395,20 +422,27 @@ class TrainingDatumBuilder:
         cls,
         move: Move,
         chars: MoveCharacteristics,
-        game: Game,
+        *,
+        color: Color,
+        game_id: str | None = None,
     ) -> TrainingDatum:
-        """Pure convert: DB move + characteristics + game → training datum."""
+        """Pure convert: DB move + characteristics + game color → training datum.
+
+        ``game_id`` defaults to ``move.game_id``. Pass explicitly when validating a
+        joined game row without hydrating full ``Game`` (avoids PGN egress).
+        """
         if move.move_id != chars.move_id:
             raise ValueError(f"move_id mismatch: move={move.move_id!r} chars={chars.move_id!r}")
-        if move.game_id != game.game_id:
-            raise ValueError(f"game_id mismatch: move={move.game_id!r} game={game.game_id!r}")
+        resolved_game_id = game_id if game_id is not None else move.game_id
+        if move.game_id != resolved_game_id:
+            raise ValueError(f"game_id mismatch: move={move.game_id!r} game={resolved_game_id!r}")
 
         identity = cls.derive_move_identity(
             fen_before=move.fen_before,
             move_uci=move.move_uci,
             previous_opponent_move_uci=move.previous_opponent_move_uci,
         )
-        features = cls.remap_characteristics_to_user_pov(chars, game.color)
+        features = cls.remap_characteristics_to_user_pov(chars, color)
 
         return TrainingDatum(
             move_id=move.move_id,
@@ -416,7 +450,7 @@ class TrainingDatumBuilder:
             account_id=move.account_id,
             move_nr=move.move_nr,
             ply=move.ply,
-            color=game.color,
+            color=color,
             fen_before=move.fen_before,
             fen_after=move.fen_after,
             move_uci=move.move_uci,
@@ -863,22 +897,35 @@ class TrainingDataStore:
         chars_by_id = {
             c.move_id: c
             for c in MoveCharacteristics.fetch_all_from_db(
-                self._db, where=f'"move_id" IN ({move_id_list})'
+                self._db,
+                columns=_CHARS_TRAINING_COLUMNS,
+                where=f'"move_id" IN ({move_id_list})',
             )
         }
-        games_by_id = {
-            g.game_id: g
-            for g in Game.fetch_all_from_db(self._db, where=f'"game_id" IN ({game_id_list})')
+        color_by_game_id = {
+            row["game_id"]: Color(row["color"])
+            for row in self._db.read(
+                Game.get_metadata(),
+                columns=_GAME_TRAINING_COLUMNS,
+                where=f'"game_id" IN ({game_id_list})',
+            )
         }
 
         datums: list[TrainingDatum] = []
         for move in moves:
             chars = chars_by_id.get(move.move_id)
-            game = games_by_id.get(move.game_id)
-            if chars is None or game is None:
+            color = color_by_game_id.get(move.game_id)
+            if chars is None or color is None:
                 continue
             try:
-                datums.append(TrainingDatumBuilder.from_db_rows(move, chars, game))
+                datums.append(
+                    TrainingDatumBuilder.from_db_rows(
+                        move,
+                        chars,
+                        color=color,
+                        game_id=move.game_id,
+                    )
+                )
             except ValueError:
                 continue
         return datums
@@ -888,16 +935,35 @@ class TrainingDataStore:
         if not move_ids:
             return []
         move_id_list = ", ".join(quote_literal(mid) for mid in move_ids)
-        moves = Move.fetch_all_from_db(self._db, where=f'"move_id" IN ({move_id_list})')
+        moves = Move.fetch_all_from_db(
+            self._db,
+            columns=_MOVE_TRAINING_COLUMNS,
+            where=f'"move_id" IN ({move_id_list})',
+        )
         by_id = {m.move_id: m for m in moves}
         ordered_moves = [by_id[mid] for mid in move_ids if mid in by_id]
         return self._datums_from_moves(ordered_moves)
 
     def fetch_one(self, move_id: str) -> TrainingDatum:
-        move = Move.fetch_from_db(self._db, id=move_id)
-        chars = MoveCharacteristics.fetch_from_db(self._db, id=move_id)
-        game = Game.fetch_from_db(self._db, id=move.game_id)
-        return TrainingDatumBuilder.from_db_rows(move, chars, game)
+        move = Move.fetch_from_db(self._db, id=move_id, columns=_MOVE_TRAINING_COLUMNS)
+        chars = MoveCharacteristics.fetch_from_db(
+            self._db, id=move_id, columns=_CHARS_TRAINING_COLUMNS
+        )
+        game_rows = self._db.read(
+            Game.get_metadata(),
+            columns=_GAME_TRAINING_COLUMNS,
+            where=generate_ident_is_literal("game_id", move.game_id),
+        )
+        if len(game_rows) != 1:
+            raise ValueError(
+                f"Expected one game for game_id={move.game_id!r}, got {len(game_rows)}"
+            )
+        return TrainingDatumBuilder.from_db_rows(
+            move,
+            chars,
+            color=Color(game_rows[0]["color"]),
+            game_id=str(game_rows[0]["game_id"]),
+        )
 
     def fetch_for_account(
         self,
@@ -907,6 +973,7 @@ class TrainingDataStore:
     ) -> list[TrainingDatum]:
         moves = Move.fetch_all_from_db(
             self._db,
+            columns=_MOVE_TRAINING_COLUMNS,
             where=generate_ident_is_literal("account_id", account_id),
             order_by='"ply" ASC',
             limit=limit,
