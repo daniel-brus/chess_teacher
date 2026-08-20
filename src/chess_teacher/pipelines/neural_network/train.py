@@ -21,7 +21,13 @@ from chess_teacher.pipelines.neural_network.create_training_set import (
     TrainingBatch,
     TrainingDatum,
 )
-from chess_teacher.pipelines.neural_network.ply_weights import ply_sample_weights
+from chess_teacher.pipelines.neural_network.ply_weights import (
+    candidate_style_sample_weights,
+    style_disagree_boost_from_env,
+    style_disagree_scale_from_env,
+    user_not_sf_best_mask,
+    user_sf_disagree_strength,
+)
 from chess_teacher.pipelines.neural_network.tf_runtime import ensure_tensorflow_logging
 from chess_teacher.utils.logging import get_logger
 
@@ -191,10 +197,10 @@ class BaselineTrainer:
     """Shared state tower + per-candidate MLP scorer; listwise masked CE.
 
     Inputs: ``state`` (D,), ``move_feats`` (MAX, F). Output: logits (MAX,).
-    Sample weights: ``exp(λ · ply)`` (see ``ply_weights``).
+    Sample weights: ply * continuous SF-disagree style boost (see ``ply_weights``).
     """
 
-    DEFAULT_EPOCHS = 3
+    DEFAULT_EPOCHS = 8
     DEFAULT_BATCH_SIZE = 64
     DEFAULT_HIDDEN = 128
     DEFAULT_SCORE_HIDDEN = 64
@@ -208,6 +214,8 @@ class BaselineTrainer:
         score_hidden: int = DEFAULT_SCORE_HIDDEN,
         max_candidates: int = MAX_CANDIDATES,
         move_feat_dim: int = MOVE_FEAT_DIM,
+        style_disagree_boost: float | None = None,
+        style_disagree_scale: float | None = None,
     ) -> None:
         self.epochs = epochs
         self.batch_size = batch_size
@@ -215,6 +223,16 @@ class BaselineTrainer:
         self.score_hidden = score_hidden
         self.max_candidates = max_candidates
         self.move_feat_dim = move_feat_dim
+        self.style_disagree_boost = (
+            style_disagree_boost_from_env()
+            if style_disagree_boost is None
+            else float(style_disagree_boost)
+        )
+        self.style_disagree_scale = (
+            style_disagree_scale_from_env()
+            if style_disagree_scale is None
+            else float(style_disagree_scale)
+        )
 
     def build(self, input_dim: int) -> Any:
         keras = _import_keras()
@@ -339,17 +357,33 @@ class BaselineTrainer:
         )
         x_state = TrainingBatch(kept_datums).state_matrix()
         y = pack_candidate_targets(labels, mask)
-        sample_w = ply_sample_weights([d.ply for d in kept_datums])
+        disagree_mask = user_not_sf_best_mask(feats, labels)
+        strength = user_sf_disagree_strength(feats, labels, scale_pawns=self.style_disagree_scale)
+        sample_w = candidate_style_sample_weights(
+            [d.ply for d in kept_datums],
+            feats,
+            labels,
+            style_disagree_boost=self.style_disagree_boost,
+            style_disagree_scale=self.style_disagree_scale,
+        )
+        disagree_frac = float(np.mean(disagree_mask))
+        mean_strength = float(np.mean(strength))
 
         model = self.load_or_build(
             input_dim=int(x_state.shape[1]),
             weights_path=weights_path,
         )
         logger.info(
-            "Starting Keras fit samples=%s epochs=%s batch_size=%s…",
+            "Starting Keras fit samples=%s epochs=%s batch_size=%s "
+            "style_disagree_boost=%s scale_pawns=%s disagree_frac=%.3f "
+            "mean_strength=%.3f…",
             len(kept_datums),
             self.epochs,
             min(self.batch_size, len(kept_datums)),
+            self.style_disagree_boost,
+            self.style_disagree_scale,
+            disagree_frac,
+            mean_strength,
         )
         keras = _import_keras()
         total_epochs = self.epochs
@@ -383,6 +417,11 @@ class BaselineTrainer:
         metrics["move_feat_dim"] = float(self.move_feat_dim)
         metrics["move_feat_version"] = float(CANDIDATE_MOVE_FEAT_VERSION)
         metrics["head_candidate_style"] = 1.0
+        metrics["style_disagree_boost"] = float(self.style_disagree_boost)
+        metrics["style_disagree_scale"] = float(self.style_disagree_scale)
+        metrics["sf_disagree_frac"] = disagree_frac
+        metrics["sf_disagree_mean_strength"] = mean_strength
+        metrics["epochs"] = float(self.epochs)
         return model, metrics
 
     @staticmethod

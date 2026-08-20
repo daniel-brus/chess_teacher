@@ -18,7 +18,7 @@ from chess_teacher.pipelines.neural_network.create_training_set import (
     TrainingDatum,
 )
 from chess_teacher.pipelines.neural_network.mlflow_utils import MLflowTracker
-from chess_teacher.pipelines.neural_network.ply_weights import ply_sample_weights
+from chess_teacher.pipelines.neural_network.ply_weights import candidate_style_sample_weights
 from chess_teacher.pipelines.neural_network.tf_runtime import ensure_tensorflow_logging
 from chess_teacher.utils.db.client import DatabaseClient
 from chess_teacher.utils.logging import get_logger
@@ -133,7 +133,7 @@ class CandidateStyleTopKScorer(ModelScorer):
     """User-move top-k among SF-featured candidates (higher is better).
 
     Prefer precomputed ``candidate_evaluations`` on eval datums (fast). Uses the
-    same ply exponential sample weights as training for the reported primary.
+    same sample weights as training (ply * style disagree boost) for primary.
     """
 
     def __init__(
@@ -192,7 +192,11 @@ class CandidateStyleTopKScorer(ModelScorer):
         part3 = np.argpartition(masked, -k3, axis=1)[:, -k3:]
         top3 = np.any(part3 == y_index.reshape(-1, 1), axis=1)
 
-        weights = ply_sample_weights([d.ply for d in kept_datums])
+        weights = candidate_style_sample_weights(
+            [d.ply for d in kept_datums],
+            feats,
+            labels,
+        )
         w_sum = float(np.sum(weights))
         acc_w = float(np.sum(hits.astype(np.float64) * weights) / w_sum) if w_sum else 0.0
         acc1 = float(np.mean(top1))
@@ -204,6 +208,7 @@ class CandidateStyleTopKScorer(ModelScorer):
             details={
                 f"top{self.k}_accuracy": acc,
                 f"top{self.k}_accuracy_ply_weighted": acc_w,
+                f"top{self.k}_accuracy_weighted": acc_w,
                 "top1_accuracy": acc1,
                 "top3_accuracy": acc3,
                 "n_eval": float(len(kept_datums)),

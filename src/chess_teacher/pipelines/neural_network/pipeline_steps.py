@@ -215,6 +215,9 @@ class LogToMLflowStep(PipelineStep):
                 "max_candidates": int(metrics.get("max_candidates", 0)),
                 "move_feat_dim": int(metrics.get("move_feat_dim", 0)),
                 "move_feat_version": int(metrics.get("move_feat_version", 0)),
+                "style_disagree_boost": float(metrics.get("style_disagree_boost", 1.0)),
+                "style_disagree_scale": float(metrics.get("style_disagree_scale", 2.0)),
+                "epochs": int(metrics.get("epochs", 0)),
             },
             metrics=metrics,
         )
