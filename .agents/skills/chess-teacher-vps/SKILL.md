@@ -2,10 +2,12 @@
 name: chess-teacher-vps
 description: >-
   Read-only inspection of the production Hetzner VPS (k3s/k8s) via SSH.
-  Whitelisted kubectl get/describe/logs, cluster-info, and host df/free/uptime
-  only — never apply, delete, restart, or ad-hoc shell. SSH credentials from
-  Doppler ci config. Use when the user asks about production pods, deploy
-  status, ingress, logs, or VPS health.
+  Whitelisted kubectl get/describe/logs, cluster-info, host df/free/uptime,
+  and prod Postgres reads via kubectl exec into streamlit
+  (scripts/agent_db_query.py). Never apply, delete, restart, or
+  ad-hoc shell. SSH credentials from Doppler ci config. Use when the user
+  asks about production pods, deploy status, ingress, logs, VPS health, or
+  production database contents behind the firewall.
 ---
 
 # Chess Teacher VPS / Hetzner (read-only)
@@ -17,18 +19,19 @@ This is the **live production Hetzner VPS** running k8s (`chess-teacher` namespa
 **The agent MUST:**
 
 - Use **only** `.agents/skills/chess-teacher-vps/scripts/vps_query.py` subcommands — fixed, whitelisted remote commands.
-- Run **read-only** operations: `kubectl get`, `kubectl describe`, `kubectl logs`, `kubectl cluster-info`, `kubectl rollout status` (status only, no restart).
+- Run **read-only** operations: `kubectl get`, `kubectl describe`, `kubectl logs`, `kubectl cluster-info`, `kubectl rollout status` (status only, no restart), and prod DB reads via `kubectl exec` into `deploy/streamlit` running `python scripts/agent_db_query.py`.
 - Prefer **`info`** and **`ping`** before deeper inspection.
 
 **The agent MUST NOT:**
 
 - Run arbitrary SSH commands, interactive shells, or pass user text as remote shell.
-- Run `kubectl apply`, `delete`, `patch`, `scale`, `rollout restart`, `exec`, `port-forward`, or edit manifests on the VPS.
+- Run `kubectl apply`, `delete`, `patch`, `scale`, `rollout restart`, `port-forward`, or edit manifests on the VPS.
+- Run mutating DB ops, backfill, baseline reset/train, or anything that writes to Postgres.
 - Run `systemctl stop/restart`, `docker rm/stop`, `rm`, `reboot`, `doppler secrets set`, or anything that changes state.
 - Fetch or print Doppler **secret values** from the VPS (only SSH connection metadata via `info`).
 - Deploy, sync, or run `apply.sh` unless the user **explicitly** requests a deploy in a separate, deliberate step.
 
-If the user needs a mutating change (restart pod, deploy, config edit), **stop and ask for explicit confirmation** — do not use this skill.
+If the user needs a mutating change (restart pod, deploy, config edit, backfill), **stop and ask for explicit confirmation** — do not use this skill.
 
 ## Doppler environments
 
@@ -37,7 +40,7 @@ If the user needs a mutating change (restart pod, deploy, config edit), **stop a
 | `dev_local` | Local Compose (Postgres, MinIO, Redis on localhost) | No — use db/storage/redis skills |
 | `dev_k3d` | Local k3d cluster | No — use kubectl locally |
 | `ci` | GitHub Actions + **SSH to VPS** (`DEPLOY_HOST`, `DEPLOY_USER`, `DEPLOY_SSH_KEY`) | **Yes** — script reads SSH from here |
-| `prod` | Runtime secrets on VPS (Postgres, S3, Redis URLs for the app) | No for SSH; app secrets are injected on VPS at deploy time |
+| `prod` | Runtime secrets on VPS (Postgres, S3, Redis URLs for the app) | No for SSH; DB queries use env already injected into the streamlit pod |
 
 The VPS script loads SSH credentials from Doppler **`ci`** automatically. Requires `doppler login` with access to project `chess-teacher`.
 
@@ -45,8 +48,8 @@ Runtime app config on the cluster comes from **`prod`** via `doppler run` during
 
 ## Who runs what
 
-- **The user asks questions in chat** (e.g. “are streamlit pods healthy?” or “recent prod logs?”).
-- **The agent runs** `vps_query.py` subcommands, interprets JSON (`stdout` / `stderr`), and answers in plain language.
+- **The user asks questions in chat** (e.g. “are streamlit pods healthy?” or “how many prod move_characteristics have candidate_evaluations?”).
+- **The agent runs** `vps_query.py` subcommands, interprets JSON (`stdout` / `stderr` / `result`), and answers in plain language.
 - The script sets **`ENVIRONMENT=AGENT`**. SSH key is written to a temp file with `0600` and deleted immediately after use.
 
 ## Rules
@@ -54,22 +57,24 @@ Runtime app config on the cluster comes from **`prod`** via `doppler run` during
 - **Read-only only.** No exceptions without explicit user approval outside this skill.
 - Always pass **`--json`**. Run from **repository root**. Do not use `uv`.
 - Do not run `pytest` / `mypy`; ask the user to run those manually.
-- Log output may contain user data — summarize; do not paste large log dumps unless asked.
+- Log / DB output may contain user data — summarize; do not paste large dumps unless asked.
+- For **local/dev** Postgres use **chess-teacher-db**. For **prod** Postgres (firewalled) use this skill’s `db-*` commands.
 
 ## Agent workflow
 
 1. `info` → confirm target host (no secrets).
 2. `ping` → SSH works.
-3. Pick command (pods, logs, events, …).
+3. Pick command (pods, logs, `db-count`, …).
 
 ```bash
 python .agents/skills/chess-teacher-vps/scripts/vps_query.py --json info
 python .agents/skills/chess-teacher-vps/scripts/vps_query.py --json ping
 python .agents/skills/chess-teacher-vps/scripts/vps_query.py --json pods
 python .agents/skills/chess-teacher-vps/scripts/vps_query.py --json logs streamlit-xxxxx-yyyyy --tail 50
+python .agents/skills/chess-teacher-vps/scripts/vps_query.py --json db-count pipelines/preprocessing move_characteristics --where "candidate_evaluations IS NOT NULL"
 ```
 
-On Windows (PowerShell): `.venv\Scripts\python.exe` optional (script has no chess_teacher imports); needs `ssh` and `doppler` on PATH. The script writes the deploy key under `%LOCALAPPDATA%\chess-teacher-agent\` with LF newlines and locked-down ACLs — required because OpenSSH rejects keys in `%TEMP%` when Cursor/sandbox adds extra principals.
+On Windows (PowerShell): `.venv\Scripts\python.exe` optional for host-only commands; needs `ssh` and `doppler` on PATH. The script writes the deploy key under `%LOCALAPPDATA%\chess-teacher-agent\` with LF newlines and locked-down ACLs — required because OpenSSH rejects keys in `%TEMP%` when Cursor/sandbox adds extra principals.
 
 ## Script commands
 
@@ -92,6 +97,18 @@ On Windows (PowerShell): `.venv\Scripts\python.exe` optional (script has no ches
 | `disk` | `df -h` |
 | `memory` | `free -m` |
 | `uptime` | `uptime` |
+| `db-list-domains` | `kubectl exec deploy/streamlit -- python scripts/agent_db_query.py --json list-domains` |
+| `db-list-tables <domain>` | Same via `list-tables` |
+| `db-count <domain> <table> [--where EXPR]` | Same via `count` |
+| `db-read <domain> <table> […]` | Same via `read` (limit capped at 100) |
+| `db-exists <domain> <table> --where EXPR` | Same via `exists` |
+| `db-schema <domain> <table>` | Same via `schema` |
+| `db-all-match <domain> <table> --condition EXPR` | Same via `all-match` |
+| `db-unique <domain> <table> --columns a,b` | Same via `unique` |
+
+`db-*` args are validated locally (domain/table shape, no `;`, no write SQL keywords) before building a POSIX-quoted remote argv. Never invent extra remote shell.
+
+Successful `db-*` responses put parsed JSON under **`result`**.
 
 ## Mapping user questions → commands
 
@@ -105,12 +122,18 @@ On Windows (PowerShell): `.venv\Scripts\python.exe` optional (script has no ches
 | "Is streamlit deployed?" | `deployments`, `rollout-status` |
 | "Ingress / URL routing?" | `ingress`, `services` |
 | "Disk / memory on VPS?" | `disk`, `memory` |
+| "Prod DB row count / schema / uniqueness?" | `db-count` / `db-schema` / `db-unique` / … |
 
 ## Architecture (context)
 
 - **Hetzner VPS** runs k3s/k8s; manifests under `/opt/chess_teacher/k8s/` (copied by CD).
 - **CD** (push to `main`): build image → SCP manifests → SSH → `doppler run --config prod -- apply.sh`.
 - **Namespace:** `chess-teacher`. Main workload: `deployment/streamlit`.
+- **Prod Postgres** is firewalled from the laptop; `db-*` reaches it from inside the cluster via the streamlit pod’s injected `POSTGRES_*` env.
+
+## Deploy note for `db-*`
+
+Remote script: `scripts/agent_db_query.py` (copied into the image). If `db-*` fails with file-not-found, merge/deploy this branch to main first, then retry.
 
 ## Troubleshooting
 
@@ -123,7 +146,9 @@ On Windows (PowerShell): `.venv\Scripts\python.exe` optional (script has no ches
 | `ssh` not found | Install OpenSSH client (Windows optional feature) |
 | Empty pods list | Wrong namespace or cluster issue — try `cluster-info`, `nodes` |
 | Log command fails | Pod name from `pods` output; check `--container` if multi-container |
+| `db-*` script missing | Image lag — wait for CD after merge, or confirm streamlit rolled to new tag |
+| `db-*` JSON parse_error | Check `stderr` / `stdout` in the payload; often pod crash or import error |
 
 ## References
 
-Deploy script: `orchestration/k8s/apply.sh`. CD workflow: `.github/workflows/cd.yml`.
+Deploy script: `orchestration/k8s/apply.sh`. CD workflow: `.github/workflows/cd.yml`. Shared DB CLI: `scripts/agent_db_query.py`.

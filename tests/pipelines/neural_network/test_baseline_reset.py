@@ -55,13 +55,15 @@ def test_reset_applies_cutoff_and_archives() -> None:
     with (
         patch.object(TrainingState, "for_baseline", return_value=state),
         patch.object(BaselineModel, "fetch_all_from_db", return_value=[row]),
-        patch.object(TrainingState, "save_to_db") as save_state,
-        patch.object(BaselineModel, "save_to_db") as save_model,
+        patch.object(TrainingState, "save_to_db", autospec=True) as save_state,
+        patch.object(BaselineModel, "save_to_db", autospec=True) as save_model,
     ):
         result = reset_baseline_training(db, dry_run=False)
 
     assert result.models_archived == 1
     save_state.assert_called_once()
     save_model.assert_called_once()
-    saved_model = save_model.call_args[0][0]
+    saved_model = save_model.call_args.args[0]
+    assert isinstance(saved_model, BaselineModel)
     assert saved_model.status == BaselineModelStatus.ARCHIVED
+    assert saved_model.version == "v6"
