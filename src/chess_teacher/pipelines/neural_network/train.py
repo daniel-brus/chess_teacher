@@ -1,4 +1,9 @@
-"""Keras baseline model trainer — fixed-vocab move policy head."""
+"""Keras baseline trainer — candidate-aware style scorer (SF eval features per move).
+
+Replaces the fixed-vocab policy head. Parent weights load only when compatible with
+``head=candidate_style`` (state tower + per-candidate scorer). See
+``candidate_eval.py`` for delta convention.
+"""
 
 from __future__ import annotations
 
@@ -7,131 +12,198 @@ from typing import Any
 
 import numpy as np
 
+from chess_teacher.pipelines.neural_network.candidate_eval import (
+    CANDIDATE_MOVE_FEAT_VERSION,
+    MAX_CANDIDATES,
+    MOVE_FEAT_DIM,
+)
 from chess_teacher.pipelines.neural_network.create_training_set import (
     TrainingBatch,
     TrainingDatum,
 )
-from chess_teacher.pipelines.neural_network.move_encoding import POLICY_VOCAB_SIZE
+from chess_teacher.pipelines.neural_network.ply_weights import (
+    candidate_style_sample_weights,
+    style_disagree_boost_from_env,
+    style_disagree_scale_from_env,
+    user_not_sf_best_mask,
+    user_sf_disagree_strength,
+)
+from chess_teacher.pipelines.neural_network.tf_runtime import ensure_tensorflow_logging
 from chess_teacher.utils.logging import get_logger
 
 logger = get_logger()
 
-HEAD_TYPE_POLICY = "policy"
+# Before any lazy ``import tensorflow`` in this module (and usually before other
+# call sites that import train first).
+ensure_tensorflow_logging()
 
 
-def _masked_sparse_categorical_crossentropy(vocab_size: int = POLICY_VOCAB_SIZE):
-    """Build loss: ``y_true`` is ``(batch, V+1)`` = legal mask floats + class index."""
+def _import_tensorflow():
+    """Import TF after quieting C++ STDERR, then re-wire Python loggers."""
+    ensure_tensorflow_logging()
     import tensorflow as tf  # type: ignore[import-untyped]
 
+    ensure_tensorflow_logging()
+    return tf
+
+
+def _import_keras():
+    ensure_tensorflow_logging()
+    from tensorflow import keras  # type: ignore[import-untyped]
+
+    ensure_tensorflow_logging()
+    return keras
+
+
+# Re-export for pipeline / MLflow params.
+HEAD_TYPE_POLICY = "policy"  # legacy marker only; trainer no longer builds this head.
+
+
+def _masked_candidate_sparse_ce(max_candidates: int = MAX_CANDIDATES):
+    """``y_true`` is ``(batch, MAX+1)`` = candidate mask floats + class index."""
+    tf = _import_tensorflow()
+
     def loss_fn(y_true: Any, y_pred: Any) -> Any:
-        mask = y_true[:, :vocab_size]
-        indices = tf.cast(y_true[:, vocab_size], tf.int32)
+        mask = y_true[:, :max_candidates]
+        indices = tf.cast(y_true[:, max_candidates], tf.int32)
         neg_inf = tf.constant(-1.0e9, dtype=y_pred.dtype)
         masked_logits = tf.where(mask > 0.5, y_pred, neg_inf)
         return tf.keras.losses.sparse_categorical_crossentropy(
             indices, masked_logits, from_logits=True
         )
 
-    loss_fn.__name__ = "masked_sparse_ce"
+    loss_fn.__name__ = "masked_candidate_sparse_ce"
     return loss_fn
 
 
-def _masked_top_k_accuracy(k: int, vocab_size: int = POLICY_VOCAB_SIZE):
-    import tensorflow as tf  # type: ignore[import-untyped]
+def _masked_candidate_top_k(k: int, max_candidates: int = MAX_CANDIDATES):
+    tf = _import_tensorflow()
 
     def metric_fn(y_true: Any, y_pred: Any) -> Any:
-        mask = y_true[:, :vocab_size]
-        indices = tf.cast(y_true[:, vocab_size], tf.int32)
+        mask = y_true[:, :max_candidates]
+        indices = tf.cast(y_true[:, max_candidates], tf.int32)
         neg_inf = tf.constant(-1.0e9, dtype=y_pred.dtype)
         masked_logits = tf.where(mask > 0.5, y_pred, neg_inf)
         return tf.keras.metrics.sparse_top_k_categorical_accuracy(indices, masked_logits, k=k)
 
-    metric_fn.__name__ = f"masked_top{k}"
+    metric_fn.__name__ = f"masked_cand_top{k}"
     return metric_fn
 
 
-def pack_policy_targets(y_index: np.ndarray, legal_mask: np.ndarray) -> np.ndarray:
-    """Pack ``(N,)`` indices + ``(N, V)`` mask into ``(N, V+1)`` float32 for Keras."""
-    y_index = np.asarray(y_index, dtype=np.float32).reshape(-1, 1)
-    mask = np.asarray(legal_mask, dtype=np.float32)
-    return np.concatenate([mask, y_index], axis=1)
+def pack_candidate_targets(labels: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    """Pack ``(N,)`` labels + ``(N, MAX)`` mask into ``(N, MAX+1)`` float32."""
+    y_index = np.asarray(labels, dtype=np.float32).reshape(-1, 1)
+    m = np.asarray(mask, dtype=np.float32)
+    return np.concatenate([m, y_index], axis=1)
 
 
-def policy_custom_objects(vocab_size: int = POLICY_VOCAB_SIZE) -> dict[str, Any]:
-    """Keras ``custom_objects`` for masked policy loss/metrics."""
+def candidate_style_custom_objects(max_candidates: int = MAX_CANDIDATES) -> dict[str, Any]:
     return {
-        "masked_sparse_ce": _masked_sparse_categorical_crossentropy(vocab_size),
-        "masked_top1": _masked_top_k_accuracy(1, vocab_size),
-        "masked_top5": _masked_top_k_accuracy(5, vocab_size),
+        "masked_candidate_sparse_ce": _masked_candidate_sparse_ce(max_candidates),
+        "masked_cand_top1": _masked_candidate_top_k(1, max_candidates),
+        "masked_cand_top3": _masked_candidate_top_k(3, max_candidates),
     }
 
 
-def load_policy_keras(
+def load_candidate_style_keras(
     path: Path,
     *,
-    vocab_size: int = POLICY_VOCAB_SIZE,
+    max_candidates: int = MAX_CANDIDATES,
     compile_model: bool = False,
 ) -> Any:
-    """Load a ``.keras`` policy model with masked CE custom objects."""
-    from tensorflow import keras  # type: ignore[import-untyped]
+    keras = _import_keras()
 
     return keras.models.load_model(
         path,
-        custom_objects=policy_custom_objects(vocab_size),
+        custom_objects=candidate_style_custom_objects(max_candidates),
         compile=compile_model,
     )
 
 
-def load_policy_from_uri(
-    model_uri: str,
+def model_is_candidate_style_compatible(
+    model: Any,
     *,
-    tracker: Any | None = None,
-    vocab_size: int = POLICY_VOCAB_SIZE,
-    require_compatible: bool = True,
-) -> Any:
-    """Download weights via MLflow tracker (if needed) and load a policy Keras model."""
-    from chess_teacher.pipelines.neural_network.mlflow_utils import MLflowTracker
-
-    mlflow_tracker = tracker or MLflowTracker()
-    weights_path = mlflow_tracker.require_keras_weights(model_uri)
-    model = load_policy_keras(weights_path, vocab_size=vocab_size, compile_model=False)
-    if require_compatible and not model_is_policy_compatible(model, vocab_size=vocab_size):
-        raise ValueError(
-            f"Model at {model_uri!r} is not policy-compatible "
-            f"(output_shape={getattr(model, 'output_shape', None)}, want V={vocab_size})"
-        )
-    return model
-
-
-def model_is_policy_compatible(model: Any, *, vocab_size: int = POLICY_VOCAB_SIZE) -> bool:
-    """True when model output dim matches the fixed policy vocab."""
+    max_candidates: int = MAX_CANDIDATES,
+    move_feat_dim: int = MOVE_FEAT_DIM,
+) -> bool:
+    """True when outputs MAX slots and ``move_feats`` input has current feat dim."""
     try:
         shape = model.output_shape
     except Exception:
         return False
     if not shape:
         return False
-    # Handle multi-output tuple or single TensorShape
     if isinstance(shape, (list, tuple)) and shape and not isinstance(shape[-1], int):
-        # e.g. (None, V)
         last = shape[-1] if not isinstance(shape[0], (list, tuple)) else shape[0][-1]
     else:
         last = shape[-1]
     try:
-        return int(last) == int(vocab_size)
+        if int(last) != int(max_candidates):
+            return False
     except (TypeError, ValueError):
         return False
 
+    # Input: list of tensors; find move_feats by name or second input shape.
+    try:
+        inputs = model.inputs
+    except Exception:
+        return False
+    if not inputs:
+        return False
+    feat_input = None
+    for inp in inputs:
+        name = getattr(inp, "name", "") or ""
+        if "move_feats" in name:
+            feat_input = inp
+            break
+    if feat_input is None and len(inputs) >= 2:
+        feat_input = inputs[1]
+    if feat_input is None:
+        return False
+    try:
+        in_shape = tuple(feat_input.shape)
+        # (None, MAX, F)
+        return int(in_shape[-1]) == int(move_feat_dim) and int(in_shape[-2]) == int(max_candidates)
+    except (TypeError, ValueError, IndexError):
+        return False
+
+
+def load_candidate_style_from_uri(
+    model_uri: str,
+    *,
+    tracker: Any | None = None,
+    max_candidates: int = MAX_CANDIDATES,
+    require_compatible: bool = True,
+) -> Any:
+    from chess_teacher.pipelines.neural_network.mlflow_utils import MLflowTracker
+
+    mlflow_tracker = tracker or MLflowTracker()
+    weights_path = mlflow_tracker.require_keras_weights(model_uri)
+    model = load_candidate_style_keras(
+        weights_path, max_candidates=max_candidates, compile_model=False
+    )
+    if require_compatible and not model_is_candidate_style_compatible(
+        model, max_candidates=max_candidates, move_feat_dim=MOVE_FEAT_DIM
+    ):
+        raise ValueError(
+            f"Model at {model_uri!r} is not candidate_style-compatible "
+            f"(output_shape={getattr(model, 'output_shape', None)}, "
+            f"want MAX={max_candidates} feat_dim={MOVE_FEAT_DIM})"
+        )
+    return model
+
 
 class BaselineTrainer:
-    """MLP policy head: state → logits[V], masked sparse CE (user-move imitation).
+    """Shared state tower + per-candidate MLP scorer; listwise masked CE.
 
-    MSE action-vector path is gone. Parent weights load only when output dim == V.
+    Inputs: ``state`` (D,), ``move_feats`` (MAX, F). Output: logits (MAX,).
+    Sample weights: ply * continuous SF-disagree style boost (see ``ply_weights``).
     """
 
-    DEFAULT_EPOCHS = 3
+    DEFAULT_EPOCHS = 8
     DEFAULT_BATCH_SIZE = 64
     DEFAULT_HIDDEN = 128
+    DEFAULT_SCORE_HIDDEN = 64
 
     def __init__(
         self,
@@ -139,30 +211,64 @@ class BaselineTrainer:
         epochs: int = DEFAULT_EPOCHS,
         batch_size: int = DEFAULT_BATCH_SIZE,
         hidden: int = DEFAULT_HIDDEN,
-        vocab_size: int = POLICY_VOCAB_SIZE,
+        score_hidden: int = DEFAULT_SCORE_HIDDEN,
+        max_candidates: int = MAX_CANDIDATES,
+        move_feat_dim: int = MOVE_FEAT_DIM,
+        style_disagree_boost: float | None = None,
+        style_disagree_scale: float | None = None,
     ) -> None:
         self.epochs = epochs
         self.batch_size = batch_size
         self.hidden = hidden
-        self.vocab_size = vocab_size
+        self.score_hidden = score_hidden
+        self.max_candidates = max_candidates
+        self.move_feat_dim = move_feat_dim
+        self.style_disagree_boost = (
+            style_disagree_boost_from_env()
+            if style_disagree_boost is None
+            else float(style_disagree_boost)
+        )
+        self.style_disagree_scale = (
+            style_disagree_scale_from_env()
+            if style_disagree_scale is None
+            else float(style_disagree_scale)
+        )
 
-    def build(self, input_dim: int, output_dim: int | None = None) -> Any:
-        """Small MLP: state → policy logits over fixed move vocab."""
-        from tensorflow import keras  # type: ignore[import-untyped]
+    def build(self, input_dim: int) -> Any:
+        keras = _import_keras()
 
         layers = keras.layers
-        out_dim = int(output_dim or self.vocab_size)
-        inputs = keras.Input(shape=(input_dim,), name="state")
-        x = layers.Dense(self.hidden, activation="relu")(inputs)
-        x = layers.Dense(self.hidden, activation="relu")(x)
-        outputs = layers.Dense(out_dim, activation="linear", name="policy_logits")(x)
-        model = keras.Model(inputs=inputs, outputs=outputs, name="baseline_move_policy")
+        state_in = keras.Input(shape=(input_dim,), name="state")
+        feats_in = keras.Input(
+            shape=(self.max_candidates, self.move_feat_dim),
+            name="move_feats",
+        )
+
+        h = layers.Dense(self.hidden, activation="relu", name="state_h1")(state_in)
+        h = layers.Dense(self.hidden, activation="relu", name="state_h2")(h)
+        h_tile = layers.RepeatVector(self.max_candidates, name="state_tile")(h)
+        x = layers.Concatenate(axis=-1, name="state_move_concat")([h_tile, feats_in])
+        x = layers.TimeDistributed(
+            layers.Dense(self.score_hidden, activation="relu"),
+            name="score_h",
+        )(x)
+        scores = layers.TimeDistributed(
+            layers.Dense(1, activation="linear"),
+            name="score_out",
+        )(x)
+        logits = layers.Reshape((self.max_candidates,), name="candidate_logits")(scores)
+
+        model = keras.Model(
+            inputs=[state_in, feats_in],
+            outputs=logits,
+            name="baseline_candidate_style",
+        )
         model.compile(
             optimizer=keras.optimizers.Adam(1e-3),
-            loss=_masked_sparse_categorical_crossentropy(out_dim),
+            loss=_masked_candidate_sparse_ce(self.max_candidates),
             metrics=[
-                _masked_top_k_accuracy(1, out_dim),
-                _masked_top_k_accuracy(5, out_dim),
+                _masked_candidate_top_k(1, self.max_candidates),
+                _masked_candidate_top_k(3, self.max_candidates),
             ],
         )
         return model
@@ -171,44 +277,55 @@ class BaselineTrainer:
         self,
         *,
         input_dim: int,
-        output_dim: int | None = None,
         weights_path: Path | None = None,
     ) -> Any:
-        """Load Keras weights if policy-compatible; else cold-start."""
-        from tensorflow import keras  # type: ignore[import-untyped]
-
-        out_dim = int(output_dim or self.vocab_size)
         if weights_path is not None and weights_path.is_file():
             logger.info("Loading baseline weights from %s", weights_path)
             try:
-                model = load_policy_keras(weights_path, vocab_size=out_dim, compile_model=False)
-            except Exception:
-                logger.exception("Failed to load baseline weights; cold-starting policy model")
-                return self.build(input_dim, out_dim)
-            if not model_is_policy_compatible(model, vocab_size=out_dim):
-                logger.warning(
-                    "Parent weights not policy-compatible (output_shape=%s, want V=%s); "
-                    "cold-starting instead of resuming MSE/other head",
-                    getattr(model, "output_shape", None),
-                    out_dim,
+                model = load_candidate_style_keras(
+                    weights_path,
+                    max_candidates=self.max_candidates,
+                    compile_model=False,
                 )
-                return self.build(input_dim, out_dim)
-            # Re-compile so metrics/loss match current trainer (safe after load).
+            except Exception:
+                logger.exception(
+                    "Failed to load baseline weights; cold-starting candidate_style model"
+                )
+                return self.build(input_dim)
+            if not model_is_candidate_style_compatible(
+                model,
+                max_candidates=self.max_candidates,
+                move_feat_dim=self.move_feat_dim,
+            ):
+                logger.warning(
+                    "Parent weights not candidate_style-compatible "
+                    "(output_shape=%s, want MAX=%s feat_dim=%s / version=%s); "
+                    "cold-starting instead of resuming old feat layout",
+                    getattr(model, "output_shape", None),
+                    self.max_candidates,
+                    self.move_feat_dim,
+                    CANDIDATE_MOVE_FEAT_VERSION,
+                )
+                return self.build(input_dim)
+            from tensorflow import keras  # type: ignore[import-untyped]
+
+            ensure_tensorflow_logging()
             model.compile(
                 optimizer=keras.optimizers.Adam(1e-3),
-                loss=_masked_sparse_categorical_crossentropy(out_dim),
+                loss=_masked_candidate_sparse_ce(self.max_candidates),
                 metrics=[
-                    _masked_top_k_accuracy(1, out_dim),
-                    _masked_top_k_accuracy(5, out_dim),
+                    _masked_candidate_top_k(1, self.max_candidates),
+                    _masked_candidate_top_k(3, self.max_candidates),
                 ],
             )
             return model
         logger.info(
-            "Cold-start baseline policy model input_dim=%s vocab_size=%s",
+            "Cold-start candidate_style model input_dim=%s max_candidates=%s feat_dim=%s",
             input_dim,
-            out_dim,
+            self.max_candidates,
+            self.move_feat_dim,
         )
-        return self.build(input_dim, out_dim)
+        return self.build(input_dim)
 
     def fit(
         self,
@@ -216,33 +333,95 @@ class BaselineTrainer:
         *,
         weights_path: Path | None = None,
     ) -> tuple[Any, dict[str, float]]:
-        """Incremental fit on a batch of datums; returns ``(model, metrics)``."""
         if not datums:
             raise ValueError("BaselineTrainer.fit requires a non-empty batch")
 
+        logger.info(
+            "Building candidate move features for %s datums "
+            "(SF evals from DB + on-the-fly geometry/material/openness; feat_dim=%s)…",
+            len(datums),
+            self.move_feat_dim,
+        )
         batch = TrainingBatch(datums)
-        x = batch.state_matrix()
-        y_index, legal_mask = batch.policy_targets()
-        y = pack_policy_targets(y_index, legal_mask)
+        feats, mask, labels, kept = batch.candidate_style_targets()
+        if not kept:
+            raise ValueError(
+                "BaselineTrainer.fit: no datums with usable candidate_evaluations "
+                "(user move must be in evals)"
+            )
+        kept_datums = [datums[i] for i in kept]
+        logger.info(
+            "Candidate features ready kept=%s dropped=%s; building state matrix…",
+            len(kept_datums),
+            len(datums) - len(kept_datums),
+        )
+        x_state = TrainingBatch(kept_datums).state_matrix()
+        y = pack_candidate_targets(labels, mask)
+        disagree_mask = user_not_sf_best_mask(feats, labels)
+        strength = user_sf_disagree_strength(feats, labels, scale_pawns=self.style_disagree_scale)
+        sample_w = candidate_style_sample_weights(
+            [d.ply for d in kept_datums],
+            feats,
+            labels,
+            style_disagree_boost=self.style_disagree_boost,
+            style_disagree_scale=self.style_disagree_scale,
+        )
+        disagree_frac = float(np.mean(disagree_mask))
+        mean_strength = float(np.mean(strength))
+
         model = self.load_or_build(
-            input_dim=int(x.shape[1]),
-            output_dim=self.vocab_size,
+            input_dim=int(x_state.shape[1]),
             weights_path=weights_path,
         )
+        logger.info(
+            "Starting Keras fit samples=%s epochs=%s batch_size=%s "
+            "style_disagree_boost=%s scale_pawns=%s disagree_frac=%.3f "
+            "mean_strength=%.3f…",
+            len(kept_datums),
+            self.epochs,
+            min(self.batch_size, len(kept_datums)),
+            self.style_disagree_boost,
+            self.style_disagree_scale,
+            disagree_frac,
+            mean_strength,
+        )
+        total_epochs = self.epochs
+        from tensorflow.keras.callbacks import Callback  # type: ignore[import-untyped]
+
+        class _EpochInfoCallback(Callback):
+            def on_epoch_end(self, epoch: int, logs: dict[str, Any] | None = None) -> None:
+                logger.info(
+                    "Keras epoch %s/%s metrics=%s",
+                    epoch + 1,
+                    total_epochs,
+                    {k: round(float(v), 6) for k, v in (logs or {}).items()},
+                )
+
+        # Prefer our logger over Keras STDERR progress bars.
         history = model.fit(
-            x,
+            {"state": x_state, "move_feats": feats},
             y,
+            sample_weight=sample_w,
             epochs=self.epochs,
-            batch_size=min(self.batch_size, len(datums)),
+            batch_size=min(self.batch_size, len(kept_datums)),
             verbose=0,
+            callbacks=[_EpochInfoCallback()],
         )
         metrics: dict[str, float] = {}
         for key, values in history.history.items():
             if values:
                 metrics[key] = float(values[-1])
-        metrics["n_samples"] = float(len(datums))
-        metrics["vocab_size"] = float(self.vocab_size)
-        metrics["head_policy"] = 1.0
+        metrics["n_samples"] = float(len(kept_datums))
+        metrics["n_dropped_missing_candidates"] = float(len(datums) - len(kept_datums))
+        metrics["max_candidates"] = float(self.max_candidates)
+        metrics["move_feat_dim"] = float(self.move_feat_dim)
+        metrics["move_feat_version"] = float(CANDIDATE_MOVE_FEAT_VERSION)
+        metrics["head_candidate_style"] = 1.0
+        metrics["style_disagree_boost"] = float(self.style_disagree_boost)
+        metrics["style_disagree_scale"] = float(self.style_disagree_scale)
+        metrics["sf_disagree_frac"] = disagree_frac
+        metrics["sf_disagree_mean_strength"] = mean_strength
+        metrics["epochs"] = float(self.epochs)
         return model, metrics
 
     @staticmethod
@@ -250,3 +429,22 @@ class BaselineTrainer:
         path.parent.mkdir(parents=True, exist_ok=True)
         model.save(path)
         logger.info("Saved baseline model to %s", path)
+
+
+# Back-compat aliases used by older call sites / tests.
+def load_policy_keras(*args: Any, **kwargs: Any) -> Any:
+    raise RuntimeError(
+        "Policy head removed; use load_candidate_style_keras / load_candidate_style_from_uri"
+    )
+
+
+def load_policy_from_uri(*args: Any, **kwargs: Any) -> Any:
+    raise RuntimeError("Policy head removed; use load_candidate_style_from_uri")
+
+
+def model_is_policy_compatible(*args: Any, **kwargs: Any) -> bool:
+    return False
+
+
+def policy_custom_objects(*args: Any, **kwargs: Any) -> dict[str, Any]:
+    return candidate_style_custom_objects()

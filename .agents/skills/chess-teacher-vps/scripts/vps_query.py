@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -19,7 +20,16 @@ os_environ_agent.environ["ENVIRONMENT"] = "AGENT"
 DOPPLER_PROJECT = "chess-teacher"
 DOPPLER_CONFIG = "ci"
 NAMESPACE = "chess-teacher"
+STREAMLIT_DEPLOYMENT = "streamlit"
+DB_QUERY_SCRIPT = "scripts/agent_db_query.py"
 K8S_NAME = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
+DOMAIN_ID_RE = re.compile(r"^[a-z0-9]([a-z0-9/_-]*[a-z0-9])?$")
+TABLE_KEY_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+COLUMN_LIST_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*(,[a-zA-Z_][a-zA-Z0-9_]*)*$")
+_WRITE_KEYWORDS = re.compile(
+    r"\b(insert|update|delete|drop|truncate|alter|create|grant|revoke|merge|copy)\b",
+    re.IGNORECASE,
+)
 
 
 def _emit(payload: dict[str, Any]) -> None:
@@ -235,6 +245,185 @@ def cmd_uptime(_: argparse.Namespace) -> None:
     _emit(_ssh_run("uptime"))
 
 
+def _validate_domain_id(domain: str) -> str:
+    text = domain.strip()
+    if not text or len(text) > 128 or not DOMAIN_ID_RE.fullmatch(text):
+        raise SystemExit(f"Invalid domain id: {domain!r}")
+    return text
+
+
+def _validate_table_key(table: str) -> str:
+    text = table.strip()
+    if not text or len(text) > 128 or not TABLE_KEY_RE.fullmatch(text):
+        raise SystemExit(f"Invalid table key: {table!r}")
+    return text
+
+
+def _validate_sql_fragment(fragment: str, *, label: str) -> str:
+    text = fragment.strip()
+    if not text:
+        raise SystemExit(f"{label} must not be empty.")
+    if len(text) > 2000:
+        raise SystemExit(f"{label} is too long.")
+    if ";" in text:
+        raise SystemExit(f"{label} must not contain ';'.")
+    if _WRITE_KEYWORDS.search(text):
+        raise SystemExit(f"{label} contains disallowed SQL keyword.")
+    return text
+
+
+def _validate_column_list(columns: str) -> str:
+    text = columns.strip().replace(" ", "")
+    if not text or not COLUMN_LIST_RE.fullmatch(text):
+        raise SystemExit(f"Invalid --columns value: {columns!r}")
+    return text
+
+
+def _remote_db_argv(*db_args: str) -> str:
+    """Build a fixed kubectl-exec remote command (POSIX-quoted for remote shell)."""
+    argv = [
+        "kubectl",
+        "exec",
+        "-n",
+        NAMESPACE,
+        f"deploy/{STREAMLIT_DEPLOYMENT}",
+        "--",
+        "python",
+        DB_QUERY_SCRIPT,
+        "--json",
+        *db_args,
+    ]
+    return " ".join(shlex.quote(part) for part in argv)
+
+
+def _emit_db_ssh(result: dict[str, Any], *, command: str) -> None:
+    payload: dict[str, Any] = {
+        "command": command,
+        "via": "kubectl-exec-streamlit",
+        "host": result.get("host"),
+        "user": result.get("user"),
+        "exit_code": result.get("exit_code"),
+        "stderr": result.get("stderr"),
+    }
+    stdout = (result.get("stdout") or "").strip()
+    if result.get("exit_code") == 0 and stdout:
+        try:
+            payload["result"] = json.loads(stdout)
+        except json.JSONDecodeError:
+            payload["stdout"] = result.get("stdout")
+            payload["parse_error"] = "Remote stdout was not JSON"
+    else:
+        payload["stdout"] = result.get("stdout")
+    _emit(payload)
+
+
+def cmd_db_list_domains(_: argparse.Namespace) -> None:
+    _emit_db_ssh(
+        _ssh_run(_remote_db_argv("list-domains"), timeout=180),
+        command="db-list-domains",
+    )
+
+
+def cmd_db_list_tables(args: argparse.Namespace) -> None:
+    domain = _validate_domain_id(args.domain)
+    _emit_db_ssh(
+        _ssh_run(_remote_db_argv("list-tables", domain), timeout=180),
+        command="db-list-tables",
+    )
+
+
+def cmd_db_count(args: argparse.Namespace) -> None:
+    domain = _validate_domain_id(args.domain)
+    table = _validate_table_key(args.table)
+    db_args = ["count", domain, table]
+    if args.where:
+        db_args.extend(["--where", _validate_sql_fragment(args.where, label="WHERE")])
+    _emit_db_ssh(
+        _ssh_run(_remote_db_argv(*db_args), timeout=300),
+        command="db-count",
+    )
+
+
+def cmd_db_read(args: argparse.Namespace) -> None:
+    domain = _validate_domain_id(args.domain)
+    table = _validate_table_key(args.table)
+    limit = max(1, min(int(args.limit), 100))
+    db_args = ["read", domain, table, "--limit", str(limit)]
+    if args.where:
+        db_args.extend(["--where", _validate_sql_fragment(args.where, label="WHERE")])
+    if args.columns:
+        db_args.extend(["--columns", _validate_column_list(args.columns)])
+    if args.order_by:
+        db_args.extend(["--order-by", _validate_sql_fragment(args.order_by, label="ORDER BY")])
+    _emit_db_ssh(
+        _ssh_run(_remote_db_argv(*db_args), timeout=300),
+        command="db-read",
+    )
+
+
+def cmd_db_exists(args: argparse.Namespace) -> None:
+    domain = _validate_domain_id(args.domain)
+    table = _validate_table_key(args.table)
+    where = _validate_sql_fragment(args.where, label="WHERE")
+    _emit_db_ssh(
+        _ssh_run(_remote_db_argv("exists", domain, table, "--where", where), timeout=300),
+        command="db-exists",
+    )
+
+
+def cmd_db_schema(args: argparse.Namespace) -> None:
+    domain = _validate_domain_id(args.domain)
+    table = _validate_table_key(args.table)
+    _emit_db_ssh(
+        _ssh_run(_remote_db_argv("schema", domain, table), timeout=300),
+        command="db-schema",
+    )
+
+
+def cmd_db_all_match(args: argparse.Namespace) -> None:
+    domain = _validate_domain_id(args.domain)
+    table = _validate_table_key(args.table)
+    condition = _validate_sql_fragment(args.condition, label="CONDITION")
+    sample_limit = max(0, min(int(args.sample_limit), 50))
+    _emit_db_ssh(
+        _ssh_run(
+            _remote_db_argv(
+                "all-match",
+                domain,
+                table,
+                "--condition",
+                condition,
+                "--sample-limit",
+                str(sample_limit),
+            ),
+            timeout=300,
+        ),
+        command="db-all-match",
+    )
+
+
+def cmd_db_unique(args: argparse.Namespace) -> None:
+    domain = _validate_domain_id(args.domain)
+    table = _validate_table_key(args.table)
+    columns = _validate_column_list(args.columns)
+    limit = max(1, min(int(args.limit), 50))
+    _emit_db_ssh(
+        _ssh_run(
+            _remote_db_argv(
+                "unique",
+                domain,
+                table,
+                "--columns",
+                columns,
+                "--limit",
+                str(limit),
+            ),
+            timeout=300,
+        ),
+        command="db-unique",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=__doc__,
@@ -268,6 +457,47 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("memory", help="free -m on VPS.")
     sub.add_parser("uptime", help="uptime on VPS.")
 
+    sub.add_parser(
+        "db-list-domains",
+        help="Prod DB: list metadata domains via kubectl exec into streamlit.",
+    )
+    db_tables = sub.add_parser("db-list-tables", help="Prod DB: list tables in a domain.")
+    db_tables.add_argument("domain")
+
+    db_count = sub.add_parser("db-count", help="Prod DB: COUNT rows.")
+    db_count.add_argument("domain")
+    db_count.add_argument("table")
+    db_count.add_argument("--where", default=None)
+
+    db_read = sub.add_parser("db-read", help="Prod DB: sample rows (limit capped at 100).")
+    db_read.add_argument("domain")
+    db_read.add_argument("table")
+    db_read.add_argument("--where", default=None)
+    db_read.add_argument("--columns", default=None)
+    db_read.add_argument("--order-by", default=None)
+    db_read.add_argument("--limit", type=int, default=20)
+
+    db_exists = sub.add_parser("db-exists", help="Prod DB: EXISTS check.")
+    db_exists.add_argument("domain")
+    db_exists.add_argument("table")
+    db_exists.add_argument("--where", required=True)
+
+    db_schema = sub.add_parser("db-schema", help="Prod DB: schema introspection.")
+    db_schema.add_argument("domain")
+    db_schema.add_argument("table")
+
+    db_all = sub.add_parser("db-all-match", help="Prod DB: every row matches CONDITION?")
+    db_all.add_argument("domain")
+    db_all.add_argument("table")
+    db_all.add_argument("--condition", required=True)
+    db_all.add_argument("--sample-limit", type=int, default=10)
+
+    db_unique = sub.add_parser("db-unique", help="Prod DB: uniqueness check.")
+    db_unique.add_argument("domain")
+    db_unique.add_argument("table")
+    db_unique.add_argument("--columns", required=True)
+    db_unique.add_argument("--limit", type=int, default=20)
+
     return parser
 
 
@@ -290,6 +520,14 @@ def main() -> None:
         "disk": cmd_disk,
         "memory": cmd_memory,
         "uptime": cmd_uptime,
+        "db-list-domains": cmd_db_list_domains,
+        "db-list-tables": cmd_db_list_tables,
+        "db-count": cmd_db_count,
+        "db-read": cmd_db_read,
+        "db-exists": cmd_db_exists,
+        "db-schema": cmd_db_schema,
+        "db-all-match": cmd_db_all_match,
+        "db-unique": cmd_db_unique,
     }
     try:
         handlers[args.command](args)

@@ -121,7 +121,7 @@ def list_baseline_presets(db_client: DatabaseClient) -> list[BotPreset]:
     rows = [
         row
         for row in BaselineModel.fetch_all_ordered(db_client)
-        if row.status in playable_statuses and row.looks_like_policy() and row.model_uri
+        if row.status in playable_statuses and row.looks_like_candidate_style() and row.model_uri
     ]
     # Current production first, then newer archived.
     rows.sort(
@@ -141,7 +141,7 @@ def list_baseline_presets(db_client: DatabaseClient) -> list[BotPreset]:
             BotPreset(
                 key=baseline_preset_key(row.version),
                 label=f"Baseline {row.version}",
-                description=f"Neural policy ({status_label}).",
+                description=f"Neural candidate-style ({status_label}).",
                 factory=_baseline_factory(model_uri, row.version),
             )
         )

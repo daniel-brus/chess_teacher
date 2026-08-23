@@ -5,7 +5,9 @@ description: >-
   metadata.yml table keys. Runs validation queries (row counts, all-rows-match
   conditions, column uniqueness, schema diff). Use when the user asks about
   database contents, row counts, data quality, uniqueness, whether values satisfy
-  a condition, schema drift, or postgres tables in this project.
+  a condition, schema drift, or postgres tables in this project. For production
+  (firewalled VPS Postgres), use chess-teacher-vps db-* commands instead of
+  doppler --config prod from the laptop.
 ---
 
 # Chess Teacher Database (read-only)
@@ -18,20 +20,22 @@ Secrets live in Doppler project **`chess-teacher`**, not in git. Wrap skill comm
 |--------|---------------------------|-------------|
 | `dev_local` | `localhost` (Compose) | Default local dev (`make dev_infra`) |
 | `dev_k3d` | `host.k3d.internal` | k3d jobs / cluster workloads |
-| `prod` | External (e.g. Supabase) | **Production data — read-only only** |
+| `prod` | External / VPS | **Prefer chess-teacher-vps `db-*`** — laptop often cannot reach firewalled prod Postgres |
 
-Local Compose stack: Postgres, MinIO, and Redis from `docker-compose.infra.yml` with **`dev_local`**. Production uses external Postgres from **`prod`** (same config `make dev_sync_cloud` reads from).
+Local Compose stack: Postgres, MinIO, and Redis from `docker-compose.infra.yml` with **`dev_local`**. Production Postgres is typically only reachable from the VPS; do **not** expect `doppler run --config prod` from the laptop to work. Use **chess-teacher-vps** `db-count` / `db-read` / … instead.
 
 ```bash
-doppler run --project chess-teacher --config dev_local -- python .agents/skills/chess-teacher-db/scripts/db_query.py --json list-domains
+doppler run --project chess-teacher --config dev_local -- python scripts/agent_db_query.py --json list-domains
 ```
+
+Canonical script: **`scripts/agent_db_query.py`**. The skill path `.agents/skills/chess-teacher-db/scripts/db_query.py` is a launcher to the same file. Prod uses the VPS skill (`db-*`), which kubectl-execs that script in the streamlit container.
 
 The script loads `.env` when present; prefer **`doppler run --config … --`** so credentials match the intended environment.
 
 ## Who runs what
 
 - **The user asks questions in chat** (e.g. “are columns Y and Z unique?”). They do **not** need to run the script or remember commands.
-- **The agent runs** `.agents/skills/chess-teacher-db/scripts/db_query.py` via the terminal, interprets `--json` output, and answers in plain language.
+- **The agent runs** `scripts/agent_db_query.py` (or the skill launcher) via the terminal for dev, or **chess-teacher-vps** `db-*` for prod; interprets `--json` output, and answers in plain language.
 - The script sets **`ENVIRONMENT=AGENT`** before any `chess_teacher` import (overrides `LOCAL` from `.env` for that process). Do not ask the user to set this.
 
 ## Rules
@@ -44,14 +48,15 @@ The script loads `.env` when present; prefer **`doppler run --config … --`** s
 
 ## Agent workflow
 
-1. If domain or table is unknown → `list-domains`, then `list-tables <domain>`.
-2. Pick the command that matches the question (see table below).
-3. Run the script; summarize results for the user.
+1. If target is **prod** → switch to **chess-teacher-vps** `db-*` (see that skill).
+2. If domain or table is unknown → `list-domains`, then `list-tables <domain>`.
+3. Pick the command that matches the question (see table below).
+4. Run the script; summarize results for the user.
 
 ```bash
-doppler run --project chess-teacher --config dev_local -- python .agents/skills/chess-teacher-db/scripts/db_query.py --json list-domains
-doppler run --project chess-teacher --config dev_local -- python .agents/skills/chess-teacher-db/scripts/db_query.py --json list-tables ingestion
-doppler run --project chess-teacher --config dev_local -- python .agents/skills/chess-teacher-db/scripts/db_query.py --json unique ingestion raw_games --columns account_id,platform_game_id
+doppler run --project chess-teacher --config dev_local -- python scripts/agent_db_query.py --json list-domains
+doppler run --project chess-teacher --config dev_local -- python scripts/agent_db_query.py --json list-tables pipelines/ingestion
+doppler run --project chess-teacher --config dev_local -- python scripts/agent_db_query.py --json unique pipelines/ingestion raw_games --columns account_id,platform_game_id
 ```
 
 On Windows (PowerShell), same commands with `.venv\Scripts\python.exe` if the venv is not activated.
@@ -66,7 +71,7 @@ A **domain** is the folder path (under the installed `chess_teacher` package) th
 
 ## Script commands
 
-`python .agents/skills/chess-teacher-db/scripts/db_query.py --json <command> ...`
+`python scripts/agent_db_query.py --json <command> ...`
 
 | Command | Purpose |
 |---------|---------|
@@ -106,7 +111,8 @@ Prefer the script. If needed, set `os.environ["ENVIRONMENT"] = "AGENT"` **before
 | Issue | Action |
 |-------|--------|
 | `ModuleNotFoundError: chess_teacher` | Activate `.venv`; `pip install -r requirements-dev.txt` |
-| Connection errors | Postgres up; use `doppler run --config dev_local` or check `.env` DB vars |
+| Connection errors (dev) | Postgres up; use `doppler run --config dev_local` |
+| Connection timeout (prod from laptop) | Expected if firewalled — use **chess-teacher-vps** `db-*` |
 | Unknown domain / table | `list-domains` / `list-tables` |
 | Invalid column | Check that domain's `metadata.yml` |
 

@@ -245,7 +245,6 @@
     let lastSentMoveKey = null;
     let pendingPromotion = null;
     let hasRenderedOnce = false;
-    let lastSentSizeKey = null;
 
     function setStatus(msg) {
       statusEl.textContent = msg || "";
@@ -361,26 +360,9 @@
       return dests;
     }
 
-    function sendBoardSizeEvent(sidePx) {
-      const side = Math.max(1, Math.floor(sidePx || 0));
-      const instanceId = Number(currentProps.instance_id) || 0;
-      const sizeKey = instanceId + "|" + side;
-      if (sizeKey === lastSentSizeKey) return;
-      lastSentSizeKey = sizeKey;
-      if (!Streamlit || typeof Streamlit.setComponentValue !== "function") return;
-      Streamlit.setComponentValue({
-        instance_id: instanceId,
-        prev_fen: null,
-        fen: gameFen(),
-        uci: null,
-        san: null,
-        seq: ++moveSeq,
-        kind: "size",
-        board_px: side,
-      });
-    }
-
     function resizeBoardAndFrame() {
+      // Resize locally + setFrameHeight only. Do NOT setComponentValue for size —
+      // that forces a full Streamlit script rerun on every ResizeObserver tick.
       const requestedSide = Math.max(160, Math.floor(Number(currentProps.height) || 560));
       const availableWidth = Math.max(
         160,
@@ -391,14 +373,12 @@
       boardEl.style.maxWidth = "100%";
       boardEl.style.height = side + "px";
       boardEl.style.minHeight = "0px";
-      const actualSide = Math.max(1, Math.floor(boardEl.getBoundingClientRect().width || side));
       if (ground && typeof ground.redrawAll === "function") {
         ground.redrawAll();
       }
       if (Streamlit && typeof Streamlit.setFrameHeight === "function") {
         Streamlit.setFrameHeight();
       }
-      sendBoardSizeEvent(actualSide);
     }
 
     function syncGround() {
