@@ -31,7 +31,9 @@ This is the **live production Hetzner VPS** running k8s (`chess-teacher` namespa
 - Fetch or print Doppler **secret values** from the VPS (only SSH connection metadata via `info`).
 - Deploy, sync, or run `apply.sh` unless the user **explicitly** requests a deploy in a separate, deliberate step.
 
-If the user needs a mutating change (restart pod, deploy, config edit, backfill), **stop and ask for explicit confirmation** — do not use this skill.
+If the user needs a mutating change (restart pod, deploy, config edit), **stop and ask for explicit confirmation** — do not use this skill.
+
+**Long prod ops scripts** (backfill, baseline reset/train) are **not** run via this skill. The user runs them manually on the VPS with `scripts/run_script_job.py`, which renders `orchestration/k8s/job/script.yaml` and `kubectl apply`s a one-off Job (same image + `chess-teacher-env` as streamlit). The agent may document that flow or read Job logs if the user pastes output, but must not apply Jobs through `vps_query.py`.
 
 ## Doppler environments
 
@@ -149,6 +151,27 @@ Remote script: `scripts/agent_db_query.py` (copied into the image). If `db-*` fa
 | `db-*` script missing | Image lag — wait for CD after merge, or confirm streamlit rolled to new tag |
 | `db-*` JSON parse_error | Check `stderr` / `stdout` in the payload; often pod crash or import error |
 
+## Script Jobs (mutating ops — user-run, not this skill)
+
+For backfill / baseline reset / catch-up training on prod, the user SSHs to the VPS (or uses kubectl locally) and runs:
+
+```bash
+export PIPELINE_JOB_IMAGE="$(kubectl get deploy streamlit -n chess-teacher \
+  -o jsonpath='{.spec.template.spec.containers[0].image}')"
+python scripts/run_script_job.py backfill_candidate_evals -- --workers 4
+kubectl logs -n chess-teacher job/script-backfill-candidate-evals-YYYYMMDDHHMMSS -f
+```
+
+Whitelisted entrypoints only (`scripts/run_script_job.py`). Template: `orchestration/k8s/job/script.yaml`. Dry-run: add `--dry-run` before `--`. Does not mount `chess-teacher-streamlit-secrets`.
+
+| Task | Command |
+|------|---------|
+| Backfill candidate evals | `run_script_job.py backfill_candidate_evals -- --workers 4` |
+| Reset baseline training | `run_script_job.py baseline_reset_training -- --yes` |
+| Train until caught up | `run_script_job.py baseline_train_until_caught_up` |
+
+Use `db-count` (read-only) here to verify backfill progress; never exec the backfill script into streamlit.
+
 ## References
 
-Deploy script: `orchestration/k8s/apply.sh`. CD workflow: `.github/workflows/cd.yml`. Shared DB CLI: `scripts/agent_db_query.py`.
+Deploy script: `orchestration/k8s/apply.sh`. CD workflow: `.github/workflows/cd.yml`. Shared DB CLI: `scripts/agent_db_query.py`. Script Jobs CLI: `scripts/run_script_job.py`.
