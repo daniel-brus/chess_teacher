@@ -385,10 +385,10 @@ class BaselineTrainer:
             disagree_frac,
             mean_strength,
         )
-        keras = _import_keras()
         total_epochs = self.epochs
+        from tensorflow.keras.callbacks import Callback  # type: ignore[import-untyped]
 
-        class _EpochInfoCallback(keras.callbacks.Callback):
+        class _EpochInfoCallback(Callback):
             def on_epoch_end(self, epoch: int, logs: dict[str, Any] | None = None) -> None:
                 logger.info(
                     "Keras epoch %s/%s metrics=%s",

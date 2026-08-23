@@ -73,7 +73,11 @@ def style_disagree_scale_from_env(
     return _env_float("BASELINE_STYLE_DISAGREE_SCALE", default, min_value=1e-6)
 
 
-def ply_weight_raw(ply: int | np.ndarray, *, lam: float = DEFAULT_PLY_WEIGHT_LAMBDA) -> np.ndarray:
+def ply_weight_raw(
+    ply: int | list[int] | np.ndarray,
+    *,
+    lam: float = DEFAULT_PLY_WEIGHT_LAMBDA,
+) -> np.ndarray:
     """Unnormalized ``exp(λ · ply)``."""
     p = np.asarray(ply, dtype=np.float64)
     return np.exp(lam * p)
