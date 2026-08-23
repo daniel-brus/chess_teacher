@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
-
 import chess
 import pytest
 
@@ -12,25 +10,10 @@ from chess_teacher.pipelines.neural_network.candidate_eval import (
     build_candidate_payload,
 )
 from chess_teacher.pipelines.neural_network.create_training_set import TrainingDatumBuilder
-from chess_teacher.pipelines.preprocessing.games import Game
 from chess_teacher.pipelines.preprocessing.moves import Move, MoveCharacteristics
-from chess_teacher.utils.chess_utils import Color, Reason, Result
+from chess_teacher.utils.chess_utils import Color
 
 _FEN = chess.STARTING_FEN
-
-
-def _game(*, color: Color = Color.WHITE) -> Game:
-    return Game(
-        game_id="g1",
-        platform_game_id="p1",
-        account_id="a1",
-        raw_pgn="x",
-        cleaned_pgn="x",
-        color=color,
-        result=Result.WIN,
-        reason=Reason.RESIGNATION,
-        end_time=datetime.now(UTC),
-    )
 
 
 def _move(*, fen_before: str = _FEN, move_uci: str = "e2e4") -> Move:
@@ -62,7 +45,7 @@ def test_candidate_style_target_packs_v3_with_eval_before_and_recapture_context(
         opponent_move_was_capture=True,
         candidate_evaluations=build_candidate_payload(evals),
     )
-    datum = TrainingDatumBuilder.from_db_rows(_move(), chars, _game())
+    datum = TrainingDatumBuilder.from_db_rows(_move(), chars, color=Color.WHITE, game_id="g1")
     packed = datum.candidate_style_target()
     assert packed is not None
     feats, mask, label = packed
@@ -80,5 +63,5 @@ def test_candidate_style_target_none_without_evals() -> None:
         account_id="a1",
         candidate_evaluations=None,
     )
-    datum = TrainingDatumBuilder.from_db_rows(_move(), chars, _game())
+    datum = TrainingDatumBuilder.from_db_rows(_move(), chars, color=Color.WHITE, game_id="g1")
     assert datum.candidate_style_target() is None
