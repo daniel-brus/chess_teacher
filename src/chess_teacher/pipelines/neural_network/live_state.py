@@ -110,10 +110,13 @@ def compose_live_state_vector(
     )
 
 
+_COMPUTE_EVAL = object()
+
+
 class LiveStateEncoder:
     """Encode a live ``chess.Board`` with on-the-fly Stockfish eval (user decision)."""
 
-    DEFAULT_STOCKFISH_DEPTH = 10
+    DEFAULT_STOCKFISH_DEPTH = 12
 
     def __init__(
         self,
@@ -135,11 +138,20 @@ class LiveStateEncoder:
         board: chess.Board,
         *,
         last_opponent_move_uci: str | None = None,
+        evaluation_white_pov: float | object | None = _COMPUTE_EVAL,
     ) -> np.ndarray:
+        """Build state vector.
+
+        Pass ``evaluation_white_pov`` to skip a second Stockfish search (e.g. reuse
+        MultiPV root approx). Omit / leave default to compute via engine.
+        """
         fen = board.fen(en_passant="fen")
-        evaluation = self._engine.evaluate_white_pov_pawns(fen)
-        if evaluation is None:
-            logger.warning("Live Stockfish eval failed for fen=%s; missing indicator set", fen)
+        if evaluation_white_pov is _COMPUTE_EVAL:
+            evaluation = self._engine.evaluate_white_pov_pawns(fen)
+            if evaluation is None:
+                logger.warning("Live Stockfish eval failed for fen=%s; missing indicator set", fen)
+        else:
+            evaluation = evaluation_white_pov  # type: ignore[assignment]
         return compose_live_state_vector(
             board,
             evaluation_white_pov=evaluation,

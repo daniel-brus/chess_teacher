@@ -80,7 +80,7 @@ class BaselineModel(TableDataClass):
         return cls.fetch_all_from_db(db_client, order_by='"trained_at" DESC')
 
     def looks_like_policy(self) -> bool:
-        """True when eval_metrics suggest a fixed-vocab policy head (not legacy MSE)."""
+        """Legacy fixed-vocab policy head (superseded by candidate_style)."""
         from chess_teacher.pipelines.neural_network.move_encoding import (
             POLICY_VOCAB_SIZE,
         )
@@ -93,6 +93,8 @@ class BaselineModel(TableDataClass):
             return False
         if not isinstance(blob, dict):
             return False
+        if blob.get("head_candidate_style") == 1.0 or blob.get("head") == "candidate_style":
+            return False
         if blob.get("head_policy") == 1.0 or blob.get("head") == "policy":
             return True
         vocab = blob.get("vocab_size")
@@ -100,6 +102,42 @@ class BaselineModel(TableDataClass):
             return False
         try:
             return int(float(vocab)) == POLICY_VOCAB_SIZE
+        except (TypeError, ValueError):
+            return False
+
+    def looks_like_candidate_style(self) -> bool:
+        """True when eval_metrics suggest candidate-aware style head (current feat dim)."""
+        if not self.eval_metrics:
+            return False
+        try:
+            blob = json.loads(self.eval_metrics)
+        except (TypeError, json.JSONDecodeError):
+            return False
+        if not isinstance(blob, dict):
+            return False
+        from chess_teacher.pipelines.neural_network.candidate_eval import (
+            MAX_CANDIDATES,
+            MOVE_FEAT_DIM,
+        )
+
+        feat_dim = blob.get("move_feat_dim")
+        if feat_dim is not None:
+            try:
+                if int(float(feat_dim)) != MOVE_FEAT_DIM:
+                    return False
+            except (TypeError, ValueError):
+                return False
+        elif blob.get("head_candidate_style") == 1.0 or blob.get("head") == "candidate_style":
+            # Legacy candidate_style without feat dim → treat as incompatible with v2 feats.
+            return False
+
+        if blob.get("head_candidate_style") == 1.0 or blob.get("head") == "candidate_style":
+            return True
+        max_c = blob.get("max_candidates")
+        if max_c is None:
+            return False
+        try:
+            return int(float(max_c)) == MAX_CANDIDATES and feat_dim is not None
         except (TypeError, ValueError):
             return False
 
