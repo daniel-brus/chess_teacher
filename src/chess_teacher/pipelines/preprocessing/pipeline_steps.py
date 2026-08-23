@@ -134,7 +134,7 @@ class EnrichMoveCharacteristicsStep(TransformStep):
                 PinValueTransformation(),
                 MoveContextTransformation(),
                 MoveFlagsTransformation(),
-                StockfishEvaluationTransformation(depth=20, log_progress_percent=5),
+                StockfishEvaluationTransformation(depth=12, log_progress_percent=5),
             ],
             loading_strategy=LoadingStrategy.MERGE,
             merge_strategy=merge_strategy,

@@ -3,9 +3,13 @@ from __future__ import annotations
 import time
 
 from chess_teacher.pipelines.neural_network.main import run_baseline_promotion_pipeline
+from chess_teacher.pipelines.neural_network.tf_runtime import ensure_tensorflow_logging
 from chess_teacher.utils.logging import get_logger
 from chess_teacher.utils.pipeline_utils.pipeline_helpers import PipelineResult
 from chess_teacher.utils.process_utils import log_script_runtime_context
+
+# Before TF import inside the pipeline (env + Python logger wiring).
+ensure_tensorflow_logging()
 
 logger = get_logger()
 

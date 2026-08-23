@@ -51,6 +51,9 @@ def _is_optional_type(annotation: Any) -> bool:
 
 def _python_type_to_data_type(annotation: Any) -> str:
     annotation = _unwrap_optional_type(annotation)
+    origin = get_origin(annotation)
+    if origin is dict or annotation is dict:
+        return "jsonb"
     if annotation is str:
         return "text"
     if annotation is int:
