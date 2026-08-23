@@ -297,6 +297,7 @@ class JoinWithTableTransformation(DataFrameTransformation):
         left_on: list[str] | None = None,
         right_on: list[str] | None = None,
         where: str | None = None,
+        columns: list[str] | None = None,
         db_client: DatabaseClient | None = None,
     ):
         """
@@ -307,6 +308,7 @@ class JoinWithTableTransformation(DataFrameTransformation):
             left_on: Columns to join on the left table (default: primary key of the table to join with)
             right_on: Columns to join on the right table (default: primary key of the table to join with)
             where: Optional where clause to filter the other table before joining
+            columns: Optional column projection for the joined table (defaults to SELECT *)
             db_client: DatabaseClient to use (default: get_db_client())
         """
         super().__init__()
@@ -317,11 +319,19 @@ class JoinWithTableTransformation(DataFrameTransformation):
         self.left_on = left_on or self.with_table_metadata.primary_key
         self.right_on = right_on or self.with_table_metadata.primary_key
         self.where = where
+        # Always include join keys so projection cannot drop the ON columns.
+        if columns is None:
+            self.columns = None
+        else:
+            self.columns = list(dict.fromkeys([*self.right_on, *columns]))
 
     def transform(self, df: pl.DataFrame) -> pl.DataFrame:
         try:
             df_other = self.db_client.read(
-                self.with_table_metadata, as_polars=True, where=self.where
+                self.with_table_metadata,
+                columns=self.columns,
+                as_polars=True,
+                where=self.where,
             )
             result = df.join(df_other, left_on=self.left_on, right_on=self.right_on, how=self.how)
         except Exception as e:

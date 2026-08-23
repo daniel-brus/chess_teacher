@@ -138,6 +138,7 @@ celerybeat.pid
 
 # Environments
 .env
+orchestration/infra/postgres.env
 .venv
 env/
 venv/
