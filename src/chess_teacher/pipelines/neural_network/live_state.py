@@ -138,7 +138,7 @@ class LiveStateEncoder:
         board: chess.Board,
         *,
         last_opponent_move_uci: str | None = None,
-        evaluation_white_pov: float | None | object = _COMPUTE_EVAL,
+        evaluation_white_pov: float | object | None = _COMPUTE_EVAL,
     ) -> np.ndarray:
         """Build state vector.
 
