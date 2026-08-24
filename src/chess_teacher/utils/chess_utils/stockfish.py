@@ -173,7 +173,9 @@ class StockfishEngine(AbstractContextManager["StockfishEngine"]):
             # stockfish package discards MultiPV lines when go stops before the
             # node budget (common on forced mates). Fall back to depth search.
             if not tops and nodes > 0:
-                _logger.info(
+                # Expected on short forced lines (e.g. K+Q vs K): the stockfish
+                # package can drop MultiPV rows when go stops on the node budget.
+                _logger.debug(
                     "MultiPV node-budget returned no moves (n_legal=%s); "
                     "retrying depth-limited MultiPV fen=%s",
                     n_legal,

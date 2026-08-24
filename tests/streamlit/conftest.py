@@ -76,11 +76,11 @@ def patch_streamlit_page_deps(
 
     empty = pl.DataFrame()
     monkeypatch.setattr(
-        "chess_teacher.other.log_analytics.load_log_level_hourly_counts",
+        "chess_teacher.maintenance.log_analytics.load_log_level_hourly_counts",
         lambda _db: empty,
     )
     monkeypatch.setattr(
-        "chess_teacher.other.log_analytics.load_exception_hourly_counts",
+        "chess_teacher.maintenance.log_analytics.load_exception_hourly_counts",
         lambda _db: empty,
     )
     return smoke_user
