@@ -5,6 +5,9 @@ tables:
     comment: Enriched game rows derived from raw_games at preprocessing
     primary_key:
       - game_id
+    indexes:
+      - name: idx_games_end_time
+        columns: [end_time]
     columns:
       - name: game_id
         data_type: text

@@ -1,3 +1,4 @@
+import re
 from typing import Any
 
 from sqlalchemy import Connection, create_engine, text
@@ -10,6 +11,9 @@ from chess_teacher.utils.general_utils import quote_ident
 from chess_teacher.utils.logging import get_logger
 
 logger = get_logger()
+
+_ALLOWED_SESSION_SETTINGS = frozenset({"max_parallel_workers_per_gather"})
+_SESSION_SETTING_VALUE_RE = re.compile(r"^[0-9]+$")
 
 
 class EnrichedEngine(Engine):
@@ -37,10 +41,30 @@ class EnrichedEngine(Engine):
         except Exception as e:
             self._logger.log_and_raise(DatabaseError(f"Error executing SQL statements: {e}"))
 
+    def _apply_session_settings(self, conn: Connection, session_settings: dict[str, str]) -> None:
+        for key, value in session_settings.items():
+            if key not in _ALLOWED_SESSION_SETTINGS:
+                self._logger.log_and_raise(
+                    DatabaseError(f"Disallowed Postgres session setting: {key!r}")
+                )
+            if not _SESSION_SETTING_VALUE_RE.match(str(value)):
+                self._logger.log_and_raise(
+                    DatabaseError(f"Invalid Postgres session setting value: {value!r}")
+                )
+            conn.execute(text(f"SET LOCAL {key} = {value}"))
+
     # Voor parameterised queries — consumeer binnen context
-    def execute_parameterized_query(self, query: str, params: list[dict] | dict) -> list[dict]:
+    def execute_parameterized_query(
+        self,
+        query: str,
+        params: list[dict] | dict,
+        *,
+        session_settings: dict[str, str] | None = None,
+    ) -> list[dict]:
         try:
             with self.begin() as conn:
+                if session_settings:
+                    self._apply_session_settings(conn, session_settings)
                 result = conn.execute(text(query), params)
                 # Consume result before closing connection
                 return_list = [dict(r) for r in result.mappings().all()]
