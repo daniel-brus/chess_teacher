@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
+from chess_teacher.utils.logging import get_logger
 from chess_teacher.utils.table_data_class import TableDataClass
+
+logger = get_logger()
 
 
 @dataclass(frozen=True)
@@ -92,6 +97,7 @@ class MoveCharacteristics(TableDataClass):
     previous_opponent_move_san: str | None = None
     previous_opponent_move_uci: str | None = None
     opponent_move_was_capture: bool = False
+    candidate_evaluations: dict[str, Any] | None = None
 
     @classmethod
     def get_yaml_path(cls) -> Path:
@@ -104,3 +110,27 @@ class MoveCharacteristics(TableDataClass):
     @classmethod
     def get_id_hash_columns(cls) -> tuple[str, ...]:
         return ()
+
+    @classmethod
+    def _coerce_field_value(cls, field_name: str, value: Any) -> Any:
+        if field_name == "candidate_evaluations":
+            return _coerce_candidate_evaluations(value)
+        return super()._coerce_field_value(field_name, value)
+
+
+def _coerce_candidate_evaluations(raw: Any) -> dict[str, Any] | None:
+    """Normalize jsonb / JSON string from Postgres into a plain dict."""
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            return None
+        try:
+            raw = json.loads(text)
+        except json.JSONDecodeError:
+            logger.warning("Invalid candidate_evaluations JSON string")
+            return None
+    if not isinstance(raw, dict):
+        return None
+    return raw

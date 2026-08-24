@@ -206,6 +206,14 @@ def move_from_board_event(
         return None
     if event.get("kind") == "size":
         return None
+    # Ignore stale component values from a previous board instance (common after rerun).
+    raw_iid = event.get("instance_id")
+    if raw_iid is not None:
+        try:
+            if int(raw_iid) != int(state.instance_id):
+                return None
+        except (TypeError, ValueError):
+            return None
     return parse_move_uci(state.board, uci)
 
 

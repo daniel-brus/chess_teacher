@@ -62,12 +62,12 @@ class SampleEvalSetStep(PipelineStep):
             MoveCharacteristics.get_metadata(),
         )
         production: BaselineModel | None = context.extras.get("production_model")
-        # First production, or legacy MSE production vs policy candidate: auto-promote path.
-        if production is None or not production.looks_like_policy():
-            if production is not None and not production.looks_like_policy():
+        # First production, or legacy (MSE/policy) production vs candidate_style: auto-promote.
+        if production is None or not production.looks_like_candidate_style():
+            if production is not None and not production.looks_like_candidate_style():
                 logger.info(
-                    "Production version=%s looks like legacy MSE; "
-                    "skip eval sample (auto-promote policy candidate).",
+                    "Production version=%s not candidate_style; "
+                    "skip eval sample (auto-promote candidate_style candidate).",
                     production.version,
                 )
                 context.extras["legacy_mse_production"] = True
@@ -100,7 +100,7 @@ class ScoreModelsStep(PipelineStep):
         if production is None or legacy:
             context.extras["candidate_score"] = None
             context.extras["production_score"] = None
-            logger.info("Skipping scores; no policy production baseline.")
+            logger.info("Skipping scores; no candidate_style production baseline.")
             return
 
         if candidate.model_uri is None:
@@ -136,7 +136,7 @@ class DecidePromotionStep(PipelineStep):
         candidate = context.extras.get("candidate_model")
         production = context.extras.get("production_model")
         legacy = bool(context.extras.get("legacy_mse_production"))
-        # Keep production row for archive, but decide as if no policy production yet.
+        # Keep production row for archive, but decide as if no candidate_style production yet.
         has_production = production is not None and not legacy
         verdict: PromotionVerdict = self._strategies.policy.decide(
             candidate_score=context.extras.get("candidate_score"),
@@ -148,8 +148,9 @@ class DecidePromotionStep(PipelineStep):
             verdict = PromotionVerdict(
                 should_promote=True,
                 reason=(
-                    f"Legacy MSE production={production.version if production else None}; "
-                    "auto-promote policy candidate."
+                    f"Legacy/non-candidate_style production="
+                    f"{production.version if production else None}; "
+                    "auto-promote candidate_style candidate."
                 ),
                 candidate_score=verdict.candidate_score,
                 production_score=None,

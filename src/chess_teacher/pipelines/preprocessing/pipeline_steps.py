@@ -53,7 +53,10 @@ class RawGamesToGamesStep(TransformStep):
             on=on,
             transformations=[
                 ExpandRawResponseTransformation(),
-                JoinWithTableTransformation(with_data_class=Account),
+                JoinWithTableTransformation(
+                    with_data_class=Account,
+                    columns=["account_id", "username", "platform"],
+                ),
                 FilterGamesWithPGNTransformation(),
                 RenameColumnsTransformation({"pgn": "raw_pgn"}),
                 ExtractGameMetadataTransformation(),
@@ -64,6 +67,7 @@ class RawGamesToGamesStep(TransformStep):
                     with_data_class=RawEcoCode,
                     left_on=["eco_code"],
                     right_on=["eco_code"],
+                    columns=["eco_code_id", "eco_code", "name", "pgn"],
                 ),
                 DeriveOpeningTransformation(),
                 ApplyChessComOpeningLookupTransformation(),
@@ -96,6 +100,19 @@ class ExtractUserMovesStep(TransformStep):
 class EnrichMoveCharacteristicsStep(TransformStep):
     """Compute move characteristics from moves into games.move_characteristics."""
 
+    # FENs + UCI drive metrics; identity/opponent fields pass through to the target table.
+    _SOURCE_COLUMNS: tuple[str, ...] = (
+        "move_id",
+        "game_id",
+        "account_id",
+        "fen_before",
+        "fen_after",
+        "move_uci",
+        "previous_opponent_move_san",
+        "previous_opponent_move_uci",
+        "opponent_move_was_capture",
+    )
+
     def __init__(self, *, mode: PipelineMode = PipelineMode.INCREMENTAL) -> None:
         on, merge_strategy = preprocessing_transform_config(mode, incremental_on="move_id")
         super().__init__(
@@ -103,6 +120,7 @@ class EnrichMoveCharacteristicsStep(TransformStep):
             source_data_class=Move,
             target_data_class=MoveCharacteristics,
             on=on,
+            source_columns=list(self._SOURCE_COLUMNS),
             transformations=[
                 MaterialBalanceTransformation(),
                 VerticalOpennessTransformation(),
@@ -116,7 +134,7 @@ class EnrichMoveCharacteristicsStep(TransformStep):
                 PinValueTransformation(),
                 MoveContextTransformation(),
                 MoveFlagsTransformation(),
-                StockfishEvaluationTransformation(depth=20, log_progress_percent=5),
+                StockfishEvaluationTransformation(depth=12, log_progress_percent=5),
             ],
             loading_strategy=LoadingStrategy.MERGE,
             merge_strategy=merge_strategy,

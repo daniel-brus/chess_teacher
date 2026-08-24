@@ -309,6 +309,15 @@ def _build_insert_sql(
 def _value_to_typed_sql(value: Any, data_type: str) -> str:
     if value is None:
         return f"NULL::{data_type}"
+    normalized = data_type.strip().lower()
+    if normalized in {"json", "jsonb"}:
+        import json as _json
+
+        if isinstance(value, (dict, list)):
+            literal = quote_literal(_json.dumps(value))
+        else:
+            literal = quote_literal(str(value))
+        return f"{literal}::{normalized}"
     if isinstance(value, bool):
         literal = "TRUE" if value else "FALSE"
     elif isinstance(value, int | float):

@@ -11,7 +11,11 @@ from chess_teacher.utils.db.client import DatabaseClient, MergeStrategy, WriteRe
 from chess_teacher.utils.exception_utils import MetadataError, PipelineError
 from chess_teacher.utils.files.file_loader import FileLoader, FileLoaderFactory
 from chess_teacher.utils.files.file_utils import FileType, TextStreamSource
-from chess_teacher.utils.general_utils import generate_ident_is_literal, get_current_datetime
+from chess_teacher.utils.general_utils import (
+    generate_ident_is_literal,
+    get_current_datetime,
+    quote_ident,
+)
 from chess_teacher.utils.metadata_utils import TableMetadata
 from chess_teacher.utils.object_storage.base import ObjectStorage
 from chess_teacher.utils.object_storage.factory import get_raw_storage
@@ -309,12 +313,39 @@ class TransformStep(LoadToDatabaseStep):
             return pl.DataFrame()
         context.progress_update(f"Reading records from {source}...")
         where = self._context_where_clause(self.source_table_metadata, context)
+        where = self._with_incremental_anti_join(where)
         return db_client.read(
             self.source_table_metadata,
             columns=self.source_columns,
             where=where,
             as_polars=True,
         )
+
+    def _with_incremental_anti_join(self, where: str | None) -> str | None:
+        """Skip source rows whose incremental key already exists in the target table."""
+        if self.on is None or self.source_column is None:
+            return where
+
+        source_columns = set(self.source_table_metadata.column_names())
+        target_columns = set(self.table_metadata.column_names())
+        if self.source_column not in source_columns or self.on not in target_columns:
+            return where
+
+        source_q = self.source_table_metadata.qualified_name_sql()
+        target_q = self.table_metadata.qualified_name_sql()
+        anti_join = (
+            f"NOT EXISTS (SELECT 1 FROM {target_q} AS _inc_tgt "
+            f"WHERE _inc_tgt.{quote_ident(self.on)} = "
+            f"{source_q}.{quote_ident(self.source_column)}"
+        )
+        scope_where = self._incremental_filter.scope_where
+        if scope_where:
+            anti_join += f" AND ({scope_where})"
+        anti_join += ")"
+
+        if where:
+            return f"({where}) AND {anti_join}"
+        return anti_join
 
 
 class StorageToTableStep(LoadToDatabaseStep):

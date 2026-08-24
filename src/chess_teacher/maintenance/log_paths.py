@@ -6,6 +6,7 @@ from datetime import date
 from pathlib import PurePosixPath
 
 CLOSED_LOG_STORAGE_PREFIX = "logs/python/buffer/closed"
+PROCESSED_LOG_STORAGE_PREFIX = "logs/python/buffer/processed"
 UNKNOWN_HOSTNAME = "unknown"
 
 

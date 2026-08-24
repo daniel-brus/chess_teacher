@@ -404,6 +404,14 @@ tables:
         nullable: false
         default: false
         comment: Whether the opponent's previous move was a capture
+      - name: candidate_evaluations
+        data_type: jsonb
+        nullable: true
+        comment: >-
+          Per-legal-move Stockfish scores for fen_before via MultiPV-all.
+          Shape {"depth": int, "num_nodes": int, "method": "multipv_nodes",
+          "evals_white_pov": {uci: float, ...}} (white-POV pawns).
+          Used by candidate-style training/play; independent of evaluation_* played-move cols.
 
   raw_eco_codes:
     schema: other

@@ -17,7 +17,7 @@ class StockfishEvaluationTransformation(FenCharacteristicTransformation):
     def __init__(
         self,
         *,
-        depth: int = 20,
+        depth: int = 12,
         stockfish_path: str | None = None,
         log_progress_percent: int | None = 5,
         n_workers: int | None = None,

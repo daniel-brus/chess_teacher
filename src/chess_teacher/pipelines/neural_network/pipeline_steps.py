@@ -7,6 +7,7 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 
+from chess_teacher.pipelines.neural_network.candidate_eval import HEAD_TYPE_CANDIDATE_STYLE
 from chess_teacher.pipelines.neural_network.create_training_set import (
     TrainingDataStore,
     TrainingDatum,
@@ -17,8 +18,7 @@ from chess_teacher.pipelines.neural_network.models import (
     BaselineModelStatus,
     TrainingState,
 )
-from chess_teacher.pipelines.neural_network.move_encoding import POLICY_VOCAB_SIZE
-from chess_teacher.pipelines.neural_network.train import HEAD_TYPE_POLICY, BaselineTrainer
+from chess_teacher.pipelines.neural_network.train import BaselineTrainer
 from chess_teacher.pipelines.preprocessing.games import Game
 from chess_teacher.pipelines.preprocessing.moves import Move, MoveCharacteristics
 from chess_teacher.utils.db.client import DatabaseClient
@@ -55,6 +55,11 @@ class CheckSufficientNewDataStep(PipelineStep):
         state = TrainingState.for_baseline(db_client)
         cutoff = state.last_trained_data_cutoff
         store = TrainingDataStore(db_client)
+        logger.info(
+            "Counting eligible training moves (needs characteristics + candidate_evaluations; "
+            "cutoff=%s) — may take a while…",
+            cutoff,
+        )
         n_new = store.count_since(cutoff)
         min_needed = MIN_NEW_MOVES_BASELINE
         updated = state.with_check_at(get_current_datetime())
@@ -96,16 +101,24 @@ class LoadPreviousCandidateWeightsStep(PipelineStep):
         parent = BaselineModel.resolve_parent(db_client)
         context.extras["parent_model"] = parent
         context.extras["parent_version"] = parent.version if parent else None
-        context.extras["parent_model_uri"] = parent.model_uri if parent else None
-        if parent is None:
-            logger.info("No previous baseline weights; cold start.")
-        else:
+        # Only resume same-family weights; policy/MSE parents cold-start.
+        if parent is not None and parent.looks_like_candidate_style() and parent.model_uri:
+            context.extras["parent_model_uri"] = parent.model_uri
             logger.info(
-                "Parent baseline version=%s status=%s uri=%s",
+                "Parent baseline version=%s status=%s uri=%s (candidate_style)",
                 parent.version,
                 parent.status,
                 parent.model_uri,
             )
+        else:
+            context.extras["parent_model_uri"] = None
+            if parent is None:
+                logger.info("No previous baseline weights; cold start.")
+            else:
+                logger.info(
+                    "Parent version=%s not candidate_style-compatible; cold start (uri ignored).",
+                    parent.version,
+                )
 
 
 class LoadNewDataStep(PipelineStep):
@@ -120,6 +133,12 @@ class LoadNewDataStep(PipelineStep):
 
         state: TrainingState = context.extras["training_state"]
         limit = MAX_MOVES_PER_BASELINE_BATCH
+        logger.info(
+            "Loading training datums from DB (oldest-first, limit=%s, cutoff=%s) — "
+            "SQL + hydrate characteristics…",
+            limit,
+            state.last_trained_data_cutoff,
+        )
         datums, max_end_time = TrainingDataStore(db_client).fetch_since(
             state.last_trained_data_cutoff,
             limit=limit,
@@ -150,10 +169,19 @@ class TrainIncrementalStep(PipelineStep):
 
         datums: list[TrainingDatum] = context.extras["training_datums"]
         parent_uri: str | None = context.extras.get("parent_model_uri")
+        if parent_uri:
+            logger.info("Downloading parent Keras weights from MLflow/S3 uri=%s…", parent_uri)
         weights_path = self._tracker.download_keras_weights(parent_uri)
 
+        logger.info(
+            "Preparing candidate-style tensors + training (n_datums=%s, epochs=%s) — "
+            "on-the-fly move features can take a while…",
+            len(datums),
+            self._trainer.epochs,
+        )
         model, metrics = self._trainer.fit(datums, weights_path=weights_path)
         out_path = Path(tempfile.mkdtemp(prefix="baseline_model_")) / "model.keras"
+        logger.info("Saving trained Keras model to %s…", out_path)
         BaselineTrainer.save(model, out_path)
         context.extras["trained_model_path"] = out_path
         context.extras["train_metrics"] = metrics
@@ -178,6 +206,10 @@ class LogToMLflowStep(PipelineStep):
         data_cutoff_at: datetime | None = context.extras.get("batch_data_cutoff_at")
         trained_at = get_current_datetime()
 
+        logger.info(
+            "Logging baseline %s to MLflow + inserting candidate row…",
+            version,
+        )
         run_id, artifact_uri = self._tracker.log_training_run(
             run_name=f"baseline-{version}",
             model_path=model_path,
@@ -186,8 +218,13 @@ class LogToMLflowStep(PipelineStep):
                 "parent_version": parent_version or "",
                 "n_samples": int(metrics.get("n_samples", 0)),
                 "min_new_moves": context.extras.get("min_new_moves"),
-                "head": HEAD_TYPE_POLICY,
-                "vocab_size": POLICY_VOCAB_SIZE,
+                "head": HEAD_TYPE_CANDIDATE_STYLE,
+                "max_candidates": int(metrics.get("max_candidates", 0)),
+                "move_feat_dim": int(metrics.get("move_feat_dim", 0)),
+                "move_feat_version": int(metrics.get("move_feat_version", 0)),
+                "style_disagree_boost": float(metrics.get("style_disagree_boost", 1.0)),
+                "style_disagree_scale": float(metrics.get("style_disagree_scale", 2.0)),
+                "epochs": int(metrics.get("epochs", 0)),
             },
             metrics=metrics,
         )

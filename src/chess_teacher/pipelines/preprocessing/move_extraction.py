@@ -262,7 +262,7 @@ class ExtractUserMovesTransformation(DataFrameTransformation):
             expanded
             .filter(pl.col("_moves").list.len() > 0)
             .select("_moves")
-            .explode("_moves")
+            .explode("_moves", empty_as_null=True)
             .unnest("_moves")
         )
         if result.height == 0:

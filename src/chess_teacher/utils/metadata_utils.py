@@ -53,6 +53,8 @@ _POSTGRES_TO_POLARS: dict[str, pl.DataType] = cast(
         "float8": pl.Float64,
         "real": pl.Float32,
         "float4": pl.Float32,
+        "json": pl.Object,
+        "jsonb": pl.Object,
     },
 )
 

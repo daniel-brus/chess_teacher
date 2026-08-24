@@ -17,6 +17,8 @@
 #   REPLACE_SCRIPT_PATH         — path under scripts/, e.g. entrypoints/baseline_training.py
 #   REPLACE_SCRIPT_LABEL        — basename for k8s labels (no slashes), e.g. baseline_training.py
 #   REPLACE_SCRIPT_ARGS         — YAML list, e.g. [] or ["--workers", "4"]
+#
+# Optional v1.1: add resources.requests/limits for CPU-heavy backfill (--workers 4).
 apiVersion: batch/v1
 kind: Job
 metadata:

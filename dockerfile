@@ -20,6 +20,7 @@ COPY orchestration/k8s/job/ ./orchestration/k8s/job/
 COPY streamlit_app.py .
 COPY streamlit_utils/ ./streamlit_utils/
 COPY streamlit_pages/ ./streamlit_pages/
+COPY streamlit_components/ ./streamlit_components/
 COPY .streamlit/ ./.streamlit/
 
 RUN mkdir -p storage

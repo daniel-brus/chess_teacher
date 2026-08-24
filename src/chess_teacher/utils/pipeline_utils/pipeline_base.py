@@ -11,6 +11,7 @@ from uuid import uuid4
 
 from chess_teacher.utils.db.client import DatabaseClient, get_db_client
 from chess_teacher.utils.exception_utils import (
+    AdapterClientError,
     DatabaseError,
     FileError,
     PipelineError,
@@ -47,6 +48,7 @@ _DEFAULT_NO_RETRY_ON: tuple[type[Exception], ...] = (
     AssertionError,
     NotImplementedError,
     TransformationError,
+    AdapterClientError,
 )
 
 

@@ -1,0 +1,10 @@
+# Vulnerability IDs ignored by CI `pip-audit` (one ID per line; `#` comments allowed).
+# Remove entries once the upstream constraint that forces the vulnerable package is lifted.
+
+# cryptography PKCS#7 Bleichenbacher oracle (fixed in 50.0.0).
+# Blocked by mlflow 3.15.x: cryptography>=43,<50. Upstream bump already on master
+# (Allow cryptography 50.x, mlflow#24872) — drop after a release with cryptography<51.
+# https://osv.dev/vulnerability/PYSEC-2026-3552
+PYSEC-2026-3552
+GHSA-g6cj-pr64-35w5
+CVE-2026-69247

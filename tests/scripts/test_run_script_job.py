@@ -64,12 +64,21 @@ def test_dry_run_output_is_valid_yaml(
     monkeypatch.setenv("PIPELINE_JOB_IMAGE", "registry.example/chess-teacher:test")
     monkeypatch.setenv("IMAGE_PULL_POLICY", "Always")
 
-    exit_code = run_script_job_main(["baseline_training", "--dry-run"])
+    exit_code = run_script_job_main([
+        "ops/backfill_candidate_evals.py",
+        "--dry-run",
+        "--",
+        "--workers",
+        "2",
+        "--limit",
+        "5",
+    ])
     assert exit_code == 0
 
     parsed = yaml.safe_load(capsys.readouterr().out)
     container = parsed["spec"]["template"]["spec"]["containers"][0]
-    assert container["command"] == ["python", "scripts/entrypoints/baseline_training.py"]
+    assert container["command"] == ["python", "scripts/ops/backfill_candidate_evals.py"]
+    assert container["args"] == ["--workers", "2", "--limit", "5"]
     assert container["image"] == "registry.example/chess-teacher:test"
 
 

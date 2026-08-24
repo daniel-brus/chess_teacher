@@ -1,9 +1,5 @@
 from __future__ import annotations
 
-import threading
-from datetime import timedelta
-from typing import Any
-
 import streamlit as st
 
 from chess_teacher.bots import (
@@ -27,10 +23,8 @@ from streamlit_utils.page_config import configure_page
 from streamlit_utils.page_logging import log_page_view, log_user_action
 from streamlit_utils.play_game import (
     PlayGameState,
-    apply_uci_move,
+    apply_bot_move,
     apply_user_board_event,
-    bot_job_matches_state,
-    choose_bot_move_uci,
     close_bot,
     create_bot,
     game_status_message,
@@ -54,15 +48,12 @@ st.title("Play a game of chess")
 
 _PLAY_STATE_KEY = "play_game_state"
 _PLAY_BOT_KEY = "play_game_bot"
-_PLAY_BOT_LOCK_KEY = "play_bot_lock"
-_PLAY_BOT_JOB_KEY = "play_bot_job"
 _PLAY_WIN_CELEBRATED_KEY = "play_win_celebrated_instance"
 _PLAY_SETUP_COLOR_KEY = "play_setup_color"
 _PLAY_SETUP_CATEGORY_KEY = "play_setup_category"
 _PLAY_SETUP_STOCKFISH_DEPTH_KEY = "play_setup_stockfish_depth"
 _PLAY_SETUP_BASELINE_KEY = "play_setup_baseline"
 _PLAY_SETUP_OTHER_KEY = "play_setup_other"
-_BOT_POLL_INTERVAL = timedelta(milliseconds=400)
 
 _PLAY_STATUS_CSS = """
 div[class*="st-key-play_board_status"] {
@@ -94,21 +85,10 @@ def _set_bot(bot: ChessBot | None) -> None:
     st.session_state[_PLAY_BOT_KEY] = bot
 
 
-def _bot_lock() -> threading.Lock:
-    if _PLAY_BOT_LOCK_KEY not in st.session_state:
-        st.session_state[_PLAY_BOT_LOCK_KEY] = threading.Lock()
-    return st.session_state[_PLAY_BOT_LOCK_KEY]
-
-
-def _clear_bot_job() -> None:
-    st.session_state.pop(_PLAY_BOT_JOB_KEY, None)
-
-
 def _reset_game() -> None:
     close_bot(_get_bot())
     _set_bot(None)
     _set_state(None)
-    _clear_bot_job()
     st.session_state.pop(_PLAY_WIN_CELEBRATED_KEY, None)
 
 
@@ -129,77 +109,6 @@ def _ensure_bot(state: PlayGameState) -> ChessBot:
         _set_bot(bot)
         st.session_state["play_game_bot_preset"] = state.preset_key
     return bot
-
-
-def _bot_worker(job: dict[str, Any], bot: ChessBot, lock: threading.Lock) -> None:
-    """Run engine search off the Streamlit script thread to avoid the page dim overlay."""
-    try:
-        with lock:
-            job["uci"] = choose_bot_move_uci(bot, str(job["fen"]))
-    except Exception as exc:
-        job["error"] = str(exc)
-    finally:
-        job["done"] = True
-
-
-def _ensure_bot_job(state: PlayGameState, bot: ChessBot) -> dict[str, Any]:
-    fen = state_fen(state)
-    job = st.session_state.get(_PLAY_BOT_JOB_KEY)
-    if isinstance(job, dict) and bot_job_matches_state(job, state):
-        return job
-
-    job = {
-        "instance_id": state.instance_id,
-        "fen": fen,
-        "done": False,
-        "uci": None,
-        "error": None,
-    }
-    st.session_state[_PLAY_BOT_JOB_KEY] = job
-    thread = threading.Thread(
-        target=_bot_worker,
-        args=(job, bot, _bot_lock()),
-        daemon=True,
-        name="play-bot-move",
-    )
-    thread.start()
-    return job
-
-
-@st.fragment(run_every=_BOT_POLL_INTERVAL)
-def _poll_bot_job() -> None:
-    """Poll background search; full-app rerun only when a move is ready."""
-    state = _get_state()
-    if state is None:
-        return
-
-    job = st.session_state.get(_PLAY_BOT_JOB_KEY)
-    if not isinstance(job, dict) or not job.get("done"):
-        return
-    if not bot_job_matches_state(job, state):
-        return
-
-    error = job.get("error")
-    if error:
-        _clear_bot_job()
-        st.error(f"Bot failed to move: {error}")
-        return
-
-    uci = job.get("uci")
-    if not isinstance(uci, str) or not uci:
-        _clear_bot_job()
-        return
-
-    try:
-        next_state = apply_uci_move(state, uci)
-    except ValueError as exc:
-        _clear_bot_job()
-        st.error(str(exc))
-        return
-
-    _clear_bot_job()
-    _set_state(next_state)
-    st.rerun()
 
 
 def _resolve_preset(preset_key: str):
@@ -343,13 +252,18 @@ def _render_setup() -> None:
             return
         state = start_new_game(color_choice, preset_key)
         _set_state(state)
-        _clear_bot_job()
         _ensure_bot(state)
         log_user_action(
             f"Started play game color={color_choice} preset={preset_key}",
             user,
         )
         st.rerun()
+
+
+def _run_bot_turn(state: PlayGameState, bot: ChessBot, *, label: str) -> PlayGameState:
+    """Block until the bot moves (script thread). Used for opening-as-black and after user."""
+    with st.spinner(f"{label} is thinking…"):
+        return apply_bot_move(state, bot)
 
 
 def _render_active_game(state: PlayGameState) -> None:
@@ -361,23 +275,28 @@ def _render_active_game(state: PlayGameState) -> None:
         + (f" ({description})" if description else "")
     )
 
-    status = game_status_message(state)
     bot = _ensure_bot(state)
-    thinking = is_bot_thinking(state)
+
+    # Opening when user is Black (or any pending bot with no new user event this run).
+    if is_bot_thinking(state):
+        ingest_css(_PLAY_STATUS_CSS)
+        with st.container(key="play_board_status"):
+            st.markdown(f"*{label} is thinking…*")
+        state = _run_bot_turn(state, bot, label=label)
+        _set_state(state)
+        st.rerun()
+        return
+
+    status = game_status_message(state)
 
     ingest_css(_PLAY_STATUS_CSS)
     with st.container(key="play_board_status"):
-        if thinking:
-            st.markdown(f"*{label} is thinking…*")
-        elif status:
+        if status:
             st.markdown(f"**{status}**")
         else:
             st.markdown("&#8203;", unsafe_allow_html=True)
 
     _maybe_celebrate_win(state)
-
-    if thinking:
-        _ensure_bot_job(state, bot)
 
     board_event = chess_board(
         state_fen(state),
@@ -397,8 +316,11 @@ def _render_active_game(state: PlayGameState) -> None:
     if applied is not None:
         state, move_uci = applied
         _set_state(state)
-        _clear_bot_job()
         log_user_action(f"Play page user move={move_uci}", user)
+        # Same-run bot reply → one full rerun instead of user-rerun then bot-rerun.
+        if is_bot_thinking(state):
+            state = _run_bot_turn(state, bot, label=label)
+            _set_state(state)
         st.rerun()
 
     cols = st.columns(2)
@@ -410,14 +332,8 @@ def _render_active_game(state: PlayGameState) -> None:
     with cols[1]:
         if st.button("Resign", width="stretch", disabled=is_game_finished(state)):
             log_user_action("Play page resignation", user)
-            _clear_bot_job()
             _set_state(resign_game(state))
             st.rerun()
-
-    # Poll after board/buttons. run_every (not scope=fragment) — first fragment
-    # invocation during a full script run cannot use scope="fragment".
-    if thinking:
-        _poll_bot_job()
 
 
 def _render_page() -> None:

@@ -18,13 +18,17 @@ from chess_teacher.pipelines.preprocessing.moves import Move, MoveCharacteristic
 from chess_teacher.utils.chess_utils import Color
 from chess_teacher.utils.db.client import DatabaseClient, get_db_client
 from chess_teacher.utils.general_utils import generate_ident_is_literal, quote_literal
+from chess_teacher.utils.logging import get_logger
 
-# Shared FROM/WHERE for moves that have characteristics + a known game end_time.
+logger = get_logger()
+
+# Shared FROM/WHERE for moves that have characteristics + candidate SF evals + known end_time.
 _SQL_MOVES_WITH_CHARS = """
             FROM games.moves m
             INNER JOIN games.games g ON g.game_id = m.game_id
             INNER JOIN games.move_characteristics mc ON mc.move_id = m.move_id
             WHERE g.end_time IS NOT NULL
+              AND mc.candidate_evaluations IS NOT NULL
 """
 
 # Domain scales tuned against local games.move_characteristics (n=825, dev_local).
@@ -163,6 +167,33 @@ _PASSTHROUGH_BOOL_ATTRS: tuple[str, ...] = (
     "is_middle_game",
     "is_end_game",
     "opponent_move_was_capture",
+)
+
+# Avoid SELECT * / PGN egress when hydrating training rows.
+_GAME_TRAINING_COLUMNS: list[str] = ["game_id", "color"]
+_MOVE_TRAINING_COLUMNS: list[str] = [
+    "move_id",
+    "game_id",
+    "account_id",
+    "move_nr",
+    "ply",
+    "move_san",
+    "move_uci",
+    "fen_before",
+    "fen_after",
+    "previous_opponent_move_uci",
+]
+_CHARS_TRAINING_COLUMNS: list[str] = list(
+    dict.fromkeys([
+        "move_id",
+        "game_id",
+        "account_id",
+        *_SIGNED_WHITE_POV_ATTRS,
+        *(white for white, _, _, _ in _SIDE_METRIC_PAIRS),
+        *(black for _, black, _, _ in _SIDE_METRIC_PAIRS),
+        *_PASSTHROUGH_NUMERIC_ATTRS,
+        *_PASSTHROUGH_BOOL_ATTRS,
+    ])
 )
 
 # Pre-move / context features only (no chosen-move leakage for move prediction).
@@ -395,20 +426,27 @@ class TrainingDatumBuilder:
         cls,
         move: Move,
         chars: MoveCharacteristics,
-        game: Game,
+        *,
+        color: Color,
+        game_id: str | None = None,
     ) -> TrainingDatum:
-        """Pure convert: DB move + characteristics + game → training datum."""
+        """Pure convert: DB move + characteristics + game color → training datum.
+
+        ``game_id`` defaults to ``move.game_id``. Pass explicitly when validating a
+        joined game row without hydrating full ``Game`` (avoids PGN egress).
+        """
         if move.move_id != chars.move_id:
             raise ValueError(f"move_id mismatch: move={move.move_id!r} chars={chars.move_id!r}")
-        if move.game_id != game.game_id:
-            raise ValueError(f"game_id mismatch: move={move.game_id!r} game={game.game_id!r}")
+        resolved_game_id = game_id if game_id is not None else move.game_id
+        if move.game_id != resolved_game_id:
+            raise ValueError(f"game_id mismatch: move={move.game_id!r} game={resolved_game_id!r}")
 
         identity = cls.derive_move_identity(
             fen_before=move.fen_before,
             move_uci=move.move_uci,
             previous_opponent_move_uci=move.previous_opponent_move_uci,
         )
-        features = cls.remap_characteristics_to_user_pov(chars, game.color)
+        features = cls.remap_characteristics_to_user_pov(chars, color)
 
         return TrainingDatum(
             move_id=move.move_id,
@@ -416,7 +454,7 @@ class TrainingDatumBuilder:
             account_id=move.account_id,
             move_nr=move.move_nr,
             ply=move.ply,
-            color=game.color,
+            color=color,
             fen_before=move.fen_before,
             fen_after=move.fen_after,
             move_uci=move.move_uci,
@@ -448,6 +486,7 @@ class TrainingDatumBuilder:
             opponent_move_was_queen=identity["opponent_move_was_queen"],
             opponent_move_was_king=identity["opponent_move_was_king"],
             features=features,
+            candidate_evaluations=chars.candidate_evaluations,
         )
 
 
@@ -578,6 +617,8 @@ class TrainingDatum:
 
     # User-POV + passthrough characteristics
     features: dict[str, Any]
+    # Optional jsonb from move_characteristics (white-POV after-evals per legal UCI).
+    candidate_evaluations: dict[str, Any] | None = None
 
     def state_vector(
         self,
@@ -627,8 +668,38 @@ class TrainingDatum:
         return MoveEncoder.mask_from_ucis(self.legal_move_ucis)
 
     def policy_target(self) -> tuple[int, np.ndarray]:
-        """Return ``(class_index, legal_mask)`` for masked policy training."""
+        """Legacy fixed-vocab target (unused by candidate-style trainer)."""
         return self.policy_class_index(), self.policy_legal_mask()
+
+    def candidate_style_target(
+        self,
+    ) -> tuple[np.ndarray, np.ndarray, int] | None:
+        """Padded candidate feats/mask/label, or None if evals missing/unusable."""
+        from chess_teacher.pipelines.neural_network.candidate_eval import (
+            pack_candidate_tensors,
+            parse_candidate_evaluations,
+        )
+
+        payload = parse_candidate_evaluations(self.candidate_evaluations)
+        if payload is None:
+            return None
+        evals = payload["evals_white_pov"]
+        color_is_white = self.color == Color.WHITE
+        eval_user = self.features.get("evaluation_before_user_pov")
+        evaluation_before_white: float | None
+        if eval_user is None:
+            evaluation_before_white = None
+        else:
+            evaluation_before_white = float(eval_user) if color_is_white else float(-eval_user)
+        return pack_candidate_tensors(
+            evals,
+            fen_before=self.fen_before,
+            color_is_white=color_is_white,
+            user_move_uci=self.move_uci,
+            legal_ucis=self.legal_move_ucis,
+            opponent_move_was_capture=bool(self.features.get("opponent_move_was_capture") or False),
+            evaluation_before_white=evaluation_before_white,
+        )
 
     def to_keras_input_vector(
         self,
@@ -818,8 +889,64 @@ class TrainingBatch:
         return np.stack([d.policy_legal_mask() for d in self.datums], axis=0)
 
     def policy_targets(self) -> tuple[np.ndarray, np.ndarray]:
-        """Return ``(y_index shape (N,), legal_mask shape (N, V))``."""
+        """Legacy ``(y_index shape (N,), legal_mask shape (N, V))``."""
         return self.policy_class_indices(), self.policy_legal_masks()
+
+    def candidate_style_targets(
+        self,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[int]]:
+        """Stack candidate tensors; drop datums that cannot form a target.
+
+        Returns ``(feats, mask, labels, kept_indices)`` where kept_indices map
+        into ``self.datums``.
+        """
+        from chess_teacher.pipelines.neural_network.candidate_eval import (
+            MAX_CANDIDATES,
+            MOVE_FEAT_DIM,
+        )
+
+        n = len(self.datums)
+        logger.info(
+            "Packing candidate-style targets for %s datums (feat_dim=%s, max_candidates=%s)…",
+            n,
+            MOVE_FEAT_DIM,
+            MAX_CANDIDATES,
+        )
+        feats_list: list[np.ndarray] = []
+        mask_list: list[np.ndarray] = []
+        labels: list[int] = []
+        kept: list[int] = []
+        progress_every = max(1, n // 5) if n else 1
+        for i, d in enumerate(self.datums):
+            packed = d.candidate_style_target()
+            if packed is None:
+                continue
+            f, m, lab = packed
+            feats_list.append(f)
+            mask_list.append(m)
+            labels.append(lab)
+            kept.append(i)
+            done = i + 1
+            if done == n or (done % progress_every == 0):
+                logger.info(
+                    "Candidate feature progress %s/%s kept=%s",
+                    done,
+                    n,
+                    len(kept),
+                )
+        if not feats_list:
+            return (
+                np.zeros((0, MAX_CANDIDATES, MOVE_FEAT_DIM), dtype=np.float32),
+                np.zeros((0, MAX_CANDIDATES), dtype=np.float32),
+                np.zeros((0,), dtype=np.int32),
+                [],
+            )
+        return (
+            np.stack(feats_list, axis=0),
+            np.stack(mask_list, axis=0),
+            np.asarray(labels, dtype=np.int32),
+            kept,
+        )
 
     def legacy_matrix(
         self,
@@ -871,22 +998,35 @@ class TrainingDataStore:
         chars_by_id = {
             c.move_id: c
             for c in MoveCharacteristics.fetch_all_from_db(
-                self._db, where=f'"move_id" IN ({move_id_list})'
+                self._db,
+                columns=_CHARS_TRAINING_COLUMNS,
+                where=f'"move_id" IN ({move_id_list})',
             )
         }
-        games_by_id = {
-            g.game_id: g
-            for g in Game.fetch_all_from_db(self._db, where=f'"game_id" IN ({game_id_list})')
+        color_by_game_id = {
+            row["game_id"]: Color(row["color"])
+            for row in self._db.read(
+                Game.get_metadata(),
+                columns=_GAME_TRAINING_COLUMNS,
+                where=f'"game_id" IN ({game_id_list})',
+            )
         }
 
         datums: list[TrainingDatum] = []
         for move in moves:
             chars = chars_by_id.get(move.move_id)
-            game = games_by_id.get(move.game_id)
-            if chars is None or game is None:
+            color = color_by_game_id.get(move.game_id)
+            if chars is None or color is None:
                 continue
             try:
-                datums.append(TrainingDatumBuilder.from_db_rows(move, chars, game))
+                datums.append(
+                    TrainingDatumBuilder.from_db_rows(
+                        move,
+                        chars,
+                        color=color,
+                        game_id=move.game_id,
+                    )
+                )
             except ValueError:
                 continue
         return datums
@@ -895,17 +1035,40 @@ class TrainingDataStore:
         """Hydrate ordered ``move_id`` list into datums (missing ids skipped)."""
         if not move_ids:
             return []
+        logger.info(
+            "Hydrating %s moves into TrainingDatum (moves + characteristics + games)…",
+            len(move_ids),
+        )
         move_id_list = ", ".join(quote_literal(mid) for mid in move_ids)
-        moves = Move.fetch_all_from_db(self._db, where=f'"move_id" IN ({move_id_list})')
+        moves = Move.fetch_all_from_db(
+            self._db,
+            columns=_MOVE_TRAINING_COLUMNS,
+            where=f'"move_id" IN ({move_id_list})',
+        )
         by_id = {m.move_id: m for m in moves}
         ordered_moves = [by_id[mid] for mid in move_ids if mid in by_id]
         return self._datums_from_moves(ordered_moves)
 
     def fetch_one(self, move_id: str) -> TrainingDatum:
-        move = Move.fetch_from_db(self._db, id=move_id)
-        chars = MoveCharacteristics.fetch_from_db(self._db, id=move_id)
-        game = Game.fetch_from_db(self._db, id=move.game_id)
-        return TrainingDatumBuilder.from_db_rows(move, chars, game)
+        move = Move.fetch_from_db(self._db, id=move_id, columns=_MOVE_TRAINING_COLUMNS)
+        chars = MoveCharacteristics.fetch_from_db(
+            self._db, id=move_id, columns=_CHARS_TRAINING_COLUMNS
+        )
+        game_rows = self._db.read(
+            Game.get_metadata(),
+            columns=_GAME_TRAINING_COLUMNS,
+            where=generate_ident_is_literal("game_id", move.game_id),
+        )
+        if len(game_rows) != 1:
+            raise ValueError(
+                f"Expected one game for game_id={move.game_id!r}, got {len(game_rows)}"
+            )
+        return TrainingDatumBuilder.from_db_rows(
+            move,
+            chars,
+            color=Color(game_rows[0]["color"]),
+            game_id=str(game_rows[0]["game_id"]),
+        )
 
     def fetch_for_account(
         self,
@@ -915,6 +1078,7 @@ class TrainingDataStore:
     ) -> list[TrainingDatum]:
         moves = Move.fetch_all_from_db(
             self._db,
+            columns=_MOVE_TRAINING_COLUMNS,
             where=generate_ident_is_literal("account_id", account_id),
             order_by='"ply" ASC',
             limit=limit,
@@ -958,6 +1122,11 @@ class TrainingDataStore:
             sql += " LIMIT :limit"
             params["limit"] = limit
 
+        logger.info(
+            "Querying training move ids (cutoff=%s limit=%s)…",
+            cutoff,
+            limit,
+        )
         rows = self._db.engine.execute_parameterized_query(sql, params)
         if not rows:
             return [], None
