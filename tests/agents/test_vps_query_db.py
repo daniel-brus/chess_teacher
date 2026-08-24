@@ -43,7 +43,7 @@ def test_remote_db_argv_is_quoted(vps_query) -> None:
     )
     assert "kubectl exec" in remote
     assert "deploy/streamlit" in remote
-    assert "scripts/agent_db_query.py" in remote
+    assert "scripts/tools/agent_db_query.py" in remote
     assert "'candidate_evaluations IS NOT NULL'" in remote or (
         '"candidate_evaluations IS NOT NULL"' in remote
     )

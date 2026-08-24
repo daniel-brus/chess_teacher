@@ -5,11 +5,9 @@ from __future__ import annotations
 from uuid import uuid4
 
 from chess_teacher.utils.exception_utils import FileError
-from chess_teacher.utils.logging import get_logger
+from chess_teacher.utils.logging.config import get_logger
 from chess_teacher.utils.object_storage.base import ObjectStorage
 from chess_teacher.utils.object_storage.factory import get_raw_storage
-
-logger = get_logger()
 
 _HEALTHCHECK_PREFIX = "_healthcheck"
 _PROBE_PAYLOAD = b"chess_teacher_storage_ok"
@@ -21,6 +19,7 @@ def check_raw_storage_health(storage: ObjectStorage | None = None) -> None:
     Raises:
         FileError: if any operation fails or round-trip content differs.
     """
+    logger = get_logger()
     store = storage if storage is not None else get_raw_storage()
     key = ObjectStorage.resolve_key(_HEALTHCHECK_PREFIX, f"{uuid4().hex}.txt")
 

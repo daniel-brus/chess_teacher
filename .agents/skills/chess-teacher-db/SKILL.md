@@ -25,17 +25,17 @@ Secrets live in Doppler project **`chess-teacher`**, not in git. Wrap skill comm
 Local Compose stack: Postgres, MinIO, and Redis from `docker-compose.infra.yml` with **`dev_local`**. Production Postgres is typically only reachable from the VPS; do **not** expect `doppler run --config prod` from the laptop to work. Use **chess-teacher-vps** `db-count` / `db-read` / … instead.
 
 ```bash
-doppler run --project chess-teacher --config dev_local -- python scripts/agent_db_query.py --json list-domains
+doppler run --project chess-teacher --config dev_local -- python scripts/tools/agent_db_query.py --json list-domains
 ```
 
-Canonical script: **`scripts/agent_db_query.py`**. The skill path `.agents/skills/chess-teacher-db/scripts/db_query.py` is a launcher to the same file. Prod uses the VPS skill (`db-*`), which kubectl-execs that script in the streamlit container.
+Canonical script: **`scripts/tools/agent_db_query.py`**. The skill path `.agents/skills/chess-teacher-db/scripts/db_query.py` is a launcher to the same file. Prod uses the VPS skill (`db-*`), which kubectl-execs that script in the streamlit container.
 
 The script loads `.env` when present; prefer **`doppler run --config … --`** so credentials match the intended environment.
 
 ## Who runs what
 
 - **The user asks questions in chat** (e.g. “are columns Y and Z unique?”). They do **not** need to run the script or remember commands.
-- **The agent runs** `scripts/agent_db_query.py` (or the skill launcher) via the terminal for dev, or **chess-teacher-vps** `db-*` for prod; interprets `--json` output, and answers in plain language.
+- **The agent runs** `scripts/tools/agent_db_query.py` (or the skill launcher) via the terminal for dev, or **chess-teacher-vps** `db-*` for prod; interprets `--json` output, and answers in plain language.
 - The script sets **`ENVIRONMENT=AGENT`** before any `chess_teacher` import (overrides `LOCAL` from `.env` for that process). Do not ask the user to set this.
 
 ## Rules
@@ -54,9 +54,9 @@ The script loads `.env` when present; prefer **`doppler run --config … --`** s
 4. Run the script; summarize results for the user.
 
 ```bash
-doppler run --project chess-teacher --config dev_local -- python scripts/agent_db_query.py --json list-domains
-doppler run --project chess-teacher --config dev_local -- python scripts/agent_db_query.py --json list-tables pipelines/ingestion
-doppler run --project chess-teacher --config dev_local -- python scripts/agent_db_query.py --json unique pipelines/ingestion raw_games --columns account_id,platform_game_id
+doppler run --project chess-teacher --config dev_local -- python scripts/tools/agent_db_query.py --json list-domains
+doppler run --project chess-teacher --config dev_local -- python scripts/tools/agent_db_query.py --json list-tables pipelines/ingestion
+doppler run --project chess-teacher --config dev_local -- python scripts/tools/agent_db_query.py --json unique pipelines/ingestion raw_games --columns account_id,platform_game_id
 ```
 
 On Windows (PowerShell), same commands with `.venv\Scripts\python.exe` if the venv is not activated.
@@ -71,7 +71,7 @@ A **domain** is the folder path (under the installed `chess_teacher` package) th
 
 ## Script commands
 
-`python scripts/agent_db_query.py --json <command> ...`
+`python scripts/tools/agent_db_query.py --json <command> ...`
 
 | Command | Purpose |
 |---------|---------|

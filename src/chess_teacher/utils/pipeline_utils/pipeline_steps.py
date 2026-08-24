@@ -251,6 +251,7 @@ class TransformStep(LoadToDatabaseStep):
         self.source_column = source_column if source_column is not None else on
 
     def run(self, db_client: DatabaseClient, context: PipelineContext) -> None:
+        db_client.ensure_metadata(self.source_table_metadata)
         scope_where = self._optional_scope_where_clause(self.table_metadata, context)
         self._incremental_filter.db_client = db_client
         self._incremental_filter.set_scope_where(scope_where)

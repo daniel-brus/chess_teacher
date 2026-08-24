@@ -184,12 +184,12 @@ src/chess_teacher/pipelines/preprocessing/
   move_characteristics/stockfish_evaluation.py   # patterns to reuse
   fen_characteristic.py
 
-src/chess_teacher/utils/chess_bots/
+src/chess_teacher/bots/
   neural_baseline_bot.py   # Phase 0 filter + Phase 3 candidate scorer
   presets.py
 
 streamlit_pages/play.py
-scripts/                   # optional: backfill_candidate_evals.py
+scripts/ops/               # optional: backfill_candidate_evals.py
 testnotebook.ipynb         # smoke train/promote loop
 ```
 

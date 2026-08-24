@@ -27,6 +27,9 @@ class FakeDatabaseClient:
     def ensure_metadata(self, table: TableMetadata) -> None:
         return None
 
+    def ensure_tables(self, *tables: TableMetadata) -> None:
+        return None
+
     def read(
         self,
         table: TableMetadata,

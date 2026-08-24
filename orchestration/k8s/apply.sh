@@ -171,6 +171,10 @@ for cron_file in nightly-maintenance.yaml ingestion-dispatcher.yaml; do
   printf '%s\n' "$cron_content" | kubectl_apply apply -f -
 done
 
+if [[ -f "$K8S_DIR/run-script-job.sh" ]]; then
+  chmod +x "$K8S_DIR/run-script-job.sh" || true
+fi
+
 log "Apply Streamlit Deployment and Service"
 streamlit_content="$(render_manifest "$(cat "$K8S_DIR/deployment/streamlit.yaml")")"
 printf '%s\n' "$streamlit_content" | kubectl_apply apply -f -

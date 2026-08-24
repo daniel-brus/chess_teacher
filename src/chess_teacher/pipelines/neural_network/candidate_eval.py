@@ -52,6 +52,7 @@ from chess_teacher.utils.chess_utils import (
     move_is_en_passant,
     move_is_promotion,
 )
+from chess_teacher.utils.env_utils import get_optional_env_variable
 from chess_teacher.utils.logging import get_logger
 
 logger = get_logger()
@@ -68,10 +69,8 @@ CANDIDATE_SEARCH_METHOD = "multipv_nodes"
 
 def live_candidate_stockfish_nodes() -> int:
     """Node budget for Play MultiPV (env override, else ``LIVE_CANDIDATE_STOCKFISH_NODES``)."""
-    import os
-
-    raw = os.getenv("BASELINE_LIVE_CANDIDATE_NODES")
-    if raw is None or not str(raw).strip():
+    raw = get_optional_env_variable("BASELINE_LIVE_CANDIDATE_NODES")
+    if not raw:
         return int(LIVE_CANDIDATE_STOCKFISH_NODES)
     try:
         return max(0, int(raw))

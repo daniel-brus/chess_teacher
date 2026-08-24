@@ -8,6 +8,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from chess_teacher.bots.presets import list_baseline_presets
 from chess_teacher.pipelines.neural_network.candidate_eval import (
     MAX_CANDIDATES,
     MOVE_FEAT_DIM,
@@ -16,7 +17,6 @@ from chess_teacher.pipelines.neural_network.models import (
     BaselineModel,
     BaselineModelStatus,
 )
-from chess_teacher.utils.chess_bots.presets import list_baseline_presets
 
 
 def _row(*, version: str, feat_dim: float | None, status: BaselineModelStatus) -> BaselineModel:

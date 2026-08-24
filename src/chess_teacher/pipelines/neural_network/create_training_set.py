@@ -979,9 +979,17 @@ class TrainingDataStore:
     def __init__(self, db_client: DatabaseClient | None = None) -> None:
         self._db = db_client or get_db_client()
 
+    def _ensure_training_tables(self) -> None:
+        self._db.ensure_tables(
+            Move.get_metadata(),
+            Game.get_metadata(),
+            MoveCharacteristics.get_metadata(),
+        )
+
     def _datums_from_moves(self, moves: list[Move]) -> list[TrainingDatum]:
         if not moves:
             return []
+        self._ensure_training_tables()
         game_ids = sorted({m.game_id for m in moves})
         move_ids = [m.move_id for m in moves]
         move_id_list = ", ".join(quote_literal(mid) for mid in move_ids)
@@ -1079,6 +1087,7 @@ class TrainingDataStore:
 
     def count_since(self, cutoff: datetime | None) -> int:
         """Count platform moves with characteristics and ``games.end_time`` after cutoff."""
+        self._ensure_training_tables()
         sql = f"SELECT COUNT(*) AS n{_SQL_MOVES_WITH_CHARS}"
         params: dict[str, Any] = {}
         if cutoff is not None:
@@ -1102,6 +1111,7 @@ class TrainingDataStore:
         that boundary timestamp so the next cutoff ``end_time > max`` cannot skip
         the rest of the game / same-second games.
         """
+        self._ensure_training_tables()
         sql = f"SELECT m.move_id AS move_id, g.end_time AS end_time{_SQL_MOVES_WITH_CHARS}"
         params: dict[str, Any] = {}
         if cutoff is not None:
@@ -1155,6 +1165,7 @@ class TrainingDataStore:
         """
         if limit <= 0:
             return []
+        self._ensure_training_tables()
         params: dict[str, Any] = {"limit": limit}
         if seed is not None:
             order = "ORDER BY md5(m.move_id || :seed_text)"

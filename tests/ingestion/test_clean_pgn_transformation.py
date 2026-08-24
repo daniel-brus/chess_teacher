@@ -1,7 +1,5 @@
-from chess_teacher.pipelines.preprocessing.transformations import (
-    ApplyChessComOpeningLookupTransformation,
-    CleanPGNTransformation,
-)
+from chess_teacher.pipelines.preprocessing.chess_com_openings import chess_com_opening_slug_from_pgn
+from chess_teacher.pipelines.preprocessing.transformations import CleanPGNTransformation
 
 CHESS_COM_SAMPLE = (
     '[Event "Live Chess"]\n[Site "Chess.com"]\n[Result "1-0"]\n\n'
@@ -39,7 +37,4 @@ def test_clean_pgn_none_or_blank_returns_empty() -> None:
 
 def test_chess_com_opening_slug_from_pgn() -> None:
     pgn = '[ECO "A48"]\n[ECOUrl "https://www.chess.com/openings/Torre-Attack-Fianchetto-Defense"]\n'
-    assert (
-        ApplyChessComOpeningLookupTransformation._chess_com_opening_slug_from_pgn(pgn)
-        == "Torre-Attack-Fianchetto-Defense"
-    )
+    assert chess_com_opening_slug_from_pgn(pgn) == "Torre-Attack-Fianchetto-Defense"

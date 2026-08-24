@@ -4,7 +4,7 @@ description: >-
   Read-only inspection of the production Hetzner VPS (k3s/k8s) via SSH.
   Whitelisted kubectl get/describe/logs, cluster-info, host df/free/uptime,
   and prod Postgres reads via kubectl exec into streamlit
-  (scripts/agent_db_query.py). Never apply, delete, restart, or
+  (scripts/tools/agent_db_query.py). Never apply, delete, restart, or
   ad-hoc shell. SSH credentials from Doppler ci config. Use when the user
   asks about production pods, deploy status, ingress, logs, VPS health, or
   production database contents behind the firewall.
@@ -19,7 +19,7 @@ This is the **live production Hetzner VPS** running k8s (`chess-teacher` namespa
 **The agent MUST:**
 
 - Use **only** `.agents/skills/chess-teacher-vps/scripts/vps_query.py` subcommands — fixed, whitelisted remote commands.
-- Run **read-only** operations: `kubectl get`, `kubectl describe`, `kubectl logs`, `kubectl cluster-info`, `kubectl rollout status` (status only, no restart), and prod DB reads via `kubectl exec` into `deploy/streamlit` running `python scripts/agent_db_query.py`.
+- Run **read-only** operations: `kubectl get`, `kubectl describe`, `kubectl logs`, `kubectl cluster-info`, `kubectl rollout status` (status only, no restart), and prod DB reads via `kubectl exec` into `deploy/streamlit` running `python scripts/tools/agent_db_query.py`.
 - Prefer **`info`** and **`ping`** before deeper inspection.
 
 **The agent MUST NOT:**
@@ -33,7 +33,7 @@ This is the **live production Hetzner VPS** running k8s (`chess-teacher` namespa
 
 If the user needs a mutating change (restart pod, deploy, config edit), **stop and ask for explicit confirmation** — do not use this skill.
 
-**Long prod ops scripts** (backfill, baseline reset/train) are **not** run via this skill. The user runs them manually on the VPS with `scripts/run_script_job.py`, which renders `orchestration/k8s/job/script.yaml` and `kubectl apply`s a one-off Job (same image + `chess-teacher-env` as streamlit). The agent may document that flow or read Job logs if the user pastes output, but must not apply Jobs through `vps_query.py`.
+**Long prod ops scripts** (backfill, baseline reset/train) are **not** run via this skill. The user runs them manually on the VPS with `scripts/utils/run_script_job.py`, which renders `orchestration/k8s/job/script.yaml` and `kubectl apply`s a one-off Job (same image + `chess-teacher-env` as streamlit). The agent may document that flow or read Job logs if the user pastes output, but must not apply Jobs through `vps_query.py`.
 
 ## Doppler environments
 
@@ -99,7 +99,7 @@ On Windows (PowerShell): `.venv\Scripts\python.exe` optional for host-only comma
 | `disk` | `df -h` |
 | `memory` | `free -m` |
 | `uptime` | `uptime` |
-| `db-list-domains` | `kubectl exec deploy/streamlit -- python scripts/agent_db_query.py --json list-domains` |
+| `db-list-domains` | `kubectl exec deploy/streamlit -- python scripts/tools/agent_db_query.py --json list-domains` |
 | `db-list-tables <domain>` | Same via `list-tables` |
 | `db-count <domain> <table> [--where EXPR]` | Same via `count` |
 | `db-read <domain> <table> […]` | Same via `read` (limit capped at 100) |
@@ -135,7 +135,7 @@ Successful `db-*` responses put parsed JSON under **`result`**.
 
 ## Deploy note for `db-*`
 
-Remote script: `scripts/agent_db_query.py` (copied into the image). If `db-*` fails with file-not-found, merge/deploy this branch to main first, then retry.
+Remote script: `scripts/tools/agent_db_query.py` (copied into the image). If `db-*` fails with file-not-found, merge/deploy this branch to main first, then retry.
 
 ## Troubleshooting
 
@@ -158,11 +158,11 @@ For backfill / baseline reset / catch-up training on prod, the user SSHs to the 
 ```bash
 export PIPELINE_JOB_IMAGE="$(kubectl get deploy streamlit -n chess-teacher \
   -o jsonpath='{.spec.template.spec.containers[0].image}')"
-python scripts/run_script_job.py backfill_candidate_evals -- --workers 4
+python scripts/utils/run_script_job.py backfill_candidate_evals -- --workers 4
 kubectl logs -n chess-teacher job/script-backfill-candidate-evals-YYYYMMDDHHMMSS -f
 ```
 
-Whitelisted entrypoints only (`scripts/run_script_job.py`). Template: `orchestration/k8s/job/script.yaml`. Dry-run: add `--dry-run` before `--`. Does not mount `chess-teacher-streamlit-secrets`.
+Whitelisted entrypoints only (`scripts/utils/run_script_job.py`). Template: `orchestration/k8s/job/script.yaml`. Dry-run: add `--dry-run` before `--`. Does not mount `chess-teacher-streamlit-secrets`.
 
 | Task | Command |
 |------|---------|
@@ -174,4 +174,4 @@ Use `db-count` (read-only) here to verify backfill progress; never exec the back
 
 ## References
 
-Deploy script: `orchestration/k8s/apply.sh`. CD workflow: `.github/workflows/cd.yml`. Shared DB CLI: `scripts/agent_db_query.py`. Script Jobs CLI: `scripts/run_script_job.py`.
+Deploy script: `orchestration/k8s/apply.sh`. CD workflow: `.github/workflows/cd.yml`. Shared DB CLI: `scripts/tools/agent_db_query.py`. Script Jobs CLI: `scripts/utils/run_script_job.py`.

@@ -5,12 +5,20 @@ from pathlib import Path
 
 from chess_teacher.utils.env_utils import get_env_variable
 from chess_teacher.utils.exception_utils import ConfigError
-from chess_teacher.utils.logging import get_logger
+from chess_teacher.utils.logging.logger import EnhancedLogger
 from chess_teacher.utils.object_storage.base import ObjectStorage
 
-logger = get_logger()
-
 _raw_storage: ObjectStorage | None = None
+_logger: EnhancedLogger | None = None
+
+
+def _get_logger() -> EnhancedLogger:
+    global _logger
+    if _logger is None:
+        from chess_teacher.utils.logging.config import get_logger
+
+        _logger = get_logger()
+    return _logger
 
 
 @dataclass(frozen=True)
@@ -52,7 +60,7 @@ def build_s3_storage_settings(
             secret_key=secret_key or get_env_variable("S3_SECRET_ACCESS_KEY"),
         )
     except Exception as e:
-        logger.log_and_raise(
+        _get_logger().log_and_raise(
             ConfigError(f"Error occurred while fetching S3 storage credentials: {e}")
         )
 
@@ -108,7 +116,7 @@ def _create_raw_storage() -> ObjectStorage:
     from chess_teacher.utils.object_storage.s3 import S3ObjectStorage
 
     cfg = build_s3_storage_settings()
-    logger.info(
+    _get_logger().info(
         "Object storage backend=s3 bucket=%s endpoint=%s key_prefix=%s",
         cfg.bucket,
         cfg.endpoint_url,

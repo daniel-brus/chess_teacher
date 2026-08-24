@@ -22,7 +22,7 @@ spec:
             - name: dispatcher
               image: IMAGE_PLACEHOLDER
               imagePullPolicy: IMAGE_PULL_POLICY_PLACEHOLDER
-              command: ["python", "scripts/dispatcher.py"]
+              command: ["python", "scripts/entrypoints/dispatcher.py"]
               envFrom:
                 - secretRef:
                     name: chess-teacher-env

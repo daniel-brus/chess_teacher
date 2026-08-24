@@ -18,6 +18,7 @@ from typing import Any, TypeVar, cast
 
 import polars as pl
 
+from chess_teacher.utils.env_utils import get_optional_env_variable
 from chess_teacher.utils.exception_utils import TransformationError
 from chess_teacher.utils.pipeline_utils.dataframe_transformation import DataFrameTransformation
 from chess_teacher.utils.process_utils import WorkerSafeLogger, is_parent_process
@@ -33,7 +34,7 @@ _logger = WorkerSafeLogger(__name__)
 
 
 def _default_fen_eval_workers() -> int:
-    if env := os.getenv("STOCKFISH_WORKERS"):
+    if env := get_optional_env_variable("STOCKFISH_WORKERS"):
         return max(1, int(env))
     if hasattr(os, "sched_getaffinity"):
         cpu_count = len(os.sched_getaffinity(0))
@@ -42,7 +43,7 @@ def _default_fen_eval_workers() -> int:
     return max(1, cpu_count - 1)
 
 
-def _split_fen_list(fens: list[str], n_chunks: int) -> list[list[str]]:
+def _split_fen_list[TItem](fens: list[TItem], n_chunks: int) -> list[list[TItem]]:
     if n_chunks <= 1 or not fens:
         return [fens]
     n_chunks = min(n_chunks, len(fens))

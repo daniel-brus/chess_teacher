@@ -100,13 +100,13 @@ class AggregateLogLevelHourlyTransformation(DataFrameTransformation):
             )
 
         try:
-            from chess_teacher.maintenance.pipeline_steps import LoadRawLogsStep
+            from chess_teacher.maintenance.log_paths import parse_closed_log_hostname
 
             prepared = df.with_columns(
                 pl.col("ts").dt.truncate("1h").alias("bucket_start"),
                 pl
                 .col("source_file")
-                .map_elements(LoadRawLogsStep.parse_closed_log_hostname, return_dtype=pl.Utf8)
+                .map_elements(parse_closed_log_hostname, return_dtype=pl.Utf8)
                 .alias("hostname"),
             )
             return (

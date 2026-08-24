@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Launcher for ``scripts/agent_db_query.py`` (keeps skill path stable)."""
+"""Launcher for ``scripts/tools/agent_db_query.py`` (keeps skill path stable)."""
 
 from __future__ import annotations
 
@@ -16,6 +16,6 @@ def _repo_root() -> Path:
 
 
 if __name__ == "__main__":
-    target = _repo_root() / "scripts" / "agent_db_query.py"
+    target = _repo_root() / "scripts" / "tools" / "agent_db_query.py"
     sys.argv[0] = str(target)
     runpy.run_path(str(target), run_name="__main__")

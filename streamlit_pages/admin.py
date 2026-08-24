@@ -3,7 +3,7 @@ from datetime import date
 import altair as alt
 import streamlit as st
 
-from chess_teacher.other.log_analytics import (
+from chess_teacher.maintenance.log_analytics import (
     LOG_LEVEL_COLORS,
     LOG_LEVEL_ORDER,
     SEVERITY_LEVELS,

@@ -152,13 +152,13 @@ src/chess_teacher/pipelines/neural_network/
   metadata.yml
   move_encoding.py         # NEW
 
-src/chess_teacher/utils/chess_bots/
+src/chess_teacher/bots/
   base.py, presets.py      # Phase 3 bot + picker
 
 streamlit_pages/play.py
 streamlit_utils/play_game.py
-scripts/baseline_training.py
-scripts/baseline_promotion.py
+scripts/entrypoints/baseline_training.py
+scripts/entrypoints/baseline_promotion.py
 testnotebook.ipynb
 ```
 

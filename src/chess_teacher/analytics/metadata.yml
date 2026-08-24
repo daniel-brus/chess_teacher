@@ -1,0 +1,32 @@
+tables:
+  time_control_classes:
+    schema: other
+    table: time_control_classes
+    comment: Time control classes
+    primary_key:
+      - time_control_class_id
+    columns:
+      - name: time_control_class_id
+        data_type: text
+        nullable: false
+        comment: Unique identifier for the time control class
+      - name: time_control_class
+        data_type: text
+        nullable: false
+        comment: Time control class (e.g. Bullet, Blitz, etc.)
+
+  variants:
+    schema: other
+    table: variants
+    comment: Chess variants (e.g. standard, chess960, etc.)
+    primary_key:
+      - variant_id
+    columns:
+      - name: variant_id
+        data_type: text
+        nullable: false
+        comment: Unique identifier for the variant
+      - name: variant
+        data_type: text
+        nullable: false
+        comment: Name of the variant

@@ -11,7 +11,9 @@ from typing import IO
 from chess_teacher.utils.pipeline_utils.json_lines_progress import apply_progress_event
 from chess_teacher.utils.pipeline_utils.pipeline_helpers import ProgressWindow
 
-_PIPELINE_SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "pipeline.py"
+_PIPELINE_SCRIPT = (
+    Path(__file__).resolve().parent.parent / "scripts" / "entrypoints" / "pipeline.py"
+)
 
 
 def pipeline_script_path() -> Path:
@@ -31,7 +33,7 @@ def run_pipeline_subprocess(
     user_id: str,
     progress: ProgressWindow,
 ) -> int:
-    """Run ``scripts/pipeline.py`` and mirror its stdout progress stream."""
+    """Run ``scripts/entrypoints/pipeline.py`` and mirror its stdout progress stream."""
     if not _PIPELINE_SCRIPT.is_file():
         progress.error(f"Pipeline script not found: {_PIPELINE_SCRIPT}")
         return 1
@@ -44,7 +46,7 @@ def run_pipeline_subprocess(
             user_id,
             "--progress-stdout",
         ],
-        cwd=_PIPELINE_SCRIPT.parent.parent,
+        cwd=Path(__file__).resolve().parent.parent,
         stdout=subprocess.PIPE,
         stderr=None,
         text=True,

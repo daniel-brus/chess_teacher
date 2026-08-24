@@ -1,8 +1,8 @@
 from datetime import date, timedelta
-from pathlib import PurePosixPath
 
 import polars as pl
 
+from chess_teacher.maintenance import log_paths
 from chess_teacher.maintenance.dataclasses import (
     ExceptionHourlyCount,
     LogLevelHourlyCount,
@@ -62,6 +62,7 @@ class DeleteOldRecordsStep(PipelineStep):
 
     def run(self, db_client: DatabaseClient, context: PipelineContext) -> None:
         """Delete old records from the table"""
+        db_client.ensure_metadata(self.metadata)
         cutoff_datetime = get_current_datetime() - self.retention_period
         where = f"""{self.column} < '{cutoff_datetime.isoformat()}'""" + (
             f" AND ({self.additional_where})" if self.additional_where else ""
@@ -85,11 +86,10 @@ class LoadRawLogsStep(StorageToTableStep):
     :class:`DeleteOldS3LogFilesStep`.
     """
 
-    CLOSED_LOG_STORAGE_PREFIX = "logs/python/buffer/closed"
-    PROCESSED_LOG_STORAGE_PREFIX = "logs/python/buffer/processed"
+    CLOSED_LOG_STORAGE_PREFIX = log_paths.CLOSED_LOG_STORAGE_PREFIX
+    PROCESSED_LOG_STORAGE_PREFIX = log_paths.PROCESSED_LOG_STORAGE_PREFIX
     QUARANTINE_LOG_STORAGE_PREFIX = "logs/python/quarantine"
     LOG_FILE_SUFFIX = "log"
-    _UNKNOWN_HOSTNAME = "unknown"
 
     def __init__(self, *, storage: ObjectStorage | None = None) -> None:
         super().__init__(
@@ -113,10 +113,7 @@ class LoadRawLogsStep(StorageToTableStep):
     @staticmethod
     def relative_closed_log_key(source_file: str) -> str:
         """Return the path under ``CLOSED_LOG_STORAGE_PREFIX`` for a storage key."""
-        prefix = f"{LoadRawLogsStep.CLOSED_LOG_STORAGE_PREFIX}/"
-        if source_file.startswith(prefix):
-            return source_file[len(prefix) :]
-        return source_file
+        return log_paths.relative_closed_log_key(source_file)
 
     @classmethod
     def processed_key_for_closed(cls, closed_key: str) -> str:
@@ -131,13 +128,7 @@ class LoadRawLogsStep(StorageToTableStep):
 
         Expected layout: ``.../closed/{YYYY}/{MM}/{DD}/{hostname}/{segment}.log``
         """
-        relative = LoadRawLogsStep.relative_closed_log_key(source_file)
-        if DeleteOldS3LogFilesStep.parse_log_path_date(relative) is None:
-            return LoadRawLogsStep._UNKNOWN_HOSTNAME
-        parts = PurePosixPath(relative).parts
-        if len(parts) >= 4:
-            return parts[3]
-        return LoadRawLogsStep._UNKNOWN_HOSTNAME
+        return log_paths.parse_closed_log_hostname(source_file)
 
     def run(self, db_client: DatabaseClient, context: PipelineContext) -> None:
         """Load into DB, then move successfully ingested segments to ``processed/``."""
@@ -370,13 +361,7 @@ class DeleteOldS3LogFilesStep(PipelineStep):
 
         Expected layout: ``{YYYY}/{MM}/{DD}/{hostname}/{segment}.log``
         """
-        parts = PurePosixPath(relative_key).parts
-        if len(parts) < 4:
-            return None
-        try:
-            return date(int(parts[0]), int(parts[1]), int(parts[2]))
-        except ValueError:
-            return None
+        return log_paths.parse_closed_log_path_date(relative_key)
 
     @classmethod
     def parse_closed_log_path_date(cls, relative_key: str) -> date | None:
