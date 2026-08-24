@@ -364,7 +364,7 @@ class Pipeline:
         (user_id, account_id, name). Sets self._run_id on success.
         """
         meta = PipelineRunResult.get_metadata()
-        self.db_client.ensure_table(meta)
+        self.db_client.ensure_metadata(meta)
 
         self.context.progress_next("Registering pipeline run for current account...")
 

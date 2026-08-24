@@ -108,7 +108,7 @@ def load_games_for_accounts(
         if cached_games is not None:
             return cached_games
 
-    db_client.ensure_table(Game.get_metadata())
+    db_client.ensure_metadata(Game.get_metadata())
     logger.info(
         "Loading games from database user_id=%s account_count=%s",
         user_id,

@@ -270,10 +270,10 @@ class User(TableDataClass):
         return accounts
 
     def _load_linked_accounts_from_db(self, db_client: DatabaseClient) -> list[Account]:
-        db_client.ensure_table(Account.get_metadata())
+        db_client.ensure_metadata(Account.get_metadata())
 
         br_metadata = UserAccount.get_metadata()
-        db_client.ensure_table(br_metadata)
+        db_client.ensure_metadata(br_metadata)
 
         user_accounts = db_client.read(
             br_metadata,
@@ -296,7 +296,7 @@ class User(TableDataClass):
     def unlink_all_accounts(self, db_client: DatabaseClient) -> None:
         """Delete all bridge rows for this user. Platform account rows are kept."""
         br_metadata = UserAccount.get_metadata()
-        db_client.ensure_table(br_metadata)
+        db_client.ensure_metadata(br_metadata)
 
         user_accounts = db_client.read(
             br_metadata,

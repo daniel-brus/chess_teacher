@@ -56,7 +56,7 @@ def test_fetch_all_from_db_maps_rows_and_ensures_table() -> None:
 
     accounts = Account.fetch_all_from_db(db_client, order_by="account_id")
 
-    db_client.ensure_table.assert_called_once_with(Account.get_metadata())
+    db_client.ensure_metadata.assert_called_once_with(Account.get_metadata())
     db_client.read.assert_called_once_with(
         Account.get_metadata(),
         where=None,

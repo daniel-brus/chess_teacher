@@ -334,6 +334,7 @@ class TableDataClass(ABC):
         row_id = id or cls.generate_id(source or {})
         try:
             tablemetadata = cls.get_metadata()
+            db_client.ensure_metadata(tablemetadata)
             where = cls._where_for_id(row_id)
             result = cast(list[dict[str, Any]], db_client.read(tablemetadata, where=where))
             if len(result) != 1:
@@ -358,7 +359,7 @@ class TableDataClass(ABC):
         """Load rows from the table as dataclass instances."""
         try:
             table_metadata = cls.get_metadata()
-            db_client.ensure_table(table_metadata)
+            db_client.ensure_metadata(table_metadata)
             rows = cast(
                 list[dict[str, Any]],
                 db_client.read(

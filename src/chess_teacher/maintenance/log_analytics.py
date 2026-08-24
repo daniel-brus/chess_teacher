@@ -82,7 +82,7 @@ def load_log_level_hourly_counts(db_client: DatabaseClient) -> pl.DataFrame:
         if cached is not None:
             return cached
 
-    db_client.ensure_table(LogLevelHourlyCount.get_metadata())
+    db_client.ensure_metadata(LogLevelHourlyCount.get_metadata())
     logger.info("Loading log level hourly counts from database")
     counts = db_client.read(
         LogLevelHourlyCount.get_metadata(),
@@ -104,7 +104,7 @@ def load_exception_hourly_counts(db_client: DatabaseClient) -> pl.DataFrame:
         if cached is not None:
             return cached
 
-    db_client.ensure_table(ExceptionHourlyCount.get_metadata())
+    db_client.ensure_metadata(ExceptionHourlyCount.get_metadata())
     logger.info("Loading exception hourly counts from database")
     counts = db_client.read(
         ExceptionHourlyCount.get_metadata(),
@@ -252,7 +252,7 @@ def load_recent_warning_error_logs(
             }
         )
 
-    db_client.ensure_table(WarningErrorLog.get_metadata())
+    db_client.ensure_metadata(WarningErrorLog.get_metadata())
     logger.info("Loading recent warning/error logs for admin dashboard limit=%s", limit)
     rows = db_client.read(
         WarningErrorLog.get_metadata(),

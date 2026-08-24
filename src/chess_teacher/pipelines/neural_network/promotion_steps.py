@@ -9,6 +9,8 @@ from chess_teacher.pipelines.neural_network.promotion import (
     PromotionStrategies,
     PromotionVerdict,
 )
+from chess_teacher.pipelines.preprocessing.games import Game
+from chess_teacher.pipelines.preprocessing.moves import Move, MoveCharacteristics
 from chess_teacher.utils.db.client import DatabaseClient
 from chess_teacher.utils.logging import get_logger
 from chess_teacher.utils.pipeline_utils.pipeline_base import PipelineContext, PipelineStep
@@ -54,6 +56,11 @@ class SampleEvalSetStep(PipelineStep):
     def run(self, db_client: DatabaseClient, context: PipelineContext) -> None:
         if _should_skip_promotion(context):
             return
+        db_client.ensure_tables(
+            Move.get_metadata(),
+            Game.get_metadata(),
+            MoveCharacteristics.get_metadata(),
+        )
         production: BaselineModel | None = context.extras.get("production_model")
         # First production, or legacy MSE production vs policy candidate: auto-promote path.
         if production is None or not production.looks_like_policy():

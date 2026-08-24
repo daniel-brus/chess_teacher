@@ -19,6 +19,8 @@ from chess_teacher.pipelines.neural_network.models import (
 )
 from chess_teacher.pipelines.neural_network.move_encoding import POLICY_VOCAB_SIZE
 from chess_teacher.pipelines.neural_network.train import HEAD_TYPE_POLICY, BaselineTrainer
+from chess_teacher.pipelines.preprocessing.games import Game
+from chess_teacher.pipelines.preprocessing.moves import Move, MoveCharacteristics
 from chess_teacher.utils.db.client import DatabaseClient
 from chess_teacher.utils.general_utils import get_current_datetime
 from chess_teacher.utils.logging import get_logger
@@ -45,6 +47,11 @@ class CheckSufficientNewDataStep(PipelineStep):
     def run(self, db_client: DatabaseClient, context: PipelineContext) -> None:
         db_client.ensure_metadata(BaselineModel.get_metadata())
         db_client.ensure_metadata(TrainingState.get_metadata())
+        db_client.ensure_tables(
+            Move.get_metadata(),
+            Game.get_metadata(),
+            MoveCharacteristics.get_metadata(),
+        )
         state = TrainingState.for_baseline(db_client)
         cutoff = state.last_trained_data_cutoff
         store = TrainingDataStore(db_client)

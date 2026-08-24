@@ -61,6 +61,7 @@ class DeleteOldRecordsStep(PipelineStep):
 
     def run(self, db_client: DatabaseClient, context: PipelineContext) -> None:
         """Delete old records from the table"""
+        db_client.ensure_metadata(self.metadata)
         cutoff_datetime = get_current_datetime() - self.retention_period
         where = f"""{self.column} < '{cutoff_datetime.isoformat()}'""" + (
             f" AND ({self.additional_where})" if self.additional_where else ""
