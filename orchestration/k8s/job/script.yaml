@@ -1,0 +1,59 @@
+# One-off script Job template (long-lived prod ops: backfill, baseline reset/train).
+#
+# Prefer the VPS wrapper (deployed by CD next to this file):
+#
+#   /opt/chess_teacher/k8s/run-script-job.sh baseline_training
+#   /opt/chess_teacher/k8s/run-script-job.sh baseline_training -- --wait
+#
+# From a repo checkout with kubectl (local k3d / laptop with kubeconfig):
+#
+#   python scripts/run_script_job.py baseline_training --dry-run
+#   python scripts/run_script_job.py baseline_promotion -- --wait
+#
+# Image and pull policy are resolved automatically (streamlit deploy → configmap).
+#
+# Placeholders (filled by run-script-job.sh or scripts/run_script_job.py):
+#   REPLACE_JOB_NAME            — unique Job name
+#   REPLACE_SCRIPT_JOB_IMAGE    — container image
+#   REPLACE_IMAGE_PULL_POLICY   — IfNotPresent or Always
+#   REPLACE_SCRIPT_BASENAME     — e.g. baseline_training.py (whitelist only)
+#   REPLACE_SCRIPT_ARGS         — YAML list, e.g. [] or ["--workers", "4"]
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: REPLACE_JOB_NAME
+  namespace: chess-teacher
+  labels:
+    app: chess-teacher
+    chess-teacher.io/job-type: script
+    chess-teacher.io/script: REPLACE_SCRIPT_BASENAME
+spec:
+  backoffLimit: 1
+  ttlSecondsAfterFinished: 604800
+  template:
+    metadata:
+      labels:
+        app: chess-teacher
+        chess-teacher.io/job-type: script
+        chess-teacher.io/script: REPLACE_SCRIPT_BASENAME
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: script
+          image: REPLACE_SCRIPT_JOB_IMAGE
+          imagePullPolicy: REPLACE_IMAGE_PULL_POLICY
+          command: ["python", "scripts/REPLACE_SCRIPT_BASENAME"]
+          args: REPLACE_SCRIPT_ARGS
+          envFrom:
+            - secretRef:
+                name: chess-teacher-env
+          env:
+            - name: ENVIRONMENT
+              valueFrom:
+                configMapKeyRef:
+                  name: chess-teacher-config
+                  key: ENVIRONMENT
+            - name: HOSTNAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name

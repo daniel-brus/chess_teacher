@@ -25,7 +25,6 @@ __all__ = [
     "bytes_to_data_uri",
     "check_raw_storage_health",
     "clear_storage_image_data_uri_cache",
-    "factory",
     "get_local_log_dir",
     "get_log_storage_key",
     "get_raw_storage",
@@ -68,16 +67,12 @@ _LAZY_ATTRS: dict[str, tuple[str, str]] = {
 
 
 def __getattr__(name: str) -> Any:
-    if name == "factory":
-        from chess_teacher.utils.object_storage import factory as _factory
+    if name not in _LAZY_ATTRS:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    import importlib
 
-        return _factory
-    if name in _LAZY_ATTRS:
-        import importlib
-
-        module_name, attr = _LAZY_ATTRS[name]
-        module = importlib.import_module(module_name, __name__)
-        value = getattr(module, attr)
-        globals()[name] = value
-        return value
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    module_name, attr = _LAZY_ATTRS[name]
+    module = importlib.import_module(module_name, __name__)
+    value = getattr(module, attr)
+    globals()[name] = value
+    return value
