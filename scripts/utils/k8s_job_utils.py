@@ -13,7 +13,7 @@ import yaml
 _NAME_RE = re.compile(r"[^a-z0-9-]+")
 _MAX_NAME_LEN = 63
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def sanitize_job_name(value: str) -> str:

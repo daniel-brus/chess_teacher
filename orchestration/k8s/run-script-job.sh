@@ -6,6 +6,7 @@
 #
 # Usage:
 #   /opt/chess_teacher/k8s/run-script-job.sh baseline_training
+#   /opt/chess_teacher/k8s/run-script-job.sh backfill_candidate_evals -- --workers 4
 #   /opt/chess_teacher/k8s/run-script-job.sh baseline_training --dry-run
 #   /opt/chess_teacher/k8s/run-script-job.sh baseline_promotion -- --wait
 #   /opt/chess_teacher/k8s/run-script-job.sh maintenance -- --follow
@@ -18,11 +19,14 @@ K8S_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TEMPLATE="${K8S_DIR}/job/script.yaml"
 NAMESPACE="${NAMESPACE:-chess-teacher}"
 
-# Keep in sync with scripts/run_script_job.py ALLOWED_SCRIPTS.
+# Keep in sync with scripts/utils/run_script_job.py ALLOWED_SCRIPTS.
 ALLOWED_SCRIPTS=(
-  baseline_training.py
-  baseline_promotion.py
-  maintenance.py
+  entrypoints/baseline_training.py
+  entrypoints/baseline_promotion.py
+  entrypoints/maintenance.py
+  ops/backfill_candidate_evals.py
+  ops/baseline_reset_training.py
+  ops/baseline_train_until_caught_up.py
 )
 
 usage() {
@@ -52,10 +56,33 @@ require_cmd() {
 
 normalize_script() {
   local name="$1"
-  name="${name##*/}"
+  name="${name//\\//}"
+  name="${name#scripts/}"
   [[ -n "$name" ]] || die "script name must not be empty"
   [[ "$name" == *.py ]] || name="${name}.py"
-  printf '%s' "$name"
+
+  if is_allowed "$name"; then
+    printf '%s' "$name"
+    return
+  fi
+
+  local basename="${name##*/}"
+  local matches=()
+  local allowed
+  for allowed in "${ALLOWED_SCRIPTS[@]}"; do
+    if [[ "${allowed##*/}" == "$basename" ]]; then
+      matches+=("$allowed")
+    fi
+  done
+
+  if [[ ${#matches[@]} -eq 1 ]]; then
+    printf '%s' "${matches[0]}"
+    return
+  fi
+  if [[ ${#matches[@]} -gt 1 ]]; then
+    die "ambiguous script ${basename!r}; specify one of: ${matches[*]}"
+  fi
+  die "script ${name!r} is not whitelisted. Allowed: ${ALLOWED_SCRIPTS[*]}"
 }
 
 is_allowed() {
@@ -110,7 +137,9 @@ render_args_yaml() {
 }
 
 job_name_for() {
-  local stem="${1%.py}"
+  local relpath="$1"
+  local stem="${relpath##*/}"
+  stem="${stem%.py}"
   local stamp
   stamp="$(date -u +%Y%m%d%H%M%S)"
   local raw="script-${stem}-${stamp}"
@@ -254,10 +283,9 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-SCRIPT_BASENAME="$(normalize_script "$SCRIPT_INPUT")"
-is_allowed "$SCRIPT_BASENAME" || die "script ${SCRIPT_BASENAME!r} is not whitelisted. Allowed: ${ALLOWED_SCRIPTS[*]}"
-
-JOB_NAME="$(job_name_for "$SCRIPT_BASENAME")"
+SCRIPT_RELPATH="$(normalize_script "$SCRIPT_INPUT")"
+SCRIPT_LABEL="${SCRIPT_RELPATH##*/}"
+JOB_NAME="$(job_name_for "$SCRIPT_RELPATH")"
 IMAGE="$(resolve_image)"
 PULL_POLICY="$(resolve_pull_policy)"
 ARGS_YAML="$(render_args_yaml "${SCRIPT_ARGS[@]+"${SCRIPT_ARGS[@]}"}")"
@@ -267,7 +295,8 @@ RENDERED="$(
     -e "s|REPLACE_JOB_NAME|${JOB_NAME}|g" \
     -e "s|REPLACE_SCRIPT_JOB_IMAGE|${IMAGE}|g" \
     -e "s|REPLACE_IMAGE_PULL_POLICY|${PULL_POLICY}|g" \
-    -e "s|REPLACE_SCRIPT_BASENAME|${SCRIPT_BASENAME}|g" \
+    -e "s|REPLACE_SCRIPT_PATH|${SCRIPT_RELPATH}|g" \
+    -e "s|REPLACE_SCRIPT_LABEL|${SCRIPT_LABEL}|g" \
     -e "s|REPLACE_SCRIPT_ARGS|${ARGS_YAML}|g" \
     "$TEMPLATE"
 )"
@@ -280,6 +309,7 @@ fi
 printf '%s\n' "$RENDERED" | kubectl apply -f - -n "$NAMESPACE"
 
 echo "Created Job ${JOB_NAME} in namespace ${NAMESPACE}."
+echo "  script: scripts/${SCRIPT_RELPATH}"
 echo "  image: ${IMAGE}"
 echo "  kubectl logs -n ${NAMESPACE} job/${JOB_NAME} -f"
 echo "  kubectl delete job ${JOB_NAME} -n ${NAMESPACE}"

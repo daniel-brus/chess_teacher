@@ -3,11 +3,12 @@
 On the production VPS prefer the CD-deployed wrapper (no repo / Python needed)::
 
     /opt/chess_teacher/k8s/run-script-job.sh baseline_training
+    /opt/chess_teacher/k8s/run-script-job.sh backfill_candidate_evals -- --workers 4
 
 From a repo checkout with kubectl (local k3d or laptop with kubeconfig)::
 
-    python scripts/run_script_job.py baseline_training --dry-run
-    python scripts/run_script_job.py baseline_promotion -- --wait
+    python -m scripts.utils.run_script_job baseline_training --dry-run
+    python scripts/utils/run_script_job.py baseline_promotion -- --wait
 
 Image and pull policy are resolved automatically from the live streamlit
 deployment / configmap unless you pass ``--image`` / ``--image-pull-policy``.
@@ -24,7 +25,7 @@ from typing import Any
 
 import yaml
 
-from scripts.k8s_job_utils import (
+from scripts.utils.k8s_job_utils import (
     REPO_ROOT,
     kubectl_apply_manifest,
     load_job_template,
@@ -34,57 +35,79 @@ from scripts.k8s_job_utils import (
     truncate_job_name,
 )
 
-# Keep in sync with orchestration/k8s/run-script-job.sh ALLOWED_SCRIPTS.
+# Paths relative to ``scripts/``. Keep in sync with orchestration/k8s/run-script-job.sh.
 ALLOWED_SCRIPTS = frozenset({
-    "baseline_training.py",
-    "baseline_promotion.py",
-    "maintenance.py",
+    "entrypoints/baseline_training.py",
+    "entrypoints/baseline_promotion.py",
+    "entrypoints/maintenance.py",
+    "ops/backfill_candidate_evals.py",
+    "ops/baseline_reset_training.py",
+    "ops/baseline_train_until_caught_up.py",
 })
 
 _SCRIPT_JOB_TEMPLATE = REPO_ROOT / "orchestration" / "k8s" / "job" / "script.yaml"
 _DEFAULT_NAMESPACE = "chess-teacher"
+_SCRIPTS_ROOT = REPO_ROOT / "scripts"
 
 
-def normalize_script_basename(name: str) -> str:
-    base = Path(name.strip()).name
-    if not base:
+def resolve_script_relpath(name: str) -> str:
+    """Map a short name or relative path to a whitelisted ``scripts/``-relative path."""
+    raw = name.strip().replace("\\", "/")
+    if not raw:
         raise SystemExit("Script name must not be empty.")
-    if not base.endswith(".py"):
-        base = f"{base}.py"
-    return base
+
+    candidate = raw
+    if candidate.startswith("scripts/"):
+        candidate = candidate[len("scripts/") :]
+    if not candidate.endswith(".py"):
+        candidate = f"{candidate}.py"
+
+    if candidate in ALLOWED_SCRIPTS:
+        return candidate
+
+    stem = Path(candidate).name
+    matches = [path for path in sorted(ALLOWED_SCRIPTS) if Path(path).name == stem]
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        raise SystemExit(f"Ambiguous script {stem!r}; specify one of: {', '.join(matches)}")
+
+    allowed = ", ".join(sorted(ALLOWED_SCRIPTS))
+    raise SystemExit(f"Script {raw!r} is not whitelisted. Allowed: {allowed}")
 
 
 def validate_script_args(script_args: list[str]) -> list[str]:
     for arg in script_args:
         if not arg:
             raise SystemExit("Script arguments must not be empty strings.")
-        # Block shell metacharacters even though kubectl applies YAML (defense in depth).
         if any(ch in arg for ch in ";|&`$<>(){}\\\r\n\x00"):
             raise SystemExit(f"Disallowed characters in script argument: {arg!r}")
     return script_args
 
 
-def script_job_name(script_basename: str, *, now: datetime | None = None) -> str:
+def script_job_name(script_relpath: str, *, now: datetime | None = None) -> str:
     stamp = (now or datetime.now(UTC)).strftime("%Y%m%d%H%M%S")
-    stem = Path(script_basename).stem
+    stem = Path(script_relpath).stem
     return truncate_job_name(f"script-{stem}-{stamp}")
 
 
 def render_script_job_manifest(
     *,
     job_name: str,
-    script_basename: str,
+    script_relpath: str,
     script_args: list[str],
     image: str,
     image_pull_policy: str,
     namespace: str,
 ) -> dict[str, Any]:
+    script_label = Path(script_relpath).name
     rendered = (
         load_job_template(_SCRIPT_JOB_TEMPLATE)
         .replace("REPLACE_JOB_NAME", job_name)
         .replace("REPLACE_SCRIPT_JOB_IMAGE", image)
         .replace("REPLACE_IMAGE_PULL_POLICY", image_pull_policy)
-        .replace("REPLACE_SCRIPT_BASENAME", script_basename)
+        .replace("REPLACE_SCRIPT_PATH", script_relpath)
+        .replace("REPLACE_SCRIPT_LABEL", script_label)
         .replace("REPLACE_SCRIPT_ARGS", render_script_args_yaml(script_args))
     )
     manifest = yaml.safe_load(rendered)
@@ -137,13 +160,16 @@ def wait_for_job(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Render and apply a whitelisted scripts/*.py Job in Kubernetes. "
+            "Render and apply a whitelisted scripts/{entrypoints,ops}/*.py Job. "
             "On the VPS prefer /opt/chess_teacher/k8s/run-script-job.sh instead."
         ),
     )
     parser.add_argument(
         "script",
-        help="Script entrypoint basename (e.g. baseline_training or baseline_training.py)",
+        help=(
+            "Script name or scripts/-relative path "
+            "(e.g. baseline_training or ops/backfill_candidate_evals.py)"
+        ),
     )
     parser.add_argument(
         "--dry-run",
@@ -185,14 +211,14 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(cli_argv)
 
-    script_basename = normalize_script_basename(args.script)
-    if script_basename not in ALLOWED_SCRIPTS:
-        allowed = ", ".join(sorted(ALLOWED_SCRIPTS))
-        raise SystemExit(f"Script {script_basename!r} is not whitelisted. Allowed: {allowed}")
+    script_relpath = resolve_script_relpath(args.script)
+    script_file = _SCRIPTS_ROOT / script_relpath
+    if not script_file.is_file():
+        raise SystemExit(f"Whitelisted script missing on disk: {script_file}")
 
     validate_script_args(script_args)
 
-    job_name = script_job_name(script_basename)
+    job_name = script_job_name(script_relpath)
     image = resolve_pipeline_job_image(namespace=args.namespace, override=args.image)
     image_pull_policy = resolve_image_pull_policy(
         namespace=args.namespace,
@@ -201,7 +227,7 @@ def main(argv: list[str] | None = None) -> int:
 
     manifest = render_script_job_manifest(
         job_name=job_name,
-        script_basename=script_basename,
+        script_relpath=script_relpath,
         script_args=script_args,
         image=image,
         image_pull_policy=image_pull_policy,
@@ -215,6 +241,7 @@ def main(argv: list[str] | None = None) -> int:
     kubectl_apply_manifest(manifest, namespace=args.namespace)
 
     print(f"Created Job {job_name} in namespace {args.namespace}.")
+    print(f"  script: scripts/{script_relpath}")
     print(f"  image: {image}")
     print(f"  kubectl logs -n {args.namespace} job/{job_name} -f")
     print(f"  kubectl delete job {job_name} -n {args.namespace}")

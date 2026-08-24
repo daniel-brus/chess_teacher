@@ -24,7 +24,7 @@ LABEL_WORK_ITEM = "chess-teacher.io/work-item"
 JOB_TYPE_PIPELINE = "pipeline"
 
 _PIPELINE_JOB_TEMPLATE = (
-    Path(__file__).resolve().parent.parent / "orchestration" / "k8s" / "job" / "pipeline.yaml"
+    Path(__file__).resolve().parents[2] / "orchestration" / "k8s" / "job" / "pipeline.yaml"
 )
 
 _NAME_RE = re.compile(r"[^a-z0-9-]+")

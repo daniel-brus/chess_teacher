@@ -20,7 +20,7 @@ spec:
             - name: maintenance
               image: IMAGE_PLACEHOLDER
               imagePullPolicy: IMAGE_PULL_POLICY_PLACEHOLDER
-              command: ["python", "scripts/maintenance.py"]
+              command: ["python", "scripts/entrypoints/maintenance.py"]
               envFrom:
                 - secretRef:
                     name: chess-teacher-env
