@@ -27,7 +27,7 @@ streamlit_secrets: doppler_check
 	$(DOPPLER_RUN_LOCAL) .venv\Scripts\python.exe scripts/dev/render_streamlit_secrets.py
 
 streamlit_fg: doppler_check streamlit_secrets
-	$(DOPPLER_RUN_LOCAL) .venv\Scripts\python.exe scripts/run_streamlit.py
+	$(DOPPLER_RUN_LOCAL) .venv\Scripts\python.exe scripts/tools/run_streamlit.py
 
 docker_check:
 	@echo Checking Docker Desktop...

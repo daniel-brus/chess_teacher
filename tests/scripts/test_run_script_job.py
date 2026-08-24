@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import shutil
+import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -85,13 +87,33 @@ def test_allowed_scripts_exist_on_disk() -> None:
         assert (scripts_root / relpath).is_file(), f"Missing whitelisted script: {relpath}"
 
 
-def test_bash_wrapper_whitelist_matches_python() -> None:
-    wrapper = (
+def _bash_wrapper_path() -> Path:
+    return (
         Path(__file__).resolve().parent.parent.parent
         / "orchestration"
         / "k8s"
         / "run-script-job.sh"
     )
-    text = wrapper.read_text(encoding="utf-8")
+
+
+def test_bash_wrapper_whitelist_matches_python() -> None:
+    text = _bash_wrapper_path().read_text(encoding="utf-8")
     for relpath in ALLOWED_SCRIPTS:
         assert relpath in text, f"{relpath} missing from run-script-job.sh"
+
+
+def test_bash_wrapper_has_valid_syntax() -> None:
+    """Reject Python-isms (!r) and other bash parse errors (normalize CRLF for Windows)."""
+    if shutil.which("bash") is None:
+        pytest.skip("bash not available")
+
+    source = _bash_wrapper_path().read_bytes().replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+    assert b"!r}" not in source, "Python !r repr leaked into bash parameter expansion"
+    # Bytes stdin avoids Windows pipe CRLF translation that breaks bash -n.
+    result = subprocess.run(
+        ["bash", "-n"],
+        input=source,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr.decode("utf-8", errors="replace")

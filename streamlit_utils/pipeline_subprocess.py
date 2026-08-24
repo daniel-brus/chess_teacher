@@ -46,7 +46,7 @@ def run_pipeline_subprocess(
             user_id,
             "--progress-stdout",
         ],
-        cwd=_PIPELINE_SCRIPT.parents[2],
+        cwd=Path(__file__).resolve().parent.parent,
         stdout=subprocess.PIPE,
         stderr=None,
         text=True,

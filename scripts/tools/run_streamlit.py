@@ -12,7 +12,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-_ROOT = Path(__file__).resolve().parents[1]
+_ROOT = Path(__file__).resolve().parents[2]
 _ENV_FILE = _ROOT / ".env"
 _REQUIRED = ("APP_PORT",)
 

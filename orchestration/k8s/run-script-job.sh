@@ -33,7 +33,7 @@ usage() {
   cat <<EOF
 Usage: $(basename "$0") <script> [--dry-run] [--] [script-args...] [--wait] [--follow]
 
-  script     Whitelisted entrypoint (with or without .py), e.g. baseline_training
+  script     Whitelisted scripts/-relative path or basename (e.g. baseline_training)
   --dry-run  Print rendered Job YAML and exit
   --wait     Poll until the Job completes or fails
   --follow   Stream Job logs after create (implies waiting for the pod)
@@ -80,9 +80,9 @@ normalize_script() {
     return
   fi
   if [[ ${#matches[@]} -gt 1 ]]; then
-    die "ambiguous script ${basename!r}; specify one of: ${matches[*]}"
+    die "ambiguous script '${basename}'; specify one of: ${matches[*]}"
   fi
-  die "script ${name!r} is not whitelisted. Allowed: ${ALLOWED_SCRIPTS[*]}"
+  die "script '${name}' is not whitelisted. Allowed: ${ALLOWED_SCRIPTS[*]}"
 }
 
 is_allowed() {
