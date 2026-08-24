@@ -16,8 +16,7 @@ Secrets live in Doppler project **`chess-teacher`**, not in git. Wrap skill comm
 
 | Config | `REDIS_URL` target | When to use |
 |--------|-------------------|-------------|
-| `dev_local` | `redis://localhost:6379/0` (Compose) | Default local dev (`make dev_infra`) |
-| `dev_k3d` | `redis://host.k3d.internal:6379/0` | k3d jobs / cluster workloads |
+| `dev_local` | `redis://localhost:6379/0` (Compose) | Local dev and k3d staging (pods use `host.k3d.internal` via `apply-k3d-local.ps1`) |
 | `prod` | External managed Redis (e.g. Upstash) | **Production cache — read-only only** |
 
 Local Compose stack: Postgres, MinIO, and Redis from `docker-compose.infra.yml` with **`dev_local`**. Production uses external Postgres, S3, and Redis from **`prod`**.

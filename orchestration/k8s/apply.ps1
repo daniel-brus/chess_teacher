@@ -6,7 +6,7 @@ function Get-RequiredEnv {
     param([string]$Key)
     $value = [Environment]::GetEnvironmentVariable($Key)
     if ([string]::IsNullOrWhiteSpace($value)) {
-        throw "Missing required environment variable: $Key (expected from Doppler config dev_k3d)"
+        throw "Missing required environment variable: $Key (expected from Doppler config dev_local)"
     }
     return $value.Trim()
 }
@@ -75,7 +75,7 @@ function Render-K8sManifest {
 }
 
 Write-Host "Using image: $image (pull: Always)" -ForegroundColor Cyan
-Write-Host "Secrets source: Doppler config dev_k3d" -ForegroundColor Cyan
+Write-Host "Secrets source: Doppler config dev_local (k3d host overrides from apply-k3d-local.ps1)" -ForegroundColor Cyan
 
 $postgresHost = Get-RequiredEnv "POSTGRES_HOST"
 $postgresPort = [int](Get-RequiredEnv "POSTGRES_PORT")
@@ -162,9 +162,13 @@ $streamlitPath = Join-Path $k8sDir "deployment\streamlit.yaml"
 $streamlitManifest = Render-K8sManifest (Get-Content $streamlitPath -Raw) $image "Always" "DEV"
 Invoke-Kubectl @("apply", "-f", "-") -InputObject $streamlitManifest
 
+Write-Host "Restarting Streamlit rollout..." -ForegroundColor Cyan
+Invoke-Kubectl @("rollout", "restart", "deployment/streamlit", "-n", "chess-teacher")
+Invoke-Kubectl @("rollout", "status", "deployment/streamlit", "-n", "chess-teacher", "--timeout=300s")
+
 Write-Host ""
 Write-Host "Kubernetes orchestration applied." -ForegroundColor Green
-Write-Host "App secrets from Doppler dev_k3d -> chess-teacher-env" -ForegroundColor Green
+Write-Host "App secrets from Doppler dev_local -> chess-teacher-env" -ForegroundColor Green
 Write-Host ""
 Write-Host "Streamlit (dev image): kubectl port-forward --address 0.0.0.0 -n chess-teacher svc/streamlit 8501:8501" -ForegroundColor Cyan
 Write-Host "Then open http://localhost:8501" -ForegroundColor Cyan

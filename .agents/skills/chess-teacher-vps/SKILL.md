@@ -39,8 +39,7 @@ If the user needs a mutating change (restart pod, deploy, config edit), **stop a
 
 | Config | Role | Used by this skill? |
 |--------|------|---------------------|
-| `dev_local` | Local Compose (Postgres, MinIO, Redis on localhost) | No — use db/storage/redis skills |
-| `dev_k3d` | Local k3d cluster | No — use kubectl locally |
+| `dev_local` | Local Compose + optional k3d staging | No — use kubectl locally for k3d |
 | `ci` | GitHub Actions + **SSH to VPS** (`DEPLOY_HOST`, `DEPLOY_USER`, `DEPLOY_SSH_KEY`) | **Yes** — script reads SSH from here |
 | `prod` | Runtime secrets on VPS (Postgres, S3, Redis URLs for the app) | No for SSH; DB queries use env already injected into the streamlit pod |
 

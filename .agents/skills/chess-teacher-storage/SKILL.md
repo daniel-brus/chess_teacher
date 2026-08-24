@@ -17,8 +17,7 @@ Secrets live in Doppler project **`chess-teacher`**, not in git. Wrap skill comm
 
 | Config | S3 endpoint (typical) | When to use |
 |--------|----------------------|-------------|
-| `dev_local` | `http://localhost:9000` (MinIO Compose) | Default local dev (`make dev_infra`) |
-| `dev_k3d` | `http://host.k3d.internal:9000` | k3d jobs / cluster workloads |
+| `dev_local` | `http://localhost:9000` (MinIO Compose) | Local dev and k3d staging (pods use `host.k3d.internal:9000` via `apply-k3d-local.ps1`) |
 | `prod` | External S3 / Supabase storage | **Production objects — read-only only** |
 
 Local Compose stack uses MinIO with **`dev_local`**. Production uses external S3 from **`prod`** (source for `make dev_sync_cloud` object copy).
