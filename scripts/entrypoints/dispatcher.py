@@ -57,8 +57,8 @@ def _sanitize_job_name(value: str) -> str:
 
 
 def _kubernetes_client():
-    from kubernetes import client, config
-    from kubernetes.client.rest import ApiException
+    from kubernetes import client, config  # type: ignore[import-untyped]
+    from kubernetes.client.rest import ApiException  # type: ignore[import-untyped]
 
     if os.getenv("KUBERNETES_SERVICE_HOST"):
         config.load_incluster_config()

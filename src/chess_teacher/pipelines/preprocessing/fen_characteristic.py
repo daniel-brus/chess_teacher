@@ -43,7 +43,7 @@ def _default_fen_eval_workers() -> int:
     return max(1, cpu_count - 1)
 
 
-def _split_fen_list(fens: list[str], n_chunks: int) -> list[list[str]]:
+def _split_fen_list[TItem](fens: list[TItem], n_chunks: int) -> list[list[TItem]]:
     if n_chunks <= 1 or not fens:
         return [fens]
     n_chunks = min(n_chunks, len(fens))

@@ -70,7 +70,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/python-setup
       - name: Run type check
-        run: mypy src
+        run: mypy src scripts
 
   test:
     runs-on: ubuntu-latest
