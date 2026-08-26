@@ -21,7 +21,7 @@ Streamlit chess teaching app with local dev infra (Postgres, MinIO, Redis via Do
 
 | Config | Purpose |
 |--------|---------|
-| `dev_local` | Local venv + Compose (`localhost` hosts) + k3d staging (`make k8s_up`) |
+| `dev_local` | Local venv + Compose (`localhost` hosts) + k3d staging (`make dev_k3d_up`) |
 | `ci` | GitHub Actions (Docker Hub, deploy SSH) |
 | `prod` | Production VPS / cloud sync source |
 
@@ -57,8 +57,8 @@ Streamlit opens at `http://localhost:<APP_PORT>` (default `8502` from Doppler `d
 Runs Streamlit + ingestion CronJobs + pipeline Jobs against local Compose infra, using the **`develop` Docker image**. See [orchestration/k8s/README.md](orchestration/k8s/README.md).
 
 ```powershell
-make dev_staging_up     # infra + k3d + apply manifests
-make streamlit_k8s      # port-forward to http://localhost:8501
+make dev_k3d_up         # infra (healthy) + k3d + Streamlit/CronJobs
+make streamlit_k3d      # port-forward only → http://localhost:8501
 ```
 
 Uses **`dev_local` Doppler only** — k3d host overrides are applied automatically (no second config).
@@ -81,13 +81,13 @@ make dev_bootstrap_schema
 
 | Target | Description |
 |--------|-------------|
-| `dev_infra` | Start Postgres, MinIO, Redis |
+| `dev_infra` | Start Postgres, MinIO, Redis (no health wait) |
 | `dev_down` | Stop Compose stack |
-| `dev_bootstrap` | Start infra and wait until healthy |
+| `dev_bootstrap` | `dev_infra` + wait until healthy |
 | `streamlit_fg` | Streamlit in venv (Doppler `dev_local`) |
 | `streamlit_docker` | Streamlit container + infra |
-| `dev_staging_up` | Bootstrap infra + apply k3d staging (develop image) |
-| `k8s_up` | Apply k8s manifests to k3d (dev_local + host overrides) |
+| `dev_k3d_up` | Bootstrap infra + k3d staging (Streamlit/CronJobs, `:develop`) |
+| `streamlit_k3d` | Port-forward to k3d Streamlit (`:8501`); does not start the app |
 | `dev_sync_cloud` | Full prod → local Postgres + MinIO sync |
 | `dev_bootstrap_schema` | `ensure_metadata` for all tables |
 

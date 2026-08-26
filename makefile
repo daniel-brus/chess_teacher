@@ -1,6 +1,6 @@
 .PHONY: streamlit streamlit_fg streamlit_docker streamlit_secrets docker_check doppler_check \
 	dev_infra dev_down dev_bootstrap dev_sync_cloud dev_bootstrap_schema \
-	k8s_up k8s_check k8s_ensure streamlit_k8s dev_staging_up
+	k8s_check k8s_ensure streamlit_k3d dev_k3d_up
 
 # Use Docker Desktop explicitly (stable context for Compose and k3d).
 DOCKER_CONTEXT = desktop-linux
@@ -55,10 +55,10 @@ k8s_check:
 k8s_ensure: k8s_check
 	powershell -ExecutionPolicy Bypass -File orchestration/k8s/ensure-cluster.ps1
 
-k8s_up: k8s_ensure doppler_check dev_infra
+# Local prod-like staging: healthy Compose infra + k3d cluster + Streamlit/CronJobs (:develop).
+dev_k3d_up: dev_bootstrap k8s_ensure
 	$(DOPPLER_RUN_LOCAL) powershell -ExecutionPolicy Bypass -File orchestration/k8s/apply-k3d-local.ps1
 
-dev_staging_up: dev_bootstrap k8s_up
-
-streamlit_k8s: k8s_check
-	@cmd /c "start /B kubectl port-forward --address 0.0.0.0 -n chess-teacher svc/streamlit 8501:8501 1>nul 2>nul"
+# Port-forward only — Streamlit pod must already be running (after make dev_k3d_up).
+streamlit_k3d: k8s_check
+	powershell -ExecutionPolicy Bypass -File scripts/dev/streamlit_k3d.ps1

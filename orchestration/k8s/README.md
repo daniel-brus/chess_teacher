@@ -11,22 +11,14 @@ No separate Doppler config — **`dev_local` only**. Host routing overrides live
 - `k3d`, `kubectl` on PATH
 - Google OAuth: add redirect URI `http://localhost:8501/oauth2callback` (k8s port-forward; venv uses 8502)
 
-## One-shot bring-up
+## Bring-up
 
 ```powershell
-make dev_staging_up
+make dev_k3d_up         # infra (wait healthy) + k3d + apply Streamlit/CronJobs
+make streamlit_k3d      # port-forward only → http://localhost:8501
 ```
 
-This runs: infra bootstrap → k3d cluster ensure → apply manifests.
-
-## Step by step
-
-```powershell
-make dev_infra          # Postgres, MinIO, Redis on localhost ports
-make k8s_ensure         # create/start k3d cluster chess-teacher
-make k8s_up             # apply namespace, secrets, streamlit, cronjobs
-make streamlit_k8s      # port-forward http://localhost:8501
-```
+`streamlit_k3d` does **not** start Streamlit — the pod is already deployed by `dev_k3d_up`. It only tunnels cluster port 8501 to localhost.
 
 ## What gets deployed
 
@@ -59,22 +51,25 @@ CronJobs only run while Docker + k3d are up. Data persists under `storage/postgr
 CD rebuilds `:develop` on push. Re-apply or restart:
 
 ```powershell
-make k8s_up
+make dev_k3d_up
 # or
 kubectl rollout restart deployment/streamlit -n chess-teacher
 ```
 
 ## Troubleshooting
 
-**API unreachable:** `make k8s_ensure` or delete and recreate:
+**API unreachable / stuck on "Waiting for Kubernetes API":**
+Windows kubeconfig often gets `host.docker.internal`, which kubectl cannot reach.
+`make k8s_ensure` / `dev_k3d_up` now bind the API to `127.0.0.1:6550` and rewrite the kubeconfig.
+If an old cluster is stuck:
 
 ```powershell
 k3d cluster delete chess-teacher
 make k8s_ensure
-make k8s_up
+make dev_k3d_up
 ```
 
-**Postgres preflight fails:** run `make dev_infra` first.
+**Postgres preflight fails:** run `make dev_bootstrap` first.
 
 **Manual dispatcher tick:**
 
@@ -82,4 +77,4 @@ make k8s_up
 doppler run --project chess-teacher --config dev_local -- python scripts/entrypoints/dispatcher.py
 ```
 
-(Requires kubeconfig pointed at k3d and in-cluster RBAC from `make k8s_up`.)
+(Requires kubeconfig pointed at k3d and in-cluster RBAC from `make dev_k3d_up`.)
