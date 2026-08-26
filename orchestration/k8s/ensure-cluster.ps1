@@ -1,8 +1,12 @@
 # Ensures the local k3d cluster exists and the Kubernetes API is healthy.
-# Auto-recovery: merge kubeconfig -> start -> stop/start.
+# Auto-recovery: merge kubeconfig -> start -> rewrite API host -> recreate if needed.
 # If still unhealthy, prints manual delete+recreate steps (does not run them).
+#
+# Windows + Docker Desktop: k3d may write host.docker.internal into kubeconfig; that
+# often fails from the host. We bind the API to 127.0.0.1 and rewrite the server URL.
 param(
-    [string]$ClusterName = "chess-teacher"
+    [string]$ClusterName = "chess-teacher",
+    [string]$ApiHostPort = "127.0.0.1:6550"
 )
 
 $ErrorActionPreference = "Stop"
@@ -35,6 +39,24 @@ function Test-ClusterExists {
     return [bool]($clusters | Where-Object { $_ -match "^\s*$([regex]::Escape($ClusterName))\s" })
 }
 
+function Fix-KubeconfigApiHost {
+    # Replace host.docker.internal with 127.0.0.1 for this cluster's server URL.
+    $kubeconfigPath = Join-Path $HOME ".kube\config"
+    if (-not (Test-Path $kubeconfigPath)) {
+        return
+    }
+    $raw = Get-Content -Path $kubeconfigPath -Raw
+    if ($raw -notmatch "host\.docker\.internal") {
+        return
+    }
+    $updated = $raw -replace "https://host\.docker\.internal:", "https://127.0.0.1:"
+    if ($updated -eq $raw) {
+        return
+    }
+    Set-Content -Path $kubeconfigPath -Value $updated -NoNewline
+    Write-Host "Rewrote kubeconfig API host: host.docker.internal -> 127.0.0.1" -ForegroundColor DarkGray
+}
+
 function Merge-Kubeconfig {
     if (-not (Test-ClusterExists)) {
         return
@@ -42,6 +64,7 @@ function Merge-Kubeconfig {
     Invoke-External "k3d kubeconfig merge" @(
         "k3d", "kubeconfig", "merge", $ClusterName, "-d", "-u", "--overwrite"
     )
+    Fix-KubeconfigApiHost
 }
 
 function Test-ApiHealthy {
@@ -77,6 +100,7 @@ function Wait-ApiHealthy {
 function Get-CreateArgs {
     return @(
         "k3d", "cluster", "create", $ClusterName,
+        "--api-port", $ApiHostPort,
         "--kubeconfig-update-default",
         "--wait"
     )
@@ -87,7 +111,7 @@ function Format-CreateCommand {
 }
 
 function New-Cluster {
-    Write-Host "Creating k3d cluster '$ClusterName'..." -ForegroundColor Cyan
+    Write-Host "Creating k3d cluster '$ClusterName' (API $ApiHostPort)..." -ForegroundColor Cyan
     Invoke-External "k3d cluster create" (Get-CreateArgs)
     Merge-Kubeconfig
     if (-not (Wait-ApiHealthy)) {
@@ -100,19 +124,13 @@ function Start-Cluster {
     Invoke-External "k3d cluster start" @("k3d", "cluster", "start", $ClusterName)
 }
 
-function Restart-Cluster {
-    Write-Host "Restarting k3d cluster '$ClusterName'..." -ForegroundColor Yellow
-    Invoke-External "k3d cluster stop" @("k3d", "cluster", "stop", $ClusterName)
-    Start-Cluster
-}
-
 function Write-RecreateInstructions {
     $createCommand = Format-CreateCommand
     Write-Host ""
     Write-Host "Cluster '$ClusterName' is still unreachable after automatic recovery." -ForegroundColor Red
     Write-Host ""
     Write-Host "Recreate it manually, then rerun:" -ForegroundColor Yellow
-    Write-Host "  make k8s_up"
+    Write-Host "  make dev_k3d_up"
     Write-Host ""
     Write-Host "  k3d cluster delete $ClusterName"
     Write-Host "  $createCommand"
@@ -154,15 +172,9 @@ if (Wait-ApiHealthy -MaxAttempts 15) {
     exit 0
 }
 
-try {
-    Restart-Cluster
-} catch {
-    Write-Host "Restart failed: $($_.Exception.Message)" -ForegroundColor DarkYellow
-}
-
-if (Wait-ApiHealthy -MaxAttempts 20) {
-    Write-Host "Cluster '$ClusterName' recovered after restart." -ForegroundColor Green
-    exit 0
-}
-
-Write-RecreateInstructions
+# Existing cluster may have been created without --api-port 127.0.0.1; recreate with fixed bind.
+Write-Host "Recreating cluster with API bound to $ApiHostPort (fixes Windows host.docker.internal kubeconfig)..." -ForegroundColor Yellow
+Invoke-External "k3d cluster delete" @("k3d", "cluster", "delete", $ClusterName)
+New-Cluster
+Write-Host "Cluster '$ClusterName' is ready." -ForegroundColor Green
+exit 0

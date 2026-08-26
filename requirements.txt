@@ -4,8 +4,7 @@ anthropic
 requests
 sqlite-utils
 apscheduler
-streamlit
-Authlib
+streamlit[auth]
 pyyaml
 python-dotenv
 sqlalchemy

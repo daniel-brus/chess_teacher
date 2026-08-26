@@ -6,7 +6,7 @@ function Get-RequiredEnv {
     param([string]$Key)
     $value = [Environment]::GetEnvironmentVariable($Key)
     if ([string]::IsNullOrWhiteSpace($value)) {
-        throw "Missing required environment variable: $Key (expected from Doppler config dev_k3d)"
+        throw "Missing required environment variable: $Key (expected from Doppler config dev_local)"
     }
     return $value.Trim()
 }
@@ -62,7 +62,7 @@ try {
 Kubernetes API is not reachable. Recover the cluster first:
   make k8s_ensure
 If that prints manual recreate steps, run them, then:
-  make k8s_up
+  make dev_k3d_up
 "@
 }
 
@@ -75,18 +75,21 @@ function Render-K8sManifest {
 }
 
 Write-Host "Using image: $image (pull: Always)" -ForegroundColor Cyan
-Write-Host "Secrets source: Doppler config dev_k3d" -ForegroundColor Cyan
+Write-Host "Secrets source: Doppler config dev_local (k3d host overrides from apply-k3d-local.ps1)" -ForegroundColor Cyan
 
 $postgresHost = Get-RequiredEnv "POSTGRES_HOST"
 $postgresPort = [int](Get-RequiredEnv "POSTGRES_PORT")
 if ($postgresHost -eq "host.k3d.internal") {
-    Write-Host "Preflight: checking local Compose Postgres at ${postgresHost}:${postgresPort}..." -ForegroundColor Cyan
-    $reachable = Test-NetConnection -ComputerName $postgresHost -Port $postgresPort -WarningAction SilentlyContinue
+    # host.k3d.internal is only resolvable inside the cluster. From the laptop,
+    # Compose Postgres is on the loopback publish port.
+    $preflightHost = "127.0.0.1"
+    Write-Host "Preflight: checking local Compose Postgres at ${preflightHost}:${postgresPort} (pods use ${postgresHost})..." -ForegroundColor Cyan
+    $reachable = Test-NetConnection -ComputerName $preflightHost -Port $postgresPort -WarningAction SilentlyContinue
     if (-not $reachable.TcpTestSucceeded) {
         throw @"
-Cannot reach Postgres at ${postgresHost}:${postgresPort}.
-Start local infra first: make dev_infra
-Then retry: make k8s_up
+Cannot reach Postgres at ${preflightHost}:${postgresPort}.
+Start local infra first: make dev_bootstrap
+Then retry: make dev_k3d_up
 "@
     }
     Write-Host "Local infra reachable." -ForegroundColor Green
@@ -143,7 +146,10 @@ foreach ($cronFile in @("nightly-maintenance.yaml", "ingestion-dispatcher.yaml")
 
 $streamlitSecretsFile = Join-Path ([System.IO.Path]::GetTempPath()) "chess-teacher-streamlit-secrets.toml"
 try {
-    New-StreamlitSecretsToml | Set-Content -Path $streamlitSecretsFile -Encoding UTF8
+    # Windows PowerShell UTF8 encoding writes a BOM; Streamlit then fails to parse [auth].
+    $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+    $toml = (New-StreamlitSecretsToml) -replace "`r`n", "`n"
+    [System.IO.File]::WriteAllText($streamlitSecretsFile, $toml, $utf8NoBom)
     $streamlitSecretYaml = & kubectl create secret generic chess-teacher-streamlit-secrets `
         --from-file=secrets.toml=$streamlitSecretsFile `
         -n chess-teacher `
@@ -162,9 +168,13 @@ $streamlitPath = Join-Path $k8sDir "deployment\streamlit.yaml"
 $streamlitManifest = Render-K8sManifest (Get-Content $streamlitPath -Raw) $image "Always" "DEV"
 Invoke-Kubectl @("apply", "-f", "-") -InputObject $streamlitManifest
 
+Write-Host "Restarting Streamlit rollout..." -ForegroundColor Cyan
+Invoke-Kubectl @("rollout", "restart", "deployment/streamlit", "-n", "chess-teacher")
+Invoke-Kubectl @("rollout", "status", "deployment/streamlit", "-n", "chess-teacher", "--timeout=300s")
+
 Write-Host ""
 Write-Host "Kubernetes orchestration applied." -ForegroundColor Green
-Write-Host "App secrets from Doppler dev_k3d -> chess-teacher-env" -ForegroundColor Green
+Write-Host "App secrets from Doppler dev_local -> chess-teacher-env" -ForegroundColor Green
 Write-Host ""
 Write-Host "Streamlit (dev image): kubectl port-forward --address 0.0.0.0 -n chess-teacher svc/streamlit 8501:8501" -ForegroundColor Cyan
 Write-Host "Then open http://localhost:8501" -ForegroundColor Cyan

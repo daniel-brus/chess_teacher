@@ -18,8 +18,7 @@ Secrets live in Doppler project **`chess-teacher`**, not in git. Wrap skill comm
 
 | Config | `POSTGRES_HOST` (typical) | When to use |
 |--------|---------------------------|-------------|
-| `dev_local` | `localhost` (Compose) | Default local dev (`make dev_infra`) |
-| `dev_k3d` | `host.k3d.internal` | k3d jobs / cluster workloads |
+| `dev_local` | `localhost` (Compose) | Default local dev (`make dev_infra`) and k3d staging (`make dev_k3d_up` applies host overrides) |
 | `prod` | External / VPS | **Prefer chess-teacher-vps `db-*`** — laptop often cannot reach firewalled prod Postgres |
 
 Local Compose stack: Postgres, MinIO, and Redis from `docker-compose.infra.yml` with **`dev_local`**. Production Postgres is typically only reachable from the VPS; do **not** expect `doppler run --config prod` from the laptop to work. Use **chess-teacher-vps** `db-count` / `db-read` / … instead.
