@@ -30,9 +30,12 @@ from chess_teacher.pipelines.preprocessing.fen_characteristic import (
     _default_fen_eval_workers,
     _WorkerFenProgressTracker,
 )
+from chess_teacher.pipelines.preprocessing.fen_checkpoint import (
+    CHECKPOINT_MERGE,
+    checkpoint_percent_from_env,
+)
 from chess_teacher.utils.chess_utils import StockfishEngine
-from chess_teacher.utils.db.client import DatabaseClient, MergeStrategy
-from chess_teacher.utils.env_utils import get_optional_env_variable
+from chess_teacher.utils.db.client import DatabaseClient
 from chess_teacher.utils.metadata_utils import TableMetadata
 from chess_teacher.utils.pipeline_utils.dataframe_transformation import DataFrameTransformation
 from chess_teacher.utils.process_utils import WorkerSafeLogger, is_parent_process
@@ -40,32 +43,7 @@ from chess_teacher.utils.process_utils import WorkerSafeLogger, is_parent_proces
 _logger = WorkerSafeLogger(__name__)
 
 _DEFAULT_LOG_PROGRESS_PERCENT = 5
-_DEFAULT_CHECKPOINT_PERCENT = 10
 _MIN_PARALLEL_FENS = 100
-
-_CHECKPOINT_MERGE = MergeStrategy(
-    when_matched="update",
-    when_not_matched_by_target="ignore",
-    when_not_matched_by_source="ignore",
-)
-
-
-def _checkpoint_percent_from_env() -> int | None:
-    raw = get_optional_env_variable("CANDIDATE_EVAL_CHECKPOINT_PERCENT")
-    if raw is None:
-        return _DEFAULT_CHECKPOINT_PERCENT
-    try:
-        value = int(raw)
-    except ValueError:
-        _logger.warning(
-            "Invalid CANDIDATE_EVAL_CHECKPOINT_PERCENT=%r; using default %s",
-            raw,
-            _DEFAULT_CHECKPOINT_PERCENT,
-        )
-        return _DEFAULT_CHECKPOINT_PERCENT
-    if value <= 0:
-        return None
-    return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,14 +104,20 @@ class CandidateEvaluationsTransformation(DataFrameTransformation):
     ) -> None:
         if log_progress_percent is not None and not 1 <= log_progress_percent <= 100:
             raise ValueError("log_progress_percent must be between 1 and 100, or None")
-        if checkpoint_percent is not None and not 1 <= checkpoint_percent <= 100:
-            raise ValueError("checkpoint_percent must be between 1 and 100, or None")
+        if checkpoint_percent == 0:
+            resolved_checkpoint_percent: int | None = None
+        elif checkpoint_percent is None:
+            resolved_checkpoint_percent = checkpoint_percent_from_env(
+                "CANDIDATE_EVAL_CHECKPOINT_PERCENT"
+            )
+        elif not 1 <= checkpoint_percent <= 100:
+            raise ValueError("checkpoint_percent must be between 1 and 100, 0, or None")
+        else:
+            resolved_checkpoint_percent = checkpoint_percent
         self.depth = depth
         self.num_nodes = num_nodes
         self.log_progress_percent = log_progress_percent
-        self.checkpoint_percent = (
-            _checkpoint_percent_from_env() if checkpoint_percent is None else checkpoint_percent
-        )
+        self.checkpoint_percent = resolved_checkpoint_percent
         self.n_workers = n_workers if n_workers is not None else _default_fen_eval_workers()
         self._pool = _FenPoolRunner(
             log_progress_percent=log_progress_percent,
@@ -141,7 +125,6 @@ class CandidateEvaluationsTransformation(DataFrameTransformation):
         )
         self._db_client: DatabaseClient | None = None
         self._table_metadata: TableMetadata | None = None
-        self._merge_strategy: MergeStrategy | None = None
         self._fen_to_moves: dict[str, list[_MoveRef]] = {}
         self._checkpointed_fens: set[str] = set()
 
@@ -151,10 +134,11 @@ class CandidateEvaluationsTransformation(DataFrameTransformation):
         db_client: DatabaseClient,
         table_metadata: TableMetadata,
     ) -> None:
-        """Enable periodic partial MERGE of ``candidate_evaluations`` during long runs."""
         self._db_client = db_client
         self._table_metadata = table_metadata
-        self._merge_strategy = _CHECKPOINT_MERGE
+
+    def _checkpoint_enabled(self) -> bool:
+        return self._db_client is not None and self.checkpoint_percent is not None
 
     def _report_fen_progress(self, completed: int, total: int) -> None:
         if not is_parent_process():
@@ -186,12 +170,7 @@ class CandidateEvaluationsTransformation(DataFrameTransformation):
         return rows
 
     def _maybe_checkpoint_batch(self, fen_payloads: dict[str, dict[str, Any] | None]) -> None:
-        if (
-            self._db_client is None
-            or self._table_metadata is None
-            or self._merge_strategy is None
-            or self.checkpoint_percent is None
-        ):
+        if not self._checkpoint_enabled() or self._table_metadata is None:
             return
         new_payloads = {
             fen: payload
@@ -204,7 +183,8 @@ class CandidateEvaluationsTransformation(DataFrameTransformation):
         if not rows:
             return
         df = pl.DataFrame(rows)
-        self._db_client.merge(df, self._table_metadata, strategy=self._merge_strategy)
+        assert self._db_client is not None
+        self._db_client.merge(df, self._table_metadata, strategy=CHECKPOINT_MERGE)
         self._checkpointed_fens.update(new_payloads)
         _logger.info(
             "%s: checkpointed %d move row(s) for %d FEN(s).",
@@ -217,7 +197,7 @@ class CandidateEvaluationsTransformation(DataFrameTransformation):
         total_fens = len(unique_fens)
         use_parallel = self.n_workers > 1 and total_fens >= _MIN_PARALLEL_FENS
         on_batch: Callable[[dict[str, dict[str, Any] | None]], None] | None = None
-        if self._db_client is not None:
+        if self._checkpoint_enabled():
             on_batch = self._maybe_checkpoint_batch
 
         if use_parallel:
@@ -319,4 +299,6 @@ class CandidateEvaluationsTransformation(DataFrameTransformation):
         fen_payloads = self._evaluate_unique_fens(unique_fens)
 
         candidate_evaluations = [fen_payloads.get(fen) for fen in fens_before]
-        return df.with_columns(pl.Series("candidate_evaluations", candidate_evaluations))
+        return df.with_columns(
+            pl.Series("candidate_evaluations", candidate_evaluations, dtype=pl.Object),
+        )

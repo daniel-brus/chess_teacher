@@ -56,7 +56,7 @@ def test_candidate_evaluations_dedupes_shared_fens(monkeypatch: pytest.MonkeyPat
 
     result = CandidateEvaluationsTransformation(
         log_progress_percent=None,
-        checkpoint_percent=None,
+        checkpoint_percent=0,
         n_workers=1,
     ).transform(_sample_moves_df())
 

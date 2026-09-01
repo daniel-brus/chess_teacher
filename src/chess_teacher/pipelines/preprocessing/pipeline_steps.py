@@ -33,8 +33,6 @@ from chess_teacher.pipelines.preprocessing.transformations import (
     FilterGamesWithPGNTransformation,
 )
 from chess_teacher.platform.account import Account
-from chess_teacher.utils.db.client import DatabaseClient
-from chess_teacher.utils.pipeline_utils.pipeline_base import PipelineContext
 from chess_teacher.utils.pipeline_utils.pipeline_steps import (
     LoadingStrategy,
     TransformStep,
@@ -145,12 +143,3 @@ class EnrichMoveCharacteristicsStep(TransformStep):
             loading_strategy=LoadingStrategy.MERGE,
             merge_strategy=merge_strategy,
         )
-
-    def run(self, db_client: DatabaseClient, context: PipelineContext) -> None:
-        for transformation in self.transformations:
-            if isinstance(transformation, CandidateEvaluationsTransformation):
-                transformation.bind_checkpoint(
-                    db_client=db_client,
-                    table_metadata=self.table_metadata,
-                )
-        super().run(db_client, context)
