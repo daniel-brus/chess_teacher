@@ -1,10 +1,15 @@
-"""Offline baseline train + game-level val/test eval (Phase 1 roadmap).
+"""Offline baseline train + game-level val/test eval (Phase 1 / 1b).
 
-Loads a fixed sample from Postgres, splits by ``game_id``, trains on train only,
-reports stratified metrics on val (and optionally test). Does **not** touch
-production baseline pipelines.
+Loads a fixed sample from Postgres, assigns splits via **persistent registry**
+(``ml.game_split_assignments``), trains on train only, reports stratified val metrics.
+Does **not** touch production baseline pipelines.
 
-Run (dev)::
+Run backfill once per environment (or rely on assign-on-read during this script)::
+
+    doppler run --project chess-teacher --config dev_local -- ^
+      .venv\\Scripts\\python.exe scripts/tools/backfill_game_splits.py
+
+Then train+eval::
 
     doppler run --project chess-teacher --config dev_local -- ^
       .venv\\Scripts\\python.exe scripts/tools/offline_baseline_train_eval.py
@@ -29,10 +34,10 @@ from chess_teacher.pipelines.neural_network.eval_metrics import (
     evaluate_datums,
     format_eval_metrics,
 )
+from chess_teacher.pipelines.neural_network.split_registry import get_split_registry
 from chess_teacher.pipelines.neural_network.splits import (
     DEFAULT_SPLIT_SALT,
     GameSplitResult,
-    split_datums_by_game,
 )
 from chess_teacher.pipelines.neural_network.train import BaselineTrainer
 from chess_teacher.utils.db.client import get_db_client
@@ -43,8 +48,8 @@ logger = get_logger()
 
 
 def _print_split_summary(split: GameSplitResult) -> None:
-    print("\n=== game-level split ===")
-    print(f"salt={split.salt!r}")
+    print("\n=== game-level split (persistent registry) ===")
+    print(f"split_version={split.salt!r}")
     for counts in split.counts:
         disagree = (
             f"{counts.sf_disagree_frac:.3f}"
@@ -73,7 +78,8 @@ def run_offline_train_eval(
         logger.error("Need more datums; got %s", len(datums))
         return 1
 
-    split = split_datums_by_game(datums, salt=salt)
+    registry = get_split_registry(db, split_version=salt)
+    split = registry.split_datums(datums, assign_if_missing=True)
     _print_split_summary(split)
 
     train = split.train_datums

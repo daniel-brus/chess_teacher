@@ -10,7 +10,8 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -21,12 +22,12 @@ if TYPE_CHECKING:
     from chess_teacher.pipelines.neural_network.create_training_set import TrainingDatum
 
 DEFAULT_SPLIT_SALT = "baseline-v1"
-TRAIN_BUCKET_MAX = 84  # 0–84 inclusive → 85%
-VAL_BUCKET_MAX = 94  # 85–94 inclusive → 10%
-# 95–99 → test (5%)
+TRAIN_BUCKET_MAX = 84  # 0-84 inclusive -> 85%
+VAL_BUCKET_MAX = 94  # 85-94 inclusive -> 10%
+# 95-99 -> test (5%)
 
 
-class SplitBucket(str, Enum):
+class SplitBucket(StrEnum):
     TRAIN = "train"
     VAL = "val"
     TEST = "test"
@@ -95,8 +96,27 @@ def split_datums_by_game(
     *,
     salt: str = DEFAULT_SPLIT_SALT,
     compute_disagree_frac: bool = True,
+    bucket_for_game: Callable[[str], SplitBucket] | None = None,
 ) -> GameSplitResult:
     """Partition datums by ``game_id``; every move from a game stays in one bucket."""
+    if bucket_for_game is None:
+        def bucket_for_game(gid: str) -> SplitBucket:
+            return game_split_bucket(gid, salt=salt)
+    return _partition_datums(
+        datums,
+        bucket_for_game=bucket_for_game,
+        salt=salt,
+        compute_disagree_frac=compute_disagree_frac,
+    )
+
+
+def _partition_datums(
+    datums: list[TrainingDatum],
+    *,
+    bucket_for_game: Callable[[str], SplitBucket],
+    salt: str,
+    compute_disagree_frac: bool,
+) -> GameSplitResult:
     by_game: dict[str, list[TrainingDatum]] = {}
     for d in datums:
         by_game.setdefault(d.game_id, []).append(d)
@@ -107,7 +127,7 @@ def split_datums_by_game(
     train_games = val_games = test_games = 0
 
     for game_id, game_datums in by_game.items():
-        bucket = game_split_bucket(game_id, salt=salt)
+        bucket = bucket_for_game(game_id)
         if bucket is SplitBucket.TRAIN:
             train.extend(game_datums)
             train_games += 1

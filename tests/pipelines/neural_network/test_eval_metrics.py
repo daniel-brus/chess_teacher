@@ -41,6 +41,7 @@ def test_perfect_predictions_top1_is_one() -> None:
         move_feats=feats,
         plies=plies,
         n_input=len(labels),
+        max_candidates=8,
     )
     assert m.top1_overall == 1.0
     assert m.top3_overall == 1.0
@@ -64,6 +65,7 @@ def test_wrong_top1_on_disagree_only() -> None:
         move_feats=feats,
         plies=plies,
         n_input=4,
+        max_candidates=8,
     )
     assert m.top1_overall == 0.5
     assert m.top1_sf_agree == 1.0
@@ -79,6 +81,7 @@ def test_as_dict_includes_stratified_keys() -> None:
         move_feats=feats,
         plies=plies,
         n_input=2,
+        max_candidates=8,
     )
     d = m.as_dict()
     assert "top1_sf_agree" in d

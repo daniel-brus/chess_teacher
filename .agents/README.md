@@ -6,7 +6,7 @@ Planning docs for agents:
 
 | Doc | Topic |
 |-----|--------|
-| [ml-training-roadmap.md](docs/ml-training-roadmap.md) | Baseline + user-bot ML phases (eval splits, personalization, recency) |
+| [ml-training-roadmap.md](docs/ml-training-roadmap.md) | Baseline + user-bot ML phases (eval splits, ops siblings, notebook, personalization) |
 
 | Skill | Invoke |
 |-------|--------|

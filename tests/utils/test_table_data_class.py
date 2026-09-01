@@ -7,7 +7,11 @@ from unittest.mock import MagicMock
 import pytest
 
 from chess_teacher.pipelines.ingestion.raw_games import RawGame
-from chess_teacher.pipelines.neural_network.models import BaselineModel, TrainingState
+from chess_teacher.pipelines.neural_network.models import (
+    BaselineModel,
+    GameSplitAssignment,
+    TrainingState,
+)
 from chess_teacher.pipelines.preprocessing.games import Game
 from chess_teacher.pipelines.preprocessing.moves import Move, MoveCharacteristics
 from chess_teacher.platform.account import Account
@@ -31,6 +35,7 @@ CLASSES_TO_TEST: list[type[TableDataClass]] = [
     MoveCharacteristics,
     BaselineModel,
     TrainingState,
+    GameSplitAssignment,
 ]
 
 

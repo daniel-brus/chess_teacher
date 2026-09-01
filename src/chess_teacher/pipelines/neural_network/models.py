@@ -236,3 +236,25 @@ class TrainingState(TableDataClass):
             last_trained_data_cutoff=cutoff,
             last_min_data_check_at=checked_at or get_current_datetime(),
         )
+
+
+@dataclass(frozen=True)
+class GameSplitAssignment(TableDataClass):
+    """One game's train/val/test bucket for a split_version (see ``splits.py``)."""
+
+    split_version: str
+    game_id: str
+    bucket: str
+    assigned_at: datetime
+
+    @classmethod
+    def get_yaml_path(cls) -> Path:
+        return Path(__file__).parent / "metadata.yml"
+
+    @classmethod
+    def get_key(cls) -> str:
+        return "game_split_assignments"
+
+    @classmethod
+    def get_id_hash_columns(cls) -> tuple[str, ...]:
+        return ()
