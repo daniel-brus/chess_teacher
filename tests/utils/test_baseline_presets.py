@@ -8,7 +8,10 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from chess_teacher.bots.presets import list_baseline_presets
+from chess_teacher.bots.presets import (
+    list_baseline_presets,
+    reset_baseline_presets_cache_for_tests,
+)
 from chess_teacher.pipelines.neural_network.candidate_eval import (
     MAX_CANDIDATES,
     MOVE_FEAT_DIM,
@@ -17,6 +20,13 @@ from chess_teacher.pipelines.neural_network.models import (
     BaselineModel,
     BaselineModelStatus,
 )
+
+
+@pytest.fixture(autouse=True)
+def _clear_baseline_preset_cache() -> None:
+    reset_baseline_presets_cache_for_tests()
+    yield
+    reset_baseline_presets_cache_for_tests()
 
 
 def _row(*, version: str, feat_dim: float | None, status: BaselineModelStatus) -> BaselineModel:
@@ -62,3 +72,30 @@ def test_list_baseline_presets_skips_incompatible_feat_dim(
     assert "baseline:v_ok" in keys
     assert "baseline:v_old" not in keys
     assert "baseline:v_cand" not in keys  # candidates not playable on Play
+
+
+def test_list_baseline_presets_uses_cache_until_force_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = {"n": 0}
+
+    def _fetch(_cls: type[BaselineModel], _db: object) -> list[BaselineModel]:
+        calls["n"] += 1
+        return [
+            _row(
+                version="v_ok",
+                feat_dim=float(MOVE_FEAT_DIM),
+                status=BaselineModelStatus.PRODUCTION,
+            )
+        ]
+
+    monkeypatch.setattr(BaselineModel, "fetch_all_ordered", classmethod(_fetch))
+    db = MagicMock()
+    first = list_baseline_presets(db)
+    second = list_baseline_presets(db)
+    assert calls["n"] == 1
+    assert first[0].key == second[0].key
+
+    refreshed = list_baseline_presets(db, force_refresh=True)
+    assert calls["n"] == 2
+    assert refreshed[0].key == "baseline:v_ok"

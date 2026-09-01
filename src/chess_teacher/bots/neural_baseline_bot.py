@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 
 import chess
 import numpy as np
 
 from chess_teacher.bots.base import ChessBot
+from chess_teacher.bots.move_analysis import (
+    BotMoveAnalysis,
+    build_bot_move_analysis,
+    empty_bot_move_analysis,
+)
 from chess_teacher.pipelines.neural_network.candidate_eval import (
     CANDIDATE_STOCKFISH_DEPTH,
     evaluate_all_legal_after,
@@ -52,7 +58,9 @@ class NeuralBaselineBot(ChessBot):
         candidate_nodes: int | None = None,
         engine: StockfishEngine | None = None,
         state_encoder: LiveStateEncoder | None = None,
+        on_progress: Callable[[str], None] | None = None,
     ) -> None:
+        self._progress = on_progress or (lambda _message: None)
         self.model_uri = model_uri
         self.version = version
         self.temperature = temperature
@@ -64,6 +72,7 @@ class NeuralBaselineBot(ChessBot):
         self.name = f"Baseline {version}" if version else "NeuralBaseline"
         self._tracker = tracker or MLflowTracker()
 
+        self._progress("Starting Stockfish engine…")
         self._owns_engine = engine is None
         self._engine = engine or StockfishEngine(depth=stockfish_depth)
         if self._owns_engine:
@@ -71,7 +80,12 @@ class NeuralBaselineBot(ChessBot):
 
         self._owns_encoder = state_encoder is None
         self._encoder = state_encoder or LiveStateEncoder(engine=self._engine)
-        self._model = load_candidate_style_from_uri(model_uri, tracker=self._tracker)
+        self._model = load_candidate_style_from_uri(
+            model_uri,
+            tracker=self._tracker,
+            on_progress=self._progress,
+        )
+        self.last_move_analysis: BotMoveAnalysis | None = None
         logger.info(
             "Loaded candidate_style baseline uri=%s version=%s depth=%s live_nodes=%s",
             model_uri,
@@ -84,6 +98,7 @@ class NeuralBaselineBot(ChessBot):
         if board.is_game_over():
             raise ValueError("Cannot choose a move in a finished game.")
 
+        self.last_move_analysis = None
         t0 = time.perf_counter()
         fen = board.fen(en_passant="fen")
         color_is_white = board.turn == chess.WHITE
@@ -122,7 +137,13 @@ class NeuralBaselineBot(ChessBot):
                 self.candidate_nodes,
                 fen,
             )
-            return next(iter(board.legal_moves))
+            fallback = next(iter(board.legal_moves))
+            self.last_move_analysis = empty_bot_move_analysis(
+                board,
+                fallback,
+                temperature_used=self.temperature,
+            )
+            return fallback
 
         x_state = np.asarray(state, dtype=np.float32)[None, :]
         x_feats = feats[None, :, :]
@@ -144,6 +165,16 @@ class NeuralBaselineBot(ChessBot):
         if move not in board.legal_moves:
             raise RuntimeError(f"Candidate-style pick {ucis[idx]!r} not legal")
 
+        self.last_move_analysis = build_bot_move_analysis(
+            ucis,
+            logits,
+            mask,
+            evals,
+            board,
+            move.uci(),
+            self.temperature,
+        )
+
         t_end = time.perf_counter()
         logger.info(
             "Baseline choose_move version=%s nodes=%s n_cand=%s "
@@ -161,6 +192,7 @@ class NeuralBaselineBot(ChessBot):
         return move
 
     def close(self) -> None:
+        self.last_move_analysis = None
         if self._owns_encoder:
             if not self._owns_engine:
                 self._encoder.close()

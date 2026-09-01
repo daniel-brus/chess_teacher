@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
@@ -15,9 +16,18 @@ BASELINE_PRESET_PREFIX = "baseline:"
 STOCKFISH_PRESET_PREFIX = "stockfish:"
 logger = get_logger()
 
+# Play page calls preset lookup on every Streamlit rerun; cache DB-backed baselines briefly.
+_BASELINE_PRESETS_CACHE_TTL_SEC = 60.0
+_baseline_presets_cache: dict[int, tuple[list[BotPreset], float]] = {}
+
 STOCKFISH_DEPTH_MIN = 1
 STOCKFISH_DEPTH_MAX = 20
 STOCKFISH_DEPTH_DEFAULT = 3
+
+BASELINE_TEMPERATURE_MIN = 0.0
+BASELINE_TEMPERATURE_MAX = 2.0
+BASELINE_TEMPERATURE_DEFAULT = 0.0
+BASELINE_TEMPERATURE_STEP = 0.05
 
 
 class OpponentCategory(StrEnum):
@@ -70,11 +80,20 @@ def _stockfish_preset(depth: int) -> BotPreset:
     )
 
 
-def _baseline_factory(model_uri: str, version: str) -> Callable[[], ChessBot]:
-    def factory() -> ChessBot:
+def _baseline_factory(model_uri: str, version: str) -> Callable[..., ChessBot]:
+    def factory(
+        *,
+        temperature: float = 0.0,
+        on_progress: Callable[[str], None] | None = None,
+    ) -> ChessBot:
         from chess_teacher.bots.neural_baseline_bot import NeuralBaselineBot
 
-        return NeuralBaselineBot(model_uri=model_uri, version=version)
+        return NeuralBaselineBot(
+            model_uri=model_uri,
+            version=version,
+            temperature=temperature,
+            on_progress=on_progress,
+        )
 
     return factory
 
@@ -110,8 +129,21 @@ BOT_PRESETS: tuple[BotPreset, ...] = (
 BOT_PRESET_BY_KEY: dict[str, BotPreset] = {preset.key: preset for preset in BOT_PRESETS}
 
 
-def list_baseline_presets(db_client: DatabaseClient) -> list[BotPreset]:
-    """Playable baseline policies: production + archived (once-promoted) only."""
+def invalidate_baseline_presets_cache(*, db_client: DatabaseClient | None = None) -> None:
+    """Drop cached baseline presets (all clients, or one ``DatabaseClient`` instance)."""
+    if db_client is None:
+        _baseline_presets_cache.clear()
+        return
+    _baseline_presets_cache.pop(id(db_client), None)
+
+
+def reset_baseline_presets_cache_for_tests() -> None:
+    """Test helper: clear baseline preset cache between cases."""
+    invalidate_baseline_presets_cache()
+
+
+def _fetch_baseline_presets_from_db(db_client: DatabaseClient) -> list[BotPreset]:
+    """Load playable baseline presets from Postgres (uncached)."""
     from chess_teacher.pipelines.neural_network.models import (
         BaselineModel,
         BaselineModelStatus,
@@ -146,6 +178,30 @@ def list_baseline_presets(db_client: DatabaseClient) -> list[BotPreset]:
             )
         )
     return presets
+
+
+def list_baseline_presets(
+    db_client: DatabaseClient,
+    *,
+    force_refresh: bool = False,
+) -> list[BotPreset]:
+    """Playable baseline policies: production + archived (once-promoted) only.
+
+    Results are cached in-process for ``_BASELINE_PRESETS_CACHE_TTL_SEC`` to avoid
+    hitting Postgres on every Streamlit rerun during an active game.
+    """
+    cache_key = id(db_client)
+    now = time.monotonic()
+    if not force_refresh:
+        cached = _baseline_presets_cache.get(cache_key)
+        if cached is not None:
+            presets, cached_at = cached
+            if now - cached_at < _BASELINE_PRESETS_CACHE_TTL_SEC:
+                return list(presets)
+
+    presets = _fetch_baseline_presets_from_db(db_client)
+    _baseline_presets_cache[cache_key] = (presets, now)
+    return list(presets)
 
 
 def list_other_presets() -> list[BotPreset]:
@@ -196,9 +252,10 @@ def get_bot_preset(key: str, *, db_client: DatabaseClient | None = None) -> BotP
             from chess_teacher.utils.db.client import get_db_client
 
             client = get_db_client()
-        for preset in list_baseline_presets(client):
-            if preset.key == key:
-                return preset
+        by_key = {preset.key: preset for preset in list_baseline_presets(client)}
+        preset = by_key.get(key)
+        if preset is not None:
+            return preset
         raise KeyError(f"Unknown baseline bot preset: {key!r} (version={version!r})")
 
     raise KeyError(f"Unknown bot preset: {key!r}")
