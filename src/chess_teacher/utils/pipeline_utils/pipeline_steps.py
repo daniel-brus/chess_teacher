@@ -119,6 +119,12 @@ class LoadToDatabaseStep(PipelineStep):
                 self.logger.info(f"[{self.name}] Nothing to load; skipping.")
                 return
 
+        for transformation in self.transformations:
+            transformation.bind_checkpoint(
+                db_client=db_client,
+                table_metadata=self.table_metadata,
+            )
+
         # Apply transformations to the loaded data
         transform_total = len(self.transformations)
         for index, transformation in enumerate(self.transformations, start=1):

@@ -93,6 +93,36 @@ def _sample_moves_df() -> pl.DataFrame:
     })
 
 
+def test_fen_characteristic_checkpoint_builds_partial_rows() -> None:
+    transformation = _ConstantCharacteristic({_START: 2.0, _AFTER_E4: 0.5})
+    transformation.checkpoint_percent = 10
+    transformation._prepare_checkpoint_rows(_sample_moves_df())
+    merged: list[pl.DataFrame] = []
+
+    class _FakeClient:
+        def merge(self, df: pl.DataFrame, table_metadata: object, *, strategy: object) -> None:
+            del table_metadata, strategy
+            merged.append(df)
+
+    transformation._db_client = _FakeClient()  # type: ignore[assignment]
+    transformation._table_metadata = object()  # type: ignore[assignment]
+    transformation._maybe_checkpoint_fen_batch({_START: 2.0})
+
+    assert len(merged) == 1
+    row = merged[0].to_dicts()[0]
+    assert row["move_id"] == "m1"
+    assert row["sample_before"] == 2.0
+    assert "sample_after" not in row
+    assert "sample_delta" not in row
+
+    transformation._maybe_checkpoint_fen_batch({_AFTER_E4: 0.5})
+    assert len(merged) == 2
+    row = merged[1].to_dicts()[0]
+    assert row["sample_before"] == 2.0
+    assert row["sample_after"] == 0.5
+    assert row["sample_delta"] == pytest.approx(-1.5)
+
+
 def test_fen_characteristic_after_and_delta() -> None:
     transformation = _ConstantCharacteristic({_START: 2.0, _AFTER_E4: 0.5})
     result = transformation.transform(_sample_moves_df())

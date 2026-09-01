@@ -1,8 +1,11 @@
+from __future__ import annotations
+
 from chess_teacher.pipelines.ingestion.raw_games import RawGame
 from chess_teacher.pipelines.modes import PipelineMode, preprocessing_transform_config
 from chess_teacher.pipelines.preprocessing.games import Game
 from chess_teacher.pipelines.preprocessing.move_characteristics import (
     AttackPressureTransformation,
+    CandidateEvaluationsTransformation,
     DiagonalOpennessTransformation,
     HangingValueTransformation,
     KingSafetyTransformation,
@@ -135,6 +138,7 @@ class EnrichMoveCharacteristicsStep(TransformStep):
                 MoveContextTransformation(),
                 MoveFlagsTransformation(),
                 StockfishEvaluationTransformation(depth=12, log_progress_percent=5),
+                CandidateEvaluationsTransformation(log_progress_percent=5),
             ],
             loading_strategy=LoadingStrategy.MERGE,
             merge_strategy=merge_strategy,
