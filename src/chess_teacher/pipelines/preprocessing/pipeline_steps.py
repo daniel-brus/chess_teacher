@@ -1,8 +1,11 @@
+from __future__ import annotations
+
 from chess_teacher.pipelines.ingestion.raw_games import RawGame
 from chess_teacher.pipelines.modes import PipelineMode, preprocessing_transform_config
 from chess_teacher.pipelines.preprocessing.games import Game
 from chess_teacher.pipelines.preprocessing.move_characteristics import (
     AttackPressureTransformation,
+    CandidateEvaluationsTransformation,
     DiagonalOpennessTransformation,
     HangingValueTransformation,
     KingSafetyTransformation,
@@ -30,6 +33,8 @@ from chess_teacher.pipelines.preprocessing.transformations import (
     FilterGamesWithPGNTransformation,
 )
 from chess_teacher.platform.account import Account
+from chess_teacher.utils.db.client import DatabaseClient
+from chess_teacher.utils.pipeline_utils.pipeline_base import PipelineContext
 from chess_teacher.utils.pipeline_utils.pipeline_steps import (
     LoadingStrategy,
     TransformStep,
@@ -135,7 +140,17 @@ class EnrichMoveCharacteristicsStep(TransformStep):
                 MoveContextTransformation(),
                 MoveFlagsTransformation(),
                 StockfishEvaluationTransformation(depth=12, log_progress_percent=5),
+                CandidateEvaluationsTransformation(log_progress_percent=5),
             ],
             loading_strategy=LoadingStrategy.MERGE,
             merge_strategy=merge_strategy,
         )
+
+    def run(self, db_client: DatabaseClient, context: PipelineContext) -> None:
+        for transformation in self.transformations:
+            if isinstance(transformation, CandidateEvaluationsTransformation):
+                transformation.bind_checkpoint(
+                    db_client=db_client,
+                    table_metadata=self.table_metadata,
+                )
+        super().run(db_client, context)

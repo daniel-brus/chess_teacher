@@ -213,6 +213,8 @@ class FenCharacteristicTransformation(DataFrameTransformation, ABC):
         submit_chunk: Callable[
             [ProcessPoolExecutor, int, list[str], str], Future[dict[str, TScore]]
         ],
+        *,
+        on_scores_batch: Callable[[dict[str, TScore]], None] | None = None,
     ) -> dict[str, TScore]:
         chunks = _split_fen_list(unique_fens, self.n_workers)
         n_chunks = len(chunks)
@@ -249,7 +251,10 @@ class FenCharacteristicTransformation(DataFrameTransformation, ABC):
                     done, pending = wait(pending, timeout=2.0, return_when=FIRST_COMPLETED)
                     completed_fens = _sum_shared_fen_progress(progress_buf, n_chunks)
                     for future in done:
-                        scores.update(future.result())
+                        chunk_scores = future.result()
+                        scores.update(chunk_scores)
+                        if on_scores_batch is not None:
+                            on_scores_batch(chunk_scores)
                         completed_chunks += 1
                         _logger.info(
                             "%s: worker chunk finished (%d / %d chunks complete, %d scores so far).",

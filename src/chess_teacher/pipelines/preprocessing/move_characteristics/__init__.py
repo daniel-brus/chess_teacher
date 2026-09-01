@@ -1,6 +1,9 @@
 from chess_teacher.pipelines.preprocessing.move_characteristics.attack_pressure import (
     AttackPressureTransformation,
 )
+from chess_teacher.pipelines.preprocessing.move_characteristics.candidate_evaluations import (
+    CandidateEvaluationsTransformation,
+)
 from chess_teacher.pipelines.preprocessing.move_characteristics.diagonal_openness import (
     DiagonalOpennessTransformation,
 )
@@ -40,6 +43,7 @@ from chess_teacher.pipelines.preprocessing.move_characteristics.vertical_opennes
 
 __all__ = [
     "AttackPressureTransformation",
+    "CandidateEvaluationsTransformation",
     "DiagonalOpennessTransformation",
     "HangingValueTransformation",
     "KingSafetyTransformation",
