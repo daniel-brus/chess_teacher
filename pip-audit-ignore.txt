@@ -8,3 +8,10 @@
 PYSEC-2026-3552
 GHSA-g6cj-pr64-35w5
 CVE-2026-69247
+
+# MLflow AI Gateway SSRF via unvalidated api_base (3.13.0–3.15.2). No PyPI fix yet
+# (GHSA-h7x2-h6g9-p789). Exploit path needs a reachable mlflow server with AI Gateway;
+# we use mlflow mainly as a client for training artifacts. Drop when mlflow >3.15.2 ships.
+# https://osv.dev/vulnerability/GHSA-h7x2-h6g9-p789
+CVE-2026-71211
+GHSA-h7x2-h6g9-p789
