@@ -1,6 +1,6 @@
 .PHONY: streamlit streamlit_fg streamlit_docker streamlit_secrets docker_check doppler_check \
 	dev_infra dev_down dev_bootstrap dev_sync_cloud dev_bootstrap_schema \
-	k8s_up k8s_check k8s_ensure streamlit_k8s
+	k8s_check k8s_ensure streamlit_k3d dev_k3d_up
 
 # Use Docker Desktop explicitly (stable context for Compose and k3d).
 DOCKER_CONTEXT = desktop-linux
@@ -12,9 +12,7 @@ COMPOSE_ALL = $(COMPOSE) -f docker-compose.infra.yml -f docker-compose.yml
 # Doppler project/config names (no doppler.yaml in repo — flags are explicit).
 DOPPLER_PROJECT = chess-teacher
 DOPPLER_CONFIG_LOCAL = dev_local
-DOPPLER_CONFIG_K3D = dev_k3d
 DOPPLER_RUN_LOCAL = doppler run --project $(DOPPLER_PROJECT) --config $(DOPPLER_CONFIG_LOCAL) --
-DOPPLER_RUN_K3D = doppler run --project $(DOPPLER_PROJECT) --config $(DOPPLER_CONFIG_K3D) --
 
 # Interim: make streamlit_fg DOPPLER_CONFIG_LOCAL=prod  (cloud backends until dev_local is filled)
 streamlit: doppler_check
@@ -27,7 +25,7 @@ streamlit_secrets: doppler_check
 	$(DOPPLER_RUN_LOCAL) .venv\Scripts\python.exe scripts/dev/render_streamlit_secrets.py
 
 streamlit_fg: doppler_check streamlit_secrets
-	$(DOPPLER_RUN_LOCAL) .venv\Scripts\python.exe scripts/run_streamlit.py
+	$(DOPPLER_RUN_LOCAL) .venv\Scripts\python.exe scripts/tools/run_streamlit.py
 
 docker_check:
 	@echo Checking Docker Desktop...
@@ -57,8 +55,10 @@ k8s_check:
 k8s_ensure: k8s_check
 	powershell -ExecutionPolicy Bypass -File orchestration/k8s/ensure-cluster.ps1
 
-k8s_up: k8s_ensure doppler_check dev_infra
-	$(DOPPLER_RUN_K3D) powershell -ExecutionPolicy Bypass -File orchestration/k8s/apply.ps1
+# Local prod-like staging: healthy Compose infra + k3d cluster + Streamlit/CronJobs (:develop).
+dev_k3d_up: dev_bootstrap k8s_ensure
+	$(DOPPLER_RUN_LOCAL) powershell -ExecutionPolicy Bypass -File orchestration/k8s/apply-k3d-local.ps1
 
-streamlit_k8s: k8s_check
-	@cmd /c "start /B kubectl port-forward --address 0.0.0.0 -n chess-teacher svc/streamlit 8501:8501 1>nul 2>nul"
+# Port-forward only — Streamlit pod must already be running (after make dev_k3d_up).
+streamlit_k3d: k8s_check
+	powershell -ExecutionPolicy Bypass -File scripts/dev/streamlit_k3d.ps1

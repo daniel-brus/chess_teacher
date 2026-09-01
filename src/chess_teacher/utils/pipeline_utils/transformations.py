@@ -48,6 +48,7 @@ class IncrementalFilterTransformation(DataFrameTransformation):
 
     def _existing_values(self, candidates: Sequence[object]) -> set[str]:
         db_client = self.db_client or get_db_client()
+        db_client.ensure_metadata(self.target_metadata)
         if not db_client.table_exists(self.target_metadata):
             return set()
 

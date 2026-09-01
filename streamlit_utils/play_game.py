@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import random
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
 import chess
 
-from chess_teacher.utils.chess_bots import ChessBot, get_bot_preset
-from chess_teacher.utils.db.client import DatabaseClient, get_db_client
+from chess_teacher.bots import ChessBot, get_bot_preset
+from chess_teacher.bots.move_analysis import BotMoveAnalysis
+from chess_teacher.bots.presets import BASELINE_PRESET_PREFIX, BASELINE_TEMPERATURE_DEFAULT
+from chess_teacher.utils.db.client import DatabaseClient
 
 
 @dataclass
@@ -19,6 +22,7 @@ class PlayGameState:
     instance_id: int
     pending_bot_move: bool
     resigned: bool = False
+    baseline_temperature: float = BASELINE_TEMPERATURE_DEFAULT
 
 
 def resolve_user_color(choice: str) -> chess.Color:
@@ -70,10 +74,22 @@ def user_won(state: PlayGameState) -> bool:
 def create_bot(
     preset_key: str,
     *,
+    baseline_temperature: float | None = None,
     db_client: DatabaseClient | None = None,
+    on_progress: Callable[[str], None] | None = None,
 ) -> ChessBot:
-    client = db_client if db_client is not None else get_db_client()
-    return get_bot_preset(preset_key, db_client=client).factory()
+    progress = on_progress or (lambda _message: None)
+    progress("Loading opponent settings…")
+    preset = get_bot_preset(preset_key, db_client=db_client)
+    if preset_key.startswith(BASELINE_PRESET_PREFIX):
+        temperature = (
+            BASELINE_TEMPERATURE_DEFAULT
+            if baseline_temperature is None
+            else float(baseline_temperature)
+        )
+        return preset.factory(temperature=temperature, on_progress=on_progress)
+    progress("Starting Stockfish engine…")
+    return preset.factory()
 
 
 def close_bot(bot: ChessBot | None) -> None:
@@ -81,7 +97,12 @@ def close_bot(bot: ChessBot | None) -> None:
         bot.close()
 
 
-def start_new_game(user_color_choice: str, preset_key: str) -> PlayGameState:
+def start_new_game(
+    user_color_choice: str,
+    preset_key: str,
+    *,
+    baseline_temperature: float = BASELINE_TEMPERATURE_DEFAULT,
+) -> PlayGameState:
     user_color = resolve_user_color(user_color_choice)
     board = chess.Board()
     return PlayGameState(
@@ -91,6 +112,7 @@ def start_new_game(user_color_choice: str, preset_key: str) -> PlayGameState:
         last_move_uci=None,
         instance_id=0,
         pending_bot_move=user_color == chess.BLACK,
+        baseline_temperature=float(baseline_temperature),
     )
 
 
@@ -103,6 +125,7 @@ def resign_game(state: PlayGameState) -> PlayGameState:
         instance_id=state.instance_id,
         pending_bot_move=False,
         resigned=True,
+        baseline_temperature=state.baseline_temperature,
     )
 
 
@@ -118,6 +141,7 @@ def apply_legal_move(state: PlayGameState, move: chess.Move) -> PlayGameState:
         instance_id=state.instance_id + 1,
         pending_bot_move=not state.board.is_game_over() and state.board.turn != state.user_color,
         resigned=state.resigned,
+        baseline_temperature=state.baseline_temperature,
     )
 
 
@@ -135,6 +159,7 @@ def apply_bot_move(state: PlayGameState, bot: ChessBot) -> PlayGameState:
             instance_id=state.instance_id,
             pending_bot_move=False,
             resigned=state.resigned,
+            baseline_temperature=state.baseline_temperature,
         )
     if state.board.turn == state.user_color:
         return PlayGameState(
@@ -145,6 +170,7 @@ def apply_bot_move(state: PlayGameState, bot: ChessBot) -> PlayGameState:
             instance_id=state.instance_id,
             pending_bot_move=False,
             resigned=state.resigned,
+            baseline_temperature=state.baseline_temperature,
         )
 
     move = bot.choose_move(state.board)
@@ -157,7 +183,14 @@ def apply_bot_move(state: PlayGameState, bot: ChessBot) -> PlayGameState:
         instance_id=state.instance_id + 1,
         pending_bot_move=False,
         resigned=state.resigned,
+        baseline_temperature=state.baseline_temperature,
     )
+
+
+def take_bot_move_analysis(bot: ChessBot) -> BotMoveAnalysis | None:
+    """Return ``bot.last_move_analysis`` when present (baseline), else ``None``."""
+    analysis = getattr(bot, "last_move_analysis", None)
+    return analysis if isinstance(analysis, BotMoveAnalysis) else None
 
 
 def choose_bot_move_uci(bot: ChessBot, fen: str) -> str:

@@ -7,7 +7,8 @@ from pathlib import Path
 from typing import NamedTuple, TextIO
 
 from chess_teacher.utils.exception_utils import FileError
-from chess_teacher.utils.logging import EnhancedLogger, get_logger
+from chess_teacher.utils.logging.config import get_logger
+from chess_teacher.utils.logging.logger import EnhancedLogger
 
 
 class TextStreamSource(NamedTuple):

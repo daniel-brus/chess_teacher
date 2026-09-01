@@ -1,9 +1,11 @@
-from chess_teacher.other.dataclasses import RawEcoCode
+from __future__ import annotations
+
 from chess_teacher.pipelines.ingestion.raw_games import RawGame
 from chess_teacher.pipelines.modes import PipelineMode, preprocessing_transform_config
 from chess_teacher.pipelines.preprocessing.games import Game
 from chess_teacher.pipelines.preprocessing.move_characteristics import (
     AttackPressureTransformation,
+    CandidateEvaluationsTransformation,
     DiagonalOpennessTransformation,
     HangingValueTransformation,
     KingSafetyTransformation,
@@ -19,6 +21,7 @@ from chess_teacher.pipelines.preprocessing.move_characteristics import (
 )
 from chess_teacher.pipelines.preprocessing.move_extraction import ExtractUserMovesTransformation
 from chess_teacher.pipelines.preprocessing.moves import Move, MoveCharacteristics
+from chess_teacher.pipelines.preprocessing.opening_tables import RawEcoCode
 from chess_teacher.pipelines.preprocessing.transformations import (
     ApplyChessComOpeningLookupTransformation,
     ApplyLichessOpeningNameTransformation,
@@ -135,6 +138,7 @@ class EnrichMoveCharacteristicsStep(TransformStep):
                 MoveContextTransformation(),
                 MoveFlagsTransformation(),
                 StockfishEvaluationTransformation(depth=12, log_progress_percent=5),
+                CandidateEvaluationsTransformation(log_progress_percent=5),
             ],
             loading_strategy=LoadingStrategy.MERGE,
             merge_strategy=merge_strategy,

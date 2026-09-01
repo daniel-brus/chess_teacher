@@ -32,13 +32,15 @@ def _has_main_guard(module: ast.Module) -> bool:
 
 def test_script_entrypoints_use_run_script_main() -> None:
     missing: list[str] = []
-    for path in sorted(_SCRIPTS_DIR.glob("*.py")):
+    for path in sorted(_SCRIPTS_DIR.rglob("*.py")):
         if path.name == "__init__.py":
+            continue
+        if "dev" in path.parts:
             continue
         source = path.read_text(encoding="utf-8")
         module = ast.parse(source, filename=str(path))
         if not _has_main_guard(module):
             continue
         if "run_script_main" not in source:
-            missing.append(path.name)
+            missing.append(str(path.relative_to(_SCRIPTS_DIR)))
     assert not missing, f"Scripts missing run_script_main: {', '.join(missing)}"

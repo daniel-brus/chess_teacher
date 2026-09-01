@@ -1,6 +1,6 @@
 # Pipeline worker Job template (single source of truth).
 #
-# scripts/dispatcher.py loads this file and substitutes REPLACE_* placeholders.
+# scripts/entrypoints/dispatcher.py loads this file and substitutes REPLACE_* placeholders.
 # Manual smoke test: replace placeholders, then kubectl apply -f this file.
 #
 #   kubectl delete job pipeline-manual-example -n chess-teacher --ignore-not-found
@@ -37,7 +37,7 @@ spec:
         - name: pipeline
           image: REPLACE_PIPELINE_JOB_IMAGE
           imagePullPolicy: REPLACE_IMAGE_PULL_POLICY
-          command: ["python", "scripts/pipeline.py"]
+          command: ["python", "scripts/entrypoints/pipeline.py"]
           args:
             - --user-id
             - REPLACE_USER_ID

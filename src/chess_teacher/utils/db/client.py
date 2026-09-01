@@ -1023,6 +1023,11 @@ class DatabaseClient:
 
         self.ensure_indexes(table)
 
+    def ensure_tables(self, *tables: TableMetadata) -> None:
+        """Reconcile multiple tables against metadata (see :meth:`ensure_metadata`)."""
+        for table in tables:
+            self.ensure_metadata(table)
+
     def ensure_indexes(self, table: TableMetadata) -> None:
         """Create secondary indexes declared in metadata (idempotent)."""
         statements = table.create_indexes_sql()

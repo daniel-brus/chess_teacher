@@ -4,17 +4,15 @@ from __future__ import annotations
 
 import io
 import json
-import os
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
-from datetime import datetime
 from typing import Any
 from urllib.parse import urlparse
 
 import polars as pl
 
-from chess_teacher.platform.account import Account, AccountPlatform
-from chess_teacher.utils.logging import get_logger
+from chess_teacher.utils.env_utils import get_optional_env_variable
+from chess_teacher.utils.logging.config import get_logger
 
 logger = get_logger()
 
@@ -52,29 +50,6 @@ def _redis_endpoint_label(redis_url: str) -> str:
     return host
 
 
-def _account_to_cache_dict(account: Account) -> dict[str, Any]:
-    return {
-        "account_id": account.account_id,
-        "username": account.username,
-        "platform": account.platform.value,
-        "latest_ingestion": (
-            account.latest_ingestion.isoformat() if account.latest_ingestion is not None else None
-        ),
-    }
-
-
-def _account_from_cache_dict(data: dict[str, Any]) -> Account:
-    latest_ingestion = data.get("latest_ingestion")
-    return Account(
-        account_id=data["account_id"],
-        username=data["username"],
-        platform=AccountPlatform(data["platform"]),
-        latest_ingestion=(
-            datetime.fromisoformat(latest_ingestion) if latest_ingestion is not None else None
-        ),
-    )
-
-
 def _encode_polars(df: pl.DataFrame) -> bytes:
     buffer = io.BytesIO()
     df.write_parquet(buffer)
@@ -93,10 +68,10 @@ class CacheClient(ABC):
     def set_user_games(self, user_id: str, games: pl.DataFrame) -> None: ...
 
     @abstractmethod
-    def get_user_accounts(self, user_id: str) -> list[Account] | None: ...
+    def get_user_accounts(self, user_id: str) -> list[dict[str, Any]] | None: ...
 
     @abstractmethod
-    def set_user_accounts(self, user_id: str, accounts: Sequence[Account]) -> None: ...
+    def set_user_accounts(self, user_id: str, accounts: Sequence[dict[str, Any]]) -> None: ...
 
     @abstractmethod
     def get_log_level_hourly_counts(self) -> pl.DataFrame | None: ...
@@ -144,13 +119,20 @@ class RedisCacheClient(CacheClient):
             USER_GAMES_TTL_SECONDS,
         )
 
-    def get_user_accounts(self, user_id: str) -> list[Account] | None:
+    def get_user_accounts(self, user_id: str) -> list[dict[str, Any]] | None:
         key = user_accounts_cache_key(user_id)
         payload = self._get_json(key)
         if payload is None:
             logger.info("Redis user accounts cache miss user_id=%s key=%s", user_id, key)
             return None
-        accounts = [_account_from_cache_dict(item) for item in payload]
+        if not isinstance(payload, list):
+            logger.warning(
+                "Redis user accounts cache corrupt user_id=%s key=%s; treating as miss",
+                user_id,
+                key,
+            )
+            return None
+        accounts = [item for item in payload if isinstance(item, dict)]
         logger.info(
             "Redis user accounts cache hit user_id=%s key=%s count=%s",
             user_id,
@@ -159,9 +141,9 @@ class RedisCacheClient(CacheClient):
         )
         return accounts
 
-    def set_user_accounts(self, user_id: str, accounts: Sequence[Account]) -> None:
+    def set_user_accounts(self, user_id: str, accounts: Sequence[dict[str, Any]]) -> None:
         key = user_accounts_cache_key(user_id)
-        payload = [_account_to_cache_dict(account) for account in accounts]
+        payload = list(accounts)
         self._set_json(key, payload, USER_ACCOUNTS_TTL_SECONDS)
         logger.debug(
             "Redis user accounts cache populated user_id=%s key=%s count=%s ttl=%ss",
@@ -335,7 +317,7 @@ def get_cache_client() -> CacheClient | None:
     if _cache_client is not _UNSET:
         return _cache_client  # type: ignore[return-value]
 
-    redis_url = os.getenv("REDIS_URL", "").strip()
+    redis_url = get_optional_env_variable("REDIS_URL")
     if not redis_url:
         logger.debug("Redis cache disabled: REDIS_URL is not set.")
         _cache_client = None

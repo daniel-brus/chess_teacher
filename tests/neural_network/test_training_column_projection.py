@@ -24,6 +24,7 @@ def test_training_column_sets_exclude_pgn_and_unused_text() -> None:
     assert "cleaned_pgn" not in _GAME_TRAINING_COLUMNS
     assert "previous_opponent_move_san" not in _MOVE_TRAINING_COLUMNS
     assert "previous_opponent_move_san" not in _CHARS_TRAINING_COLUMNS
+    assert "candidate_evaluations" in _CHARS_TRAINING_COLUMNS
 
 
 def test_from_db_rows_uses_color_without_full_game() -> None:

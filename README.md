@@ -21,16 +21,15 @@ Streamlit chess teaching app with local dev infra (Postgres, MinIO, Redis via Do
 
 | Config | Purpose |
 |--------|---------|
-| `dev_local` | Local venv + Compose (`localhost` hosts) |
-| `dev_k3d` | k3d jobs (`host.k3d.internal` hosts) |
+| `dev_local` | Local venv + Compose (`localhost` hosts) + k3d staging (`make dev_k3d_up`) |
 | `ci` | GitHub Actions (Docker Hub, deploy SSH) |
 | `prod` | Production VPS / cloud sync source |
 
-Copy keys from [`.env.example`](.env.example) into Doppler `dev_local`, then duplicate to `dev_k3d` with k3d hostnames (see comments in that file).
+Copy keys from [`.env.example`](.env.example) into Doppler `dev_local`.
 
 ```powershell
 doppler login
-# Set secrets in dashboard for config dev_local (and dev_k3d)
+# Set secrets in dashboard for config dev_local
 ```
 
 ## Local development
@@ -53,12 +52,16 @@ make streamlit_docker
 
 Streamlit opens at `http://localhost:<APP_PORT>` (default `8502` from Doppler `dev_local`).
 
-### Optional: k3d (local Kubernetes)
+### Local k3d staging (prod-like)
+
+Runs Streamlit + ingestion CronJobs + pipeline Jobs against local Compose infra, using the **`develop` Docker image**. See [orchestration/k8s/README.md](orchestration/k8s/README.md).
 
 ```powershell
-make k8s_up          # requires dev_infra + dev_k3d Doppler config
-make streamlit_k8s   # port-forward to http://localhost:8501
+make dev_k3d_up         # infra (healthy) + k3d + Streamlit/CronJobs
+make streamlit_k3d      # port-forward only → http://localhost:8501
 ```
+
+Uses **`dev_local` Doppler only** — k3d host overrides are applied automatically (no second config).
 
 ### Cloud → local data clone
 
@@ -78,12 +81,13 @@ make dev_bootstrap_schema
 
 | Target | Description |
 |--------|-------------|
-| `dev_infra` | Start Postgres, MinIO, Redis |
+| `dev_infra` | Start Postgres, MinIO, Redis (no health wait) |
 | `dev_down` | Stop Compose stack |
-| `dev_bootstrap` | Start infra and wait until healthy |
+| `dev_bootstrap` | `dev_infra` + wait until healthy |
 | `streamlit_fg` | Streamlit in venv (Doppler `dev_local`) |
 | `streamlit_docker` | Streamlit container + infra |
-| `k8s_up` | Apply manifests to k3d |
+| `dev_k3d_up` | Bootstrap infra + k3d staging (Streamlit/CronJobs, `:develop`) |
+| `streamlit_k3d` | Port-forward to k3d Streamlit (`:8501`); does not start the app |
 | `dev_sync_cloud` | Full prod → local Postgres + MinIO sync |
 | `dev_bootstrap_schema` | `ensure_metadata` for all tables |
 

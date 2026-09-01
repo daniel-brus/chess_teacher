@@ -6,7 +6,11 @@ import os
 from pathlib import Path
 from typing import Any
 
+from chess_teacher.pipelines.neural_network.keras_weights import (
+    resolve_keras_weights_path,
+)
 from chess_teacher.utils.db.engine import postgres_url_string
+from chess_teacher.utils.env_utils import get_optional_env_variable
 from chess_teacher.utils.logging import get_logger
 from chess_teacher.utils.object_storage.factory import (
     build_s3_storage_settings,
@@ -52,16 +56,20 @@ class MLflowTracker:
         experiment_name: str | None = None,
     ) -> None:
         self.tracking_uri = (
-            tracking_uri or os.getenv("MLFLOW_TRACKING_URI") or postgres_url_string()
+            tracking_uri
+            or get_optional_env_variable("MLFLOW_TRACKING_URI")
+            or postgres_url_string()
         )
         self.experiment_name: str = (
-            experiment_name or os.getenv("MLFLOW_EXPERIMENT_NAME") or self.DEFAULT_EXPERIMENT
+            experiment_name
+            or get_optional_env_variable("MLFLOW_EXPERIMENT_NAME")
+            or self.DEFAULT_EXPERIMENT
         )
 
     @staticmethod
     def artifact_root() -> str:
         """S3 URI under existing bucket + STORAGE_ROOT/mlflow."""
-        explicit = os.getenv("MLFLOW_ARTIFACT_ROOT")
+        explicit = get_optional_env_variable("MLFLOW_ARTIFACT_ROOT")
         if explicit:
             return explicit.rstrip("/")
         return s3_url_string("mlflow")
@@ -107,13 +115,12 @@ class MLflowTracker:
         """Resolve a local ``.keras`` file from a file path or MLflow/S3 artifact URI."""
         if not model_uri:
             return None
-        if model_uri.startswith("file:"):
-            path = Path(model_uri.removeprefix("file:"))
-            return path if path.is_file() else None
-        local_candidate = Path(model_uri)
-        if local_candidate.is_file():
-            return local_candidate
 
+        direct = resolve_keras_weights_path(model_uri)
+        if direct is not None:
+            return direct
+
+        # ``runs:/`` and other MLflow-only URIs (training / promotion tooling).
         self.configure()
         import mlflow
 

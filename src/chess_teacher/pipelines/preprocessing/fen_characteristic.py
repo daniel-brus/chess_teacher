@@ -13,12 +13,20 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterator
 from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
 from contextlib import contextmanager
+from dataclasses import dataclass
 from multiprocessing import shared_memory
 from typing import Any, TypeVar, cast
 
 import polars as pl
 
+from chess_teacher.pipelines.preprocessing.fen_checkpoint import (
+    CHECKPOINT_MERGE,
+    checkpoint_percent_from_env,
+)
+from chess_teacher.utils.db.client import DatabaseClient
+from chess_teacher.utils.env_utils import get_optional_env_variable
 from chess_teacher.utils.exception_utils import TransformationError
+from chess_teacher.utils.metadata_utils import TableMetadata
 from chess_teacher.utils.pipeline_utils.dataframe_transformation import DataFrameTransformation
 from chess_teacher.utils.process_utils import WorkerSafeLogger, is_parent_process
 
@@ -32,8 +40,17 @@ TScore = TypeVar("TScore")
 _logger = WorkerSafeLogger(__name__)
 
 
+@dataclass(frozen=True, slots=True)
+class _CheckpointMove:
+    move_id: str
+    game_id: str
+    account_id: str
+    fen_before: str
+    fen_after: str
+
+
 def _default_fen_eval_workers() -> int:
-    if env := os.getenv("STOCKFISH_WORKERS"):
+    if env := get_optional_env_variable("STOCKFISH_WORKERS"):
         return max(1, int(env))
     if hasattr(os, "sched_getaffinity"):
         cpu_count = len(os.sched_getaffinity(0))
@@ -42,7 +59,7 @@ def _default_fen_eval_workers() -> int:
     return max(1, cpu_count - 1)
 
 
-def _split_fen_list(fens: list[str], n_chunks: int) -> list[list[str]]:
+def _split_fen_list[TItem](fens: list[TItem], n_chunks: int) -> list[list[TItem]]:
     if n_chunks <= 1 or not fens:
         return [fens]
     n_chunks = min(n_chunks, len(fens))
@@ -132,14 +149,101 @@ class FenCharacteristicTransformation(DataFrameTransformation, ABC):
         *,
         log_progress_percent: int | None = _DEFAULT_LOG_PROGRESS_PERCENT,
         n_workers: int | None = None,
+        checkpoint_percent: int | None = None,
     ) -> None:
         if log_progress_percent is not None and not 1 <= log_progress_percent <= 100:
             raise ValueError("log_progress_percent must be between 1 and 100, or None")
         if n_workers is not None and n_workers <= 0:
             raise ValueError("n_workers must be a positive int or None")
+        if checkpoint_percent is not None and not 1 <= checkpoint_percent <= 100:
+            raise ValueError("checkpoint_percent must be between 1 and 100, or None")
         self.log_progress_percent = log_progress_percent
         self.n_workers = n_workers if n_workers is not None else _default_fen_eval_workers()
+        self.checkpoint_percent = (
+            checkpoint_percent_from_env("FEN_EVAL_CHECKPOINT_PERCENT")
+            if checkpoint_percent is None
+            else checkpoint_percent
+        )
         self._worker_init_kwargs: dict[str, object] = {}
+        self._db_client: DatabaseClient | None = None
+        self._table_metadata: TableMetadata | None = None
+        self._fen_scores: dict[str, float] = {}
+        self._checkpoint_moves: list[_CheckpointMove] = []
+
+    def bind_checkpoint(
+        self,
+        *,
+        db_client: DatabaseClient,
+        table_metadata: TableMetadata,
+    ) -> None:
+        self._db_client = db_client
+        self._table_metadata = table_metadata
+
+    def _checkpoint_enabled(self) -> bool:
+        return (
+            self._db_client is not None
+            and self._table_metadata is not None
+            and self.checkpoint_percent is not None
+        )
+
+    def _prepare_checkpoint_rows(self, df: pl.DataFrame) -> None:
+        self._fen_scores = {}
+        required = ("move_id", "game_id", "account_id", "fen_before", "fen_after")
+        if any(column not in df.columns for column in required):
+            self._checkpoint_moves = []
+            return
+        move_ids = df["move_id"].cast(pl.Utf8).to_list()
+        game_ids = df["game_id"].cast(pl.Utf8).to_list()
+        account_ids = df["account_id"].cast(pl.Utf8).to_list()
+        fens_before = df["fen_before"].cast(pl.Utf8).to_list()
+        fens_after = df["fen_after"].cast(pl.Utf8).to_list()
+        self._checkpoint_moves = [
+            _CheckpointMove(move_id, game_id, account_id, fen_before, fen_after)
+            for move_id, game_id, account_id, fen_before, fen_after in zip(
+                move_ids,
+                game_ids,
+                account_ids,
+                fens_before,
+                fens_after,
+                strict=True,
+            )
+        ]
+
+    def _maybe_checkpoint_fen_batch(self, new_scores: dict[str, float]) -> None:
+        if not self._checkpoint_enabled() or not new_scores:
+            return
+        self._fen_scores.update(new_scores)
+        touched_fens = set(new_scores)
+        rows: list[dict[str, object]] = []
+        for move in self._checkpoint_moves:
+            if move.fen_before not in touched_fens and move.fen_after not in touched_fens:
+                continue
+            before = self._fen_scores.get(move.fen_before)
+            after = self._fen_scores.get(move.fen_after)
+            if before is None and after is None:
+                continue
+            row: dict[str, object] = {
+                "move_id": move.move_id,
+                "game_id": move.game_id,
+                "account_id": move.account_id,
+            }
+            if before is not None:
+                row[self.before_column()] = before
+            if after is not None:
+                row[self.after_column()] = after
+            if before is not None and after is not None:
+                row[self.delta_column()] = after - before
+            rows.append(row)
+        if not rows:
+            return
+        assert self._db_client is not None and self._table_metadata is not None
+        self._db_client.merge(pl.DataFrame(rows), self._table_metadata, strategy=CHECKPOINT_MERGE)
+        _logger.info(
+            "%s: checkpointed %d move row(s) for %d FEN score(s).",
+            type(self).__name__,
+            len(rows),
+            len(new_scores),
+        )
 
     def before_column(self) -> str:
         return f"{self.characteristic_name}_before"
@@ -181,12 +285,15 @@ class FenCharacteristicTransformation(DataFrameTransformation, ABC):
         return unique_fens, [str(fen) for fen in fen_before], [str(fen) for fen in fen_after]
 
     def _evaluate_fens_serial(self, unique_fens: list[str]) -> dict[str, float]:
-        return self._evaluate_fens_serial_with(unique_fens, self._score_fen)
+        on_batch = self._maybe_checkpoint_fen_batch if self._checkpoint_enabled() else None
+        return self._evaluate_fens_serial_with(unique_fens, self._score_fen, on_scores_batch=on_batch)
 
     def _evaluate_fens_serial_with(
         self,
         unique_fens: list[str],
         score_fn: Callable[[str], TScore],
+        *,
+        on_scores_batch: Callable[[dict[str, TScore]], None] | None = None,
     ) -> dict[str, TScore]:
         scores: dict[str, TScore] = {}
         total_fens = len(unique_fens)
@@ -194,9 +301,24 @@ class FenCharacteristicTransformation(DataFrameTransformation, ABC):
         report: Callable[[int, int], None] | None = (
             self._report_fen_progress if self.log_progress_percent is not None else None
         )
+        pending_batch: dict[str, TScore] = {}
+        last_checkpoint_percent = 0
         with self._evaluation_context():
             for index, fen in enumerate(unique_fens):
-                scores[fen] = score_fn(fen)
+                score = score_fn(fen)
+                scores[fen] = score
+                if on_scores_batch is not None and self.checkpoint_percent is not None:
+                    pending_batch[fen] = score
+                    completed = index + 1
+                    current_percent = (completed * 100) // total_fens if total_fens else 100
+                    if (
+                        current_percent >= last_checkpoint_percent + self.checkpoint_percent
+                        or completed >= total_fens
+                    ):
+                        while current_percent >= last_checkpoint_percent + self.checkpoint_percent:
+                            last_checkpoint_percent += self.checkpoint_percent
+                        on_scores_batch(pending_batch)  # type: ignore[arg-type]
+                        pending_batch = {}
                 last_logged_percent = _advance_fen_progress(
                     completed=index + 1,
                     total=total_fens,
@@ -204,6 +326,8 @@ class FenCharacteristicTransformation(DataFrameTransformation, ABC):
                     last_logged_percent=last_logged_percent,
                     report=report,
                 )
+        if on_scores_batch is not None and pending_batch:
+            on_scores_batch(pending_batch)  # type: ignore[arg-type]
         return scores
 
     def _run_fen_pool(
@@ -212,6 +336,8 @@ class FenCharacteristicTransformation(DataFrameTransformation, ABC):
         submit_chunk: Callable[
             [ProcessPoolExecutor, int, list[str], str], Future[dict[str, TScore]]
         ],
+        *,
+        on_scores_batch: Callable[[dict[str, TScore]], None] | None = None,
     ) -> dict[str, TScore]:
         chunks = _split_fen_list(unique_fens, self.n_workers)
         n_chunks = len(chunks)
@@ -248,7 +374,10 @@ class FenCharacteristicTransformation(DataFrameTransformation, ABC):
                     done, pending = wait(pending, timeout=2.0, return_when=FIRST_COMPLETED)
                     completed_fens = _sum_shared_fen_progress(progress_buf, n_chunks)
                     for future in done:
-                        scores.update(future.result())
+                        chunk_scores = future.result()
+                        scores.update(chunk_scores)
+                        if on_scores_batch is not None:
+                            on_scores_batch(chunk_scores)
                         completed_chunks += 1
                         _logger.info(
                             "%s: worker chunk finished (%d / %d chunks complete, %d scores so far).",
@@ -283,7 +412,12 @@ class FenCharacteristicTransformation(DataFrameTransformation, ABC):
             progress_shm.close()
             progress_shm.unlink()
 
-    def _evaluate_fens_parallel(self, unique_fens: list[str]) -> dict[str, float]:
+    def _evaluate_fens_parallel(
+        self,
+        unique_fens: list[str],
+        *,
+        on_scores_batch: Callable[[dict[str, float]], None] | None = None,
+    ) -> dict[str, float]:
         transformation_cls = type(self)
 
         def submit_chunk(
@@ -301,9 +435,10 @@ class FenCharacteristicTransformation(DataFrameTransformation, ABC):
                 progress_shm_name,
             )
 
-        return self._run_fen_pool(unique_fens, submit_chunk)
+        return self._run_fen_pool(unique_fens, submit_chunk, on_scores_batch=on_scores_batch)
 
     def _evaluate_unique_fens(self, unique_fens: list[str]) -> dict[str, float]:
+        on_batch = self._maybe_checkpoint_fen_batch if self._checkpoint_enabled() else None
         total_fens = len(unique_fens)
         use_parallel = self.n_workers > 1 and total_fens >= _MIN_PARALLEL_FENS
 
@@ -315,7 +450,7 @@ class FenCharacteristicTransformation(DataFrameTransformation, ABC):
                 total_fens,
                 self.n_workers,
             )
-            return self._evaluate_fens_parallel(unique_fens)
+            return self._evaluate_fens_parallel(unique_fens, on_scores_batch=on_batch)
 
         _logger.info(
             "%s: using serial evaluation (%d unique FEN(s), progress every %s%%).",
@@ -333,6 +468,9 @@ class FenCharacteristicTransformation(DataFrameTransformation, ABC):
             )
         if df.height == 0:
             return df
+
+        if self._db_client is not None:
+            self._prepare_checkpoint_rows(df)
 
         after_column = self.after_column()
         delta_column = self.delta_column()

@@ -8,7 +8,8 @@ from typing import TYPE_CHECKING, TextIO
 
 from chess_teacher.utils.exception_utils import FileReadError
 from chess_teacher.utils.files.file_utils import FileType, TextStreamSource, validate_existing_file
-from chess_teacher.utils.logging import EnhancedLogger, get_logger
+from chess_teacher.utils.logging.config import get_logger
+from chess_teacher.utils.logging.logger import EnhancedLogger
 
 if TYPE_CHECKING:
     from chess_teacher.utils.object_storage.base import ObjectStorage

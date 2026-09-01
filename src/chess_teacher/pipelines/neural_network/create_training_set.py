@@ -31,6 +31,10 @@ _SQL_MOVES_WITH_CHARS = """
               AND mc.candidate_evaluations IS NOT NULL
 """
 
+# Large move_characteristics JSONB + parallel hash join can OOM Postgres workers on
+# memory-tight hosts (e.g. after a train batch). Keep these scans single-threaded.
+_MOVES_QUERY_SESSION_SETTINGS = {"max_parallel_workers_per_gather": "0"}
+
 # Domain scales tuned against local games.move_characteristics (n=825, dev_local).
 # Absolute mate-like evals (~±100) intentionally saturate under tanh.
 _EVAL_TANH_SCALE = 5.0  # typical |eval| p95 ~8-11; mates → ±1
@@ -193,6 +197,7 @@ _CHARS_TRAINING_COLUMNS: list[str] = list(
         *(black for _, black, _, _ in _SIDE_METRIC_PAIRS),
         *_PASSTHROUGH_NUMERIC_ATTRS,
         *_PASSTHROUGH_BOOL_ATTRS,
+        "candidate_evaluations",
     ])
 )
 
@@ -979,9 +984,28 @@ class TrainingDataStore:
     def __init__(self, db_client: DatabaseClient | None = None) -> None:
         self._db = db_client or get_db_client()
 
+    def _ensure_training_tables(self) -> None:
+        self._db.ensure_tables(
+            Move.get_metadata(),
+            Game.get_metadata(),
+            MoveCharacteristics.get_metadata(),
+        )
+
+    def _query_moves_sql(
+        self,
+        sql: str,
+        params: dict[str, Any] | list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        return self._db.engine.execute_parameterized_query(
+            sql,
+            params,
+            session_settings=_MOVES_QUERY_SESSION_SETTINGS,
+        )
+
     def _datums_from_moves(self, moves: list[Move]) -> list[TrainingDatum]:
         if not moves:
             return []
+        self._ensure_training_tables()
         game_ids = sorted({m.game_id for m in moves})
         move_ids = [m.move_id for m in moves]
         move_id_list = ", ".join(quote_literal(mid) for mid in move_ids)
@@ -1079,12 +1103,13 @@ class TrainingDataStore:
 
     def count_since(self, cutoff: datetime | None) -> int:
         """Count platform moves with characteristics and ``games.end_time`` after cutoff."""
+        self._ensure_training_tables()
         sql = f"SELECT COUNT(*) AS n{_SQL_MOVES_WITH_CHARS}"
         params: dict[str, Any] = {}
         if cutoff is not None:
             sql += " AND g.end_time > :cutoff"
             params["cutoff"] = cutoff
-        rows = self._db.engine.execute_parameterized_query(sql, params)
+        rows = self._query_moves_sql(sql, params)
         return int(rows[0]["n"]) if rows else 0
 
     def fetch_since(
@@ -1102,6 +1127,7 @@ class TrainingDataStore:
         that boundary timestamp so the next cutoff ``end_time > max`` cannot skip
         the rest of the game / same-second games.
         """
+        self._ensure_training_tables()
         sql = f"SELECT m.move_id AS move_id, g.end_time AS end_time{_SQL_MOVES_WITH_CHARS}"
         params: dict[str, Any] = {}
         if cutoff is not None:
@@ -1117,7 +1143,7 @@ class TrainingDataStore:
             cutoff,
             limit,
         )
-        rows = self._db.engine.execute_parameterized_query(sql, params)
+        rows = self._query_moves_sql(sql, params)
         if not rows:
             return [], None
 
@@ -1130,10 +1156,7 @@ class TrainingDataStore:
                 " AND g.end_time = :boundary"
                 " ORDER BY m.game_id ASC, m.move_nr ASC"
             )
-            at_boundary = self._db.engine.execute_parameterized_query(
-                expand_sql,
-                {"boundary": max_end_time},
-            )
+            at_boundary = self._query_moves_sql(expand_sql, {"boundary": max_end_time})
             rows = prefix + list(at_boundary)
 
         move_ids = [str(r["move_id"]) for r in rows]
@@ -1155,6 +1178,7 @@ class TrainingDataStore:
         """
         if limit <= 0:
             return []
+        self._ensure_training_tables()
         params: dict[str, Any] = {"limit": limit}
         if seed is not None:
             order = "ORDER BY md5(m.move_id || :seed_text)"
@@ -1162,7 +1186,7 @@ class TrainingDataStore:
         else:
             order = "ORDER BY random()"
         sql = f"SELECT m.move_id AS move_id{_SQL_MOVES_WITH_CHARS} {order} LIMIT :limit"
-        rows = self._db.engine.execute_parameterized_query(sql, params)
+        rows = self._query_moves_sql(sql, params)
         if not rows:
             return []
         move_ids = [str(r["move_id"]) for r in rows]

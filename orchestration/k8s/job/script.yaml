@@ -1,26 +1,21 @@
-# One-off script Job template (long-lived prod ops: backfill, baseline reset/train).
+# One-off script Job template (entrypoints or ops under scripts/).
 #
-# scripts/run_script_job.py loads this file and substitutes REPLACE_* placeholders.
-# Manual smoke test: replace placeholders, then kubectl apply -f this file.
+# Prefer the VPS wrapper (deployed by CD next to this file):
 #
-#   export PIPELINE_JOB_IMAGE="$(kubectl get deploy streamlit -n chess-teacher \
-#     -o jsonpath='{.spec.template.spec.containers[0].image}')"
-#   # edit placeholders below, then:
-#   kubectl delete job script-backfill-manual -n chess-teacher --ignore-not-found
-#   kubectl apply -f orchestration/k8s/job/script.yaml
-#   kubectl logs -n chess-teacher job/script-backfill-manual -f
+#   /opt/chess_teacher/k8s/run-script-job.sh baseline_training
+#   /opt/chess_teacher/k8s/run-script-job.sh backfill_candidate_evals -- --workers 4
 #
-# Examples (from repo checkout on VPS with kubectl + kubeconfig):
+# From a repo checkout with kubectl:
 #
-#   python scripts/run_script_job.py backfill_candidate_evals -- --workers 4
-#   python scripts/run_script_job.py baseline_reset_training -- --yes
-#   python scripts/run_script_job.py baseline_train_until_caught_up
+#   python scripts/utils/run_script_job.py baseline_training --dry-run
+#   python scripts/utils/run_script_job.py ops/backfill_candidate_evals.py -- --workers 4
 #
 # Placeholders:
-#   REPLACE_JOB_NAME            — unique Job name (CLI generates per run)
-#   REPLACE_SCRIPT_JOB_IMAGE    — container image (PIPELINE_JOB_IMAGE / streamlit tag)
+#   REPLACE_JOB_NAME            — unique Job name
+#   REPLACE_SCRIPT_JOB_IMAGE    — container image
 #   REPLACE_IMAGE_PULL_POLICY   — IfNotPresent or Always
-#   REPLACE_SCRIPT_BASENAME     — e.g. backfill_candidate_evals.py (whitelist only)
+#   REPLACE_SCRIPT_PATH         — path under scripts/, e.g. entrypoints/baseline_training.py
+#   REPLACE_SCRIPT_LABEL        — basename for k8s labels (no slashes), e.g. baseline_training.py
 #   REPLACE_SCRIPT_ARGS         — YAML list, e.g. [] or ["--workers", "4"]
 #
 # Optional v1.1: add resources.requests/limits for CPU-heavy backfill (--workers 4).
@@ -32,7 +27,7 @@ metadata:
   labels:
     app: chess-teacher
     chess-teacher.io/job-type: script
-    chess-teacher.io/script: REPLACE_SCRIPT_BASENAME
+    chess-teacher.io/script: REPLACE_SCRIPT_LABEL
 spec:
   backoffLimit: 1
   ttlSecondsAfterFinished: 604800
@@ -41,14 +36,14 @@ spec:
       labels:
         app: chess-teacher
         chess-teacher.io/job-type: script
-        chess-teacher.io/script: REPLACE_SCRIPT_BASENAME
+        chess-teacher.io/script: REPLACE_SCRIPT_LABEL
     spec:
       restartPolicy: Never
       containers:
         - name: script
           image: REPLACE_SCRIPT_JOB_IMAGE
           imagePullPolicy: REPLACE_IMAGE_PULL_POLICY
-          command: ["python", "scripts/REPLACE_SCRIPT_BASENAME"]
+          command: ["python", "scripts/REPLACE_SCRIPT_PATH"]
           args: REPLACE_SCRIPT_ARGS
           envFrom:
             - secretRef:

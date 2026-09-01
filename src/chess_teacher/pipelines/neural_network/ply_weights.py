@@ -16,11 +16,10 @@ Knobs (env, optional):
 
 from __future__ import annotations
 
-import os
-
 import numpy as np
 
 from chess_teacher.pipelines.neural_network.candidate_eval import CANDIDATE_MOVE_FEAT_KEYS
+from chess_teacher.utils.env_utils import get_optional_env_variable
 from chess_teacher.utils.logging import get_logger
 
 logger = get_logger()
@@ -39,8 +38,8 @@ _ATANH_CLIP = 0.999
 
 
 def _env_float(name: str, default: float, *, min_value: float | None = None) -> float:
-    raw = os.getenv(name)
-    if raw is None or not str(raw).strip():
+    raw = get_optional_env_variable(name)
+    if not raw:
         return float(default)
     try:
         value = float(raw)

@@ -4,7 +4,7 @@ import altair as alt
 import polars as pl
 import streamlit as st
 
-from chess_teacher.other.game_statistics import (
+from chess_teacher.analytics.game_statistics import (
     RESULT_LABELS,
     TIME_CONTROL_CLASSES,
     ColorBreakdown,

@@ -250,9 +250,9 @@ class User(TableDataClass):
         """Fetch platform accounts linked to this user via the bridge table."""
         cache = get_cache_client()
         if cache is not None:
-            cached_accounts = cache.get_user_accounts(self.user_id)
-            if cached_accounts is not None:
-                return cached_accounts
+            cached_payload = cache.get_user_accounts(self.user_id)
+            if cached_payload is not None:
+                return [Account.from_cache_dict(item) for item in cached_payload]
 
         accounts = self._load_linked_accounts_from_db(db_client)
         logger.info(
@@ -262,15 +262,18 @@ class User(TableDataClass):
         )
 
         if cache is not None:
-            cache.set_user_accounts(self.user_id, accounts)
+            cache.set_user_accounts(
+                self.user_id,
+                [account.to_cache_dict() for account in accounts],
+            )
 
         return accounts
 
     def _load_linked_accounts_from_db(self, db_client: DatabaseClient) -> list[Account]:
-        db_client.ensure_table(Account.get_metadata())
+        db_client.ensure_metadata(Account.get_metadata())
 
         br_metadata = UserAccount.get_metadata()
-        db_client.ensure_table(br_metadata)
+        db_client.ensure_metadata(br_metadata)
 
         user_accounts = db_client.read(
             br_metadata,
@@ -293,7 +296,7 @@ class User(TableDataClass):
     def unlink_all_accounts(self, db_client: DatabaseClient) -> None:
         """Delete all bridge rows for this user. Platform account rows are kept."""
         br_metadata = UserAccount.get_metadata()
-        db_client.ensure_table(br_metadata)
+        db_client.ensure_metadata(br_metadata)
 
         user_accounts = db_client.read(
             br_metadata,

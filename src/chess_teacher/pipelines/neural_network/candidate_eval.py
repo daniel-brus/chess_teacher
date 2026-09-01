@@ -4,8 +4,10 @@ Search method (train + live must match)
 ---------------------------------------
 All legal moves are scored with **one MultiPV search** on ``fen_before`` via
 ``Stockfish.get_top_moves(n_legal, num_nodes=...)`` (white POV). Prefer a fixed
-``num_nodes`` budget so train/backfill/play stay aligned. SF scores are
-**backfilled** into ``candidate_evaluations``.
+``num_nodes`` budget so train/backfill/play stay aligned. SF scores are backfilled into ``candidate_evaluations`` during preprocessing
+(:class:`~chess_teacher.pipelines.preprocessing.move_characteristics.candidate_evaluations.CandidateEvaluationsTransformation`
+in :class:`~chess_teacher.pipelines.preprocessing.pipeline_steps.EnrichMoveCharacteristicsStep`)
+or ``scripts/ops/backfill_candidate_evals.py`` for one-off historical fills.
 
 Non-SF candidate features (train + live must match)
 ---------------------------------------------------
@@ -52,6 +54,7 @@ from chess_teacher.utils.chess_utils import (
     move_is_en_passant,
     move_is_promotion,
 )
+from chess_teacher.utils.env_utils import get_optional_env_variable
 from chess_teacher.utils.logging import get_logger
 
 logger = get_logger()
@@ -62,16 +65,14 @@ CANDIDATE_STOCKFISH_DEPTH = 12
 CANDIDATE_STOCKFISH_NODES = 50_000
 # Live Play uses a much smaller budget - 50k MultiPV over ~20-40 legals is minutes/move.
 # Override with env BASELINE_LIVE_CANDIDATE_NODES. Train/backfill stay at 50k.
-LIVE_CANDIDATE_STOCKFISH_NODES = 3_000
+LIVE_CANDIDATE_STOCKFISH_NODES = 1_000
 CANDIDATE_SEARCH_METHOD = "multipv_nodes"
 
 
 def live_candidate_stockfish_nodes() -> int:
     """Node budget for Play MultiPV (env override, else ``LIVE_CANDIDATE_STOCKFISH_NODES``)."""
-    import os
-
-    raw = os.getenv("BASELINE_LIVE_CANDIDATE_NODES")
-    if raw is None or not str(raw).strip():
+    raw = get_optional_env_variable("BASELINE_LIVE_CANDIDATE_NODES")
+    if not raw:
         return int(LIVE_CANDIDATE_STOCKFISH_NODES)
     try:
         return max(0, int(raw))

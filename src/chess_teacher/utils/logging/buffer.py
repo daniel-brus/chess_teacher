@@ -7,12 +7,12 @@ import logging
 import os
 import threading
 import time
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import TextIO
 
 from chess_teacher.utils.env_utils import get_env_variable, get_hostname
 from chess_teacher.utils.exception_utils import ConfigError
+from chess_teacher.utils.general_utils import get_current_datetime
 
 LOG_STORAGE_PREFIX = "logs/python/buffer"
 READY_SUFFIX = ".ready"
@@ -224,7 +224,7 @@ class SegmentFileHandler(logging.Handler):
         return (time.monotonic() - self._opened_at) >= self.interval_seconds
 
     def _closed_segment_path(self) -> Path:
-        now = datetime.now(UTC)
+        now = get_current_datetime()
         date_path = now.strftime("%Y/%m/%d")
         timestamp = now.strftime("%H%M%SZ")
         return (
