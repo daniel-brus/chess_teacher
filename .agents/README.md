@@ -2,6 +2,12 @@
 
 Version-controlled Cursor agent skills live under [`.agents/skills/`](skills/).
 
+Planning docs for agents:
+
+| Doc | Topic |
+|-----|--------|
+| [ml-training-roadmap.md](docs/ml-training-roadmap.md) | Baseline + user-bot ML phases (eval splits, personalization, recency) |
+
 | Skill | Invoke |
 |-------|--------|
 | [chess-teacher-db](skills/chess-teacher-db/) | `/chess-teacher-db` |

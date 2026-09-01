@@ -1,5 +1,7 @@
 """Baseline training + promotion pipeline entrypoints.
 
+Roadmap: ``.agents/docs/ml-training-roadmap.md`` (Phase 4+ wires held-out eval here).
+
 Follow-ups (not wired here yet):
 - ``run_user_finetune_pipeline(user_id)`` — hook from daily ``PipelineRunner`` after preprocess.
 - Held-out validation set with periodic rotation (replace ``RandomEvalSetProvider``).
