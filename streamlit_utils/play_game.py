@@ -10,7 +10,7 @@ import chess
 from chess_teacher.bots import ChessBot, get_bot_preset
 from chess_teacher.bots.move_analysis import BotMoveAnalysis
 from chess_teacher.bots.presets import BASELINE_PRESET_PREFIX, BASELINE_TEMPERATURE_DEFAULT
-from chess_teacher.utils.db.client import DatabaseClient, get_db_client
+from chess_teacher.utils.db.client import DatabaseClient
 
 
 @dataclass
@@ -79,9 +79,8 @@ def create_bot(
     on_progress: Callable[[str], None] | None = None,
 ) -> ChessBot:
     progress = on_progress or (lambda _message: None)
-    client = db_client if db_client is not None else get_db_client()
     progress("Loading opponent settings…")
-    preset = get_bot_preset(preset_key, db_client=client)
+    preset = get_bot_preset(preset_key, db_client=db_client)
     if preset_key.startswith(BASELINE_PRESET_PREFIX):
         temperature = (
             BASELINE_TEMPERATURE_DEFAULT
