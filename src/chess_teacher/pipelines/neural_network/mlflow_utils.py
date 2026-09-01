@@ -6,6 +6,9 @@ import os
 from pathlib import Path
 from typing import Any
 
+from chess_teacher.pipelines.neural_network.keras_weights import (
+    resolve_keras_weights_path,
+)
 from chess_teacher.utils.db.engine import postgres_url_string
 from chess_teacher.utils.env_utils import get_optional_env_variable
 from chess_teacher.utils.logging import get_logger
@@ -112,13 +115,12 @@ class MLflowTracker:
         """Resolve a local ``.keras`` file from a file path or MLflow/S3 artifact URI."""
         if not model_uri:
             return None
-        if model_uri.startswith("file:"):
-            path = Path(model_uri.removeprefix("file:"))
-            return path if path.is_file() else None
-        local_candidate = Path(model_uri)
-        if local_candidate.is_file():
-            return local_candidate
 
+        direct = resolve_keras_weights_path(model_uri)
+        if direct is not None:
+            return direct
+
+        # ``runs:/`` and other MLflow-only URIs (training / promotion tooling).
         self.configure()
         import mlflow
 

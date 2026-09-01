@@ -7,6 +7,7 @@ Replaces the fixed-vocab policy head. Parent weights load only when compatible w
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -168,17 +169,35 @@ def model_is_candidate_style_compatible(
         return False
 
 
+_LOADED_CANDIDATE_STYLE_MODELS: dict[tuple[str, int], Any] = {}
+
+
+def clear_candidate_style_model_cache() -> None:
+    """Drop in-process Keras models (tests / memory pressure)."""
+    _LOADED_CANDIDATE_STYLE_MODELS.clear()
+
+
 def load_candidate_style_from_uri(
     model_uri: str,
     *,
     tracker: Any | None = None,
     max_candidates: int = MAX_CANDIDATES,
     require_compatible: bool = True,
+    on_progress: Callable[[str], None] | None = None,
 ) -> Any:
+    progress = on_progress or (lambda _message: None)
+    cache_key = (model_uri, int(max_candidates))
+    cached = _LOADED_CANDIDATE_STYLE_MODELS.get(cache_key)
+    if cached is not None:
+        progress("Using cached TensorFlow model…")
+        return cached
+
     from chess_teacher.pipelines.neural_network.mlflow_utils import MLflowTracker
 
+    progress("Fetching model weights from storage…")
     mlflow_tracker = tracker or MLflowTracker()
     weights_path = mlflow_tracker.require_keras_weights(model_uri)
+    progress("Loading model into TensorFlow…")
     model = load_candidate_style_keras(
         weights_path, max_candidates=max_candidates, compile_model=False
     )
@@ -190,6 +209,7 @@ def load_candidate_style_from_uri(
             f"(output_shape={getattr(model, 'output_shape', None)}, "
             f"want MAX={max_candidates} feat_dim={MOVE_FEAT_DIM})"
         )
+    _LOADED_CANDIDATE_STYLE_MODELS[cache_key] = model
     return model
 
 

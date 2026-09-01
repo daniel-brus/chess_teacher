@@ -29,6 +29,7 @@ def chess_board(
     disabled: bool = False,
     last_move_uci: str | None = None,
     instance_id: int = 0,
+    show_status: bool = False,
 ) -> dict[str, Any] | None:
     """Render an interactive chessboard with promotion chooser.
 
@@ -42,6 +43,7 @@ def chess_board(
         disabled=bool(disabled),
         last_move_uci=last_move_uci or "",
         instance_id=int(instance_id),
+        show_status=bool(show_status),
         key=key,
         default=None,
     )

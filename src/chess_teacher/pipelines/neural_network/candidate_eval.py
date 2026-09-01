@@ -63,7 +63,7 @@ CANDIDATE_STOCKFISH_DEPTH = 12
 CANDIDATE_STOCKFISH_NODES = 50_000
 # Live Play uses a much smaller budget - 50k MultiPV over ~20-40 legals is minutes/move.
 # Override with env BASELINE_LIVE_CANDIDATE_NODES. Train/backfill stay at 50k.
-LIVE_CANDIDATE_STOCKFISH_NODES = 3_000
+LIVE_CANDIDATE_STOCKFISH_NODES = 1_000
 CANDIDATE_SEARCH_METHOD = "multipv_nodes"
 
 
