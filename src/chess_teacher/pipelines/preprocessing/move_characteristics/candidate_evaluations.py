@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import os
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from concurrent.futures import Future, ProcessPoolExecutor
 from dataclasses import dataclass
 from typing import Any
@@ -154,7 +154,7 @@ class CandidateEvaluationsTransformation(DataFrameTransformation):
 
     def _rows_for_fen_payloads(
         self,
-        fen_payloads: dict[str, dict[str, Any] | None],
+        fen_payloads: Mapping[str, dict[str, Any] | None],
     ) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
         for fen, payload in fen_payloads.items():
