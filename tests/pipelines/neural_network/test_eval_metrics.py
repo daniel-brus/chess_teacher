@@ -11,7 +11,12 @@ from chess_teacher.pipelines.neural_network.candidate_eval import (
 from chess_teacher.pipelines.neural_network.eval_metrics import (
     EvalMetrics,
     compute_candidate_style_metrics,
+    details_from_packed,
+    format_error_shortlist,
     format_eval_delta,
+    format_phase_eval_rows,
+    phase_from_features,
+    slice_datums_by_phase,
 )
 
 
@@ -120,3 +125,89 @@ def test_format_eval_delta_signs_and_informational_flags() -> None:
     assert "disagree_t1=+0.0200" in text
     assert "informational_beats_top1=true" in text
     assert "informational_beats_disagree=true" in text
+
+
+def test_phase_from_features_opening_middle_endgame() -> None:
+    assert (
+        phase_from_features({"is_opening": True, "is_middle_game": False, "is_end_game": False})
+        == "opening"
+    )
+    assert (
+        phase_from_features({"is_opening": False, "is_middle_game": True, "is_end_game": False})
+        == "middle"
+    )
+    assert (
+        phase_from_features({"is_opening": False, "is_middle_game": False, "is_end_game": True})
+        == "endgame"
+    )
+    assert phase_from_features({}) is None
+
+
+def test_slice_datums_by_phase_on_synthetic_features() -> None:
+    opening = type(
+        "D", (), {"features": {"is_opening": True, "is_middle_game": False, "is_end_game": False}}
+    )()
+    middle = type(
+        "D", (), {"features": {"is_opening": False, "is_middle_game": True, "is_end_game": False}}
+    )()
+    endgame = type(
+        "D", (), {"features": {"is_opening": False, "is_middle_game": False, "is_end_game": True}}
+    )()
+    unknown = type("D", (), {"features": {}})()
+    datums = [opening, middle, endgame, unknown]
+    assert slice_datums_by_phase(datums, "endgame") == [endgame]  # type: ignore[arg-type]
+    assert slice_datums_by_phase(datums, "opening") == [opening]  # type: ignore[arg-type]
+    assert slice_datums_by_phase(datums, "middle") == [middle]  # type: ignore[arg-type]
+
+
+def test_format_phase_eval_rows_marks_empty() -> None:
+    text = format_phase_eval_rows({
+        "all": _metrics(top1=0.4, agree=0.7, disagree=0.2),
+        "endgame": None,
+    })
+    assert "all top1=0.4000" in text
+    assert "endgame (no datums)" in text
+
+
+def test_details_from_packed_and_error_shortlist() -> None:
+    logits, mask, labels, feats, _plies = _synthetic_batch(n=4)
+    # Flip top1 on disagree rows 1 and 3.
+    for row in (1, 3):
+        wrong = (labels[row] + 1) % mask.shape[1]
+        logits[row, labels[row]] = -10.0
+        logits[row, wrong] = 10.0
+    datums = []
+    for i, phase_flag in enumerate((
+        {"is_opening": True},
+        {"is_end_game": True},
+        {"is_middle_game": True},
+        {"is_end_game": True},
+    )):
+        datums.append(
+            type(
+                "D",
+                (),
+                {
+                    "game_id": f"g{i}",
+                    "ply": 10 + i,
+                    "fen_before": f"fen{i}",
+                    "features": phase_flag,
+                },
+            )()
+        )
+    details = details_from_packed(
+        logits=logits,
+        mask=mask,
+        labels=labels,
+        move_feats=feats,
+        kept_datums=datums,  # type: ignore[arg-type]
+        max_candidates=8,
+    )
+    assert details[1].sf_disagree is True
+    assert details[1].top1_hit is False
+    assert details[1].phase == "endgame"
+    text = format_error_shortlist(details, error_limit=10)
+    assert "game_id=g1" in text
+    assert "fen=fen1" in text
+    assert "game_id=g3" in text
+    assert "game_id=g0" not in text

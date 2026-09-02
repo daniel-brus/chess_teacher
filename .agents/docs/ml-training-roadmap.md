@@ -1,10 +1,10 @@
 # ML training roadmap — baseline + personalized bots
 
-**Status:** Phase 1 + 1b on `develop`. Game-split **assignment** runs in the daily user `PipelineRunner` after preprocess (not train/promote). Phase 2a **tools + `DEFAULT_EPOCHS=20`** (justified pick, not a plateau). Phases 2b–3 offline; production train/promote unchanged until Phase 4.
+**Status:** Phase 1 + 1b on `develop`. Game-split **assignment** runs in the daily user `PipelineRunner` after preprocess (not train/promote). Phase 2a **tools + `DEFAULT_EPOCHS=20`** (justified pick, not a plateau). Phase 2b **tools in progress** (offline catch-up, arch sweep, phase error analysis; feat v4 not done). Production train/promote unchanged until Phase 4.
 
 **Audience:** humans and coding agents working on `src/chess_teacher/pipelines/neural_network/`
 
-**Last updated:** 2026-09-02 (rev: `DEFAULT_EPOCHS=20` justified pick; 2a sweep 3–20)
+**Last updated:** 2026-09-02 (rev: Phase 2b offline tools in progress; feat v4 not done)
 
 ---
 
@@ -178,7 +178,7 @@ Same capabilities should be reachable from three places — **one library, many 
 |--------------------|----------------------------------|-------|
 | `scripts/entrypoints/baseline_training.py` | `scripts/tools/offline_baseline_train_eval.py` ✅ | 1 |
 | `scripts/entrypoints/baseline_promotion.py` | `scripts/ops/offline_baseline_promotion.py` ✅ | **2a** |
-| `scripts/ops/baseline_train_until_caught_up.py` | `scripts/ops/offline_baseline_catch_up.py` (proposed) | **2b** |
+| `scripts/ops/baseline_train_until_caught_up.py` | `scripts/ops/offline_baseline_catch_up.py` (in progress) | **2b** |
 
 Siblings use **registry val** + **stratified metrics**; exclude val/test from train. They do **not** replace entrypoints until Phase 4 merges the same eval/split logic inward.
 
@@ -392,7 +392,7 @@ Split into **2a** (compare / tune on fixed val) then **2b** (incremental replay)
 |------|------|-------|
 | Epoch sweep | Upgrade `experiment_baseline_epochs.py` | Registry split + stratified val (not move-level 80/20) ✅ |
 | **Promotion sibling** | `scripts/ops/offline_baseline_promotion.py` | Mimics `baseline_promotion.py`: score model A vs B on **registry val**; stratified metrics; **no** `ApplyPromotionStep` / no DB promote ✅ |
-| Arch sweep (optional) | `scripts/tools/offline_baseline_arch_sweep.py` | hidden 128 vs 256, score_hidden 64 vs 128 — **Phase 2b** |
+| Arch sweep (optional) | `scripts/tools/offline_baseline_arch_sweep.py` | hidden 128 vs 256, score_hidden 64 vs 128 — **Phase 2b in progress** |
 | Notebook | `training_develop.ipynb` | Cells: val compare two URIs ✅; sweep via CLI |
 
 **Promotion sibling behaviour (sketch):**
@@ -414,12 +414,12 @@ Split into **2a** (compare / tune on fixed val) then **2b** (incremental replay)
 
 | Item | Path | Notes |
 |------|------|-------|
-| **Catch-up sibling** | `scripts/ops/offline_baseline_catch_up.py` | Mimics `baseline_train_until_caught_up.py`: replay `fetch_since` batches, finetune parent each round, **exclude registry val/test**, eval **same fixed val** after each round; optional `--max-rounds` |
-| **Arch sweep** | `scripts/tools/offline_baseline_arch_sweep.py` | hidden 128 vs 256, score_hidden 64 vs 128 — answers **E6/E7** |
-| **Feat investigation** | notebook + optional `scripts/tools/analyze_val_errors_by_phase.py` | Error analysis **E10–E11**; shortlist phase-specific cues (passed pawns, etc.) |
+| **Catch-up sibling** | `scripts/ops/offline_baseline_catch_up.py` | **In progress.** Mimics `baseline_train_until_caught_up.py`: replay `fetch_since` batches, finetune parent each round, **exclude registry val/test**, eval **same fixed val** after each round; optional `--max-rounds` |
+| **Arch sweep** | `scripts/tools/offline_baseline_arch_sweep.py` | **In progress.** hidden 128 vs 256, score_hidden 64 vs 128 — answers **E6/E7** |
+| **Feat investigation** | notebook + `scripts/tools/analyze_val_errors_by_phase.py` | **E10–E11 in progress** (phase slices + endgame error shortlist). Feat v4 / E12 not started. |
 | **Feat v4 A/B** (only if investigation positive) | `candidate_eval.py` + version bump | Answers **E12**; cold-start; do not combine with arch change |
 | Recency in batch (optional) | `ply_weights.py` | Light baseline batch recency — tune on val disagree |
-| Phase-stratified eval (optional) | extend `eval_metrics.py` | Report top1 by opening/middle/endgame slice |
+| Phase-stratified eval (optional) | extend `eval_metrics.py` | **In progress.** Report top1 by opening/middle/endgame slice |
 | Notebook | `training_develop.ipynb` | Cells: 2–3 batch replay + val curve; feat error analysis |
 
 **Capacity vs features (design principle):** grow baseline **capacity** as platform user diversity grows so per-user finetune has a rich shared trunk. **Input dims** are for better **cues** (e.g. endgame structure) — investigate separately; do not use feat expansion as a substitute for capacity.
@@ -580,11 +580,11 @@ Test set: manual / release-tag evaluation only — never promotion or epoch tuni
 | 4a | Upgrade `experiment_baseline_epochs.py` | tools | No | done |
 | 4b | `offline_baseline_promotion.py` | **ops** | No | done |
 | 4c | Notebook: registry val compare | notebook | No | done |
-| 5a | `offline_baseline_catch_up.py` | **ops** | No | |
-| 5b | `offline_baseline_arch_sweep.py` | tools | No | |
-| 5b2 | Feat investigation (phase slices, passed pawn shortlist) | notebook + tools | No | |
+| 5a | `offline_baseline_catch_up.py` | **ops** | No | in progress |
+| 5b | `offline_baseline_arch_sweep.py` | tools | No | in progress |
+| 5b2 | Feat investigation (phase slices, passed pawn shortlist) | notebook + tools | No | in progress (E10-E11 script; not feat v4) |
 | 5b3 | Feat v4 A/B (if investigation positive) | library | No | |
-| 5c | Phase-stratified eval (optional) | library | No | |
+| 5c | Phase-stratified eval (optional) | library | No | in progress |
 | 5d | Notebook: batch replay + feat error analysis | notebook | No | |
 | 6 | Recency weights (+ optional baseline batch) | library | No | |
 | 7a | `user_splits.py` + `offline_user_finetune_eval.py` | library + tools | No | |
@@ -619,7 +619,7 @@ When asked to implement part of this roadmap:
 
 1. **Terminal-only** — `backfill_game_splits.py` then `offline_baseline_train_eval.py` ✅
 2. **Phase 2a** — epoch sweep + promotion sibling + `DEFAULT_EPOCHS=20` (justified pick) ✅
-3. **Phase 2b** — catch-up sibling + arch sweep + feat investigation
+3. **Phase 2b** — catch-up sibling + arch sweep + feat investigation (tools in progress; feat v4 not done)
 4. **Phase 3** — user tools + user ops siblings + notebook user section
 5. **Phase 4** — merge into entrypoints; **consolidate** NN pipelines (≤2); fold split assign into preprocess; **orchestrated** train / promote / catch-up
 6. **Phase 5** — product polish

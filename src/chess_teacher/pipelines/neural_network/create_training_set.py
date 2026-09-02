@@ -36,6 +36,15 @@ _SQL_MOVES_WITH_CHARS = """
 # memory-tight hosts (e.g. after a train batch). Keep these scans single-threaded.
 _MOVES_QUERY_SESSION_SETTINGS = {"max_parallel_workers_per_gather": "0"}
 
+
+def _with_extra_where(sql: str, extra_where: str | None) -> str:
+    """Append ``AND (fragment)`` when ``extra_where`` is a non-empty SQL fragment."""
+    fragment = (extra_where or "").strip()
+    if not fragment:
+        return sql
+    return f"{sql} AND ({fragment})"
+
+
 # Domain scales tuned against local games.move_characteristics (n=825, dev_local).
 # Absolute mate-like evals (~±100) intentionally saturate under tanh.
 _EVAL_TANH_SCALE = 5.0  # typical |eval| p95 ~8-11; mates → ±1
@@ -1102,14 +1111,24 @@ class TrainingDataStore:
         )
         return self._datums_from_moves(moves)
 
-    def count_since(self, cutoff: datetime | None) -> int:
-        """Count platform moves with characteristics and ``games.end_time`` after cutoff."""
+    def count_since(
+        self,
+        cutoff: datetime | None,
+        *,
+        extra_where: str | None = None,
+    ) -> int:
+        """Count platform moves with characteristics and ``games.end_time`` after cutoff.
+
+        ``extra_where`` is an optional SQL fragment (no leading AND) appended as
+        ``AND (...)``. Default ``None`` leaves production callers unchanged.
+        """
         self._ensure_training_tables()
         sql = f"SELECT COUNT(*) AS n{_SQL_MOVES_WITH_CHARS}"
         params: dict[str, Any] = {}
         if cutoff is not None:
             sql += " AND g.end_time > :cutoff"
             params["cutoff"] = cutoff
+        sql = _with_extra_where(sql, extra_where)
         rows = self._query_moves_sql(sql, params)
         return int(rows[0]["n"]) if rows else 0
 
@@ -1118,6 +1137,7 @@ class TrainingDataStore:
         cutoff: datetime | None,
         *,
         limit: int | None = None,
+        extra_where: str | None = None,
     ) -> tuple[list[TrainingDatum], datetime | None]:
         """Load new rows ordered by ``games.end_time`` (oldest first).
 
@@ -1127,6 +1147,9 @@ class TrainingDataStore:
         ``games.end_time``), the batch is expanded to include **every** move at
         that boundary timestamp so the next cutoff ``end_time > max`` cannot skip
         the rest of the game / same-second games.
+
+        ``extra_where`` is applied to the main query and the boundary expand.
+        Default ``None`` leaves production callers unchanged.
         """
         self._ensure_training_tables()
         sql = f"SELECT m.move_id AS move_id, g.end_time AS end_time{_SQL_MOVES_WITH_CHARS}"
@@ -1134,6 +1157,7 @@ class TrainingDataStore:
         if cutoff is not None:
             sql += " AND g.end_time > :cutoff"
             params["cutoff"] = cutoff
+        sql = _with_extra_where(sql, extra_where)
         sql += " ORDER BY g.end_time ASC, m.game_id ASC, m.move_nr ASC"
         if limit is not None:
             sql += " LIMIT :limit"
@@ -1148,15 +1172,16 @@ class TrainingDataStore:
         if not rows:
             return [], None
 
-        # LIMIT may cut inside a shared end_time group — finish that group.
+        # LIMIT may cut inside a shared end_time group - finish that group.
         if limit is not None and len(rows) >= limit:
             max_end_time = max(r["end_time"] for r in rows if r["end_time"] is not None)
             prefix = [r for r in rows if r["end_time"] is not None and r["end_time"] < max_end_time]
-            expand_sql = (
+            expand_sql = _with_extra_where(
                 f"SELECT m.move_id AS move_id, g.end_time AS end_time{_SQL_MOVES_WITH_CHARS}"
-                " AND g.end_time = :boundary"
-                " ORDER BY m.game_id ASC, m.move_nr ASC"
+                " AND g.end_time = :boundary",
+                extra_where,
             )
+            expand_sql += " ORDER BY m.game_id ASC, m.move_nr ASC"
             at_boundary = self._query_moves_sql(expand_sql, {"boundary": max_end_time})
             rows = prefix + list(at_boundary)
 
@@ -1174,7 +1199,7 @@ class TrainingDataStore:
         """Sample up to ``limit`` moves with characteristics.
 
         With ``seed``, ordering is deterministic via ``md5(move_id || seed)``
-        (safe with pooled connections — unlike session ``setseed``).
+        (safe with pooled connections - unlike session ``setseed``).
         Without ``seed``, uses ``ORDER BY random()``.
         """
         if limit <= 0:
@@ -1299,8 +1324,9 @@ def count_new_moves_since(
     cutoff: datetime | None,
     *,
     db_client: DatabaseClient | None = None,
+    extra_where: str | None = None,
 ) -> int:
-    return TrainingDataStore(db_client).count_since(cutoff)
+    return TrainingDataStore(db_client).count_since(cutoff, extra_where=extra_where)
 
 
 def fetch_training_data_since(
@@ -1308,8 +1334,9 @@ def fetch_training_data_since(
     *,
     db_client: DatabaseClient | None = None,
     limit: int | None = None,
+    extra_where: str | None = None,
 ) -> tuple[list[TrainingDatum], datetime | None]:
-    return TrainingDataStore(db_client).fetch_since(cutoff, limit=limit)
+    return TrainingDataStore(db_client).fetch_since(cutoff, limit=limit, extra_where=extra_where)
 
 
 __all__ = [
