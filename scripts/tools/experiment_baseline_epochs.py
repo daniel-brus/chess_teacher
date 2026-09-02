@@ -218,17 +218,15 @@ def run_sweep(
     finite = [r for r in rows if np.isfinite(r["val_disagree_t1"])]
     best_by_dis = max(finite, key=lambda r: r["val_disagree_t1"]) if finite else None
     best_by_val = max(rows, key=lambda r: r["val_top1"])
-    print(
-        f"\nPeak val_top1={best_by_val['val_top1']:.4f} at epochs={int(best_by_val['epochs'])}."
-    )
+    print(f"\nPeak val_top1={best_by_val['val_top1']:.4f} at epochs={int(best_by_val['epochs'])}.")
     if best_by_dis is not None:
         print(
             f"Peak val disagree_t1={best_by_dis['val_disagree_t1']:.4f} "
             f"at epochs={int(best_by_dis['epochs'])}."
         )
     print(
-        "Reference (not locked): 10k cold 128/64, 3 epochs, val disagree_t1≈0.20. "
-        "Prefer smallest epoch count near peak val disagree_t1 with modest train–val top1 gap."
+        "Reference (not locked): 10k cold 128/64, 3 epochs, val disagree_t1~=0.20. "
+        "Prefer smallest epoch count near peak val disagree_t1 with modest train-val top1 gap."
     )
     return 0
 

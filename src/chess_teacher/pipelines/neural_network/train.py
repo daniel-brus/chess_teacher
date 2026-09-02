@@ -220,7 +220,10 @@ class BaselineTrainer:
     Sample weights: ply * continuous SF-disagree style boost (see ``ply_weights``).
     """
 
-    DEFAULT_EPOCHS = 8
+    # Justified 2a pick: 10k registry-val sweep still climbing at 20; peak
+    # disagree_t1 on the 3-20 grid. Val only 32 games -- revisit if 2b replay
+    # or a larger val set plateaus earlier.
+    DEFAULT_EPOCHS = 20
     DEFAULT_BATCH_SIZE = 64
     DEFAULT_HIDDEN = 128
     DEFAULT_SCORE_HIDDEN = 64

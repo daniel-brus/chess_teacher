@@ -38,7 +38,7 @@ Override config when inspecting prod: `--config prod` (extra care — shared pro
 - **Read-only only.** Allowed: `PING`, `INFO` (memory section), `DBSIZE`, `SCAN`, `EXISTS`, `TTL`, `TYPE`, `STRLEN`. **Never** `SET`, `DEL`, `FLUSHDB`, `FLUSHALL`, `CONFIG SET`, `DEBUG`, `SHUTDOWN`, `KEYS` (use `scan`), or raw `redis-cli` write commands.
 - **Never** call `get_cache_client()` write paths (`set_*`, `delete`, invalidation helpers) from this skill.
 - Always pass **`--json`**. Run from **repository root** with `.venv` activated. Do not use `uv`.
-- Do not run `pytest` / `mypy`; ask the user to run those manually.
+- `pytest` / `mypy` / `ruff` are allowed via the python-environment rule (venv), but not as part of this inspection skill unless the user asked.
 - **`--show-value`** is opt-in and only decodes small JSON for `*:accounts:v1` keys; games keys are Parquet blobs — use `key-info` size/TTL only.
 
 ## App cache keys

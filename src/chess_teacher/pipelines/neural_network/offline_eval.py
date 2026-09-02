@@ -1,4 +1,4 @@
-"""Shared helpers for offline baseline train/eval/promotion (Phases 1–3).
+"""Shared helpers for offline baseline train/eval/promotion (Phases 1-3).
 
 Scripts and ``training_develop.ipynb`` should call these — do not duplicate
 split loading or URI scoring in notebook cells.

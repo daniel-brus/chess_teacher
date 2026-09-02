@@ -57,7 +57,7 @@ Runtime app config on the cluster comes from **`prod`** via `doppler run` during
 
 - **Read-only only.** No exceptions without explicit user approval outside this skill.
 - Always pass **`--json`**. Run from **repository root**. Do not use `uv`.
-- Do not run `pytest` / `mypy`; ask the user to run those manually.
+- `pytest` / `mypy` / `ruff` are allowed via the python-environment rule (venv), but not as part of this inspection skill unless the user asked.
 - Log / DB output may contain user data — summarize; do not paste large dumps unless asked.
 - For **local/dev** Postgres use **chess-teacher-db**. For **prod** Postgres (firewalled) use this skill’s `db-*` commands.
 

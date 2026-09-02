@@ -1,10 +1,10 @@
 # ML training roadmap — baseline + personalized bots
 
-**Status:** Phase 1 + 1b on `develop`. Game-split **assignment** runs in the daily user `PipelineRunner` after preprocess (not train/promote). Phase 2a **tools** on `feature/ml-phase2a-offline-compare`. Phases 2b–3 offline; production train/promote unchanged until Phase 4.
+**Status:** Phase 1 + 1b on `develop`. Game-split **assignment** runs in the daily user `PipelineRunner` after preprocess (not train/promote). Phase 2a **tools + `DEFAULT_EPOCHS=20`** (justified pick, not a plateau). Phases 2b–3 offline; production train/promote unchanged until Phase 4.
 
 **Audience:** humans and coding agents working on `src/chess_teacher/pipelines/neural_network/`
 
-**Last updated:** 2026-09-02 (rev: Phase 4 pipeline consolidation intent)
+**Last updated:** 2026-09-02 (rev: `DEFAULT_EPOCHS=20` justified pick; 2a sweep 3–20)
 
 ---
 
@@ -45,6 +45,7 @@ These choices simplify the roadmap; revisit only if metrics or product needs cha
 | **Recency (user bots)** | Strong recency weights + time-ordered user val split (Phase 3). |
 | **Baseline capacity** | Shared trunk must grow as platform user diversity grows — enables effective per-user finetune later (wider/deeper ≠ per-user input dims). |
 | **Input features** | Separate hypothesis: richer **cues** per position (phase-specific structure, etc.) — investigate before feat version bump. |
+| **Existing `baseline_models` (v50 / v51, ~2026-08)** | **POC only.** Deletable. Do **not** spend on `--full-val` or artifact archaeology vs those URIs. Optional cheap `--train-inline` vs production on the same `--limit` slice is nice-to-have, never a gate. New work is ranked on **registry val vs itself**. Phase 4 starts a **fresh** train/promote chain. |
 
 ---
 
@@ -111,9 +112,9 @@ Use **registry val** + stratified metrics unless noted. Primary success metric f
 
 | # | Question | How we know |
 |---|----------|-------------|
-| E3 | What epoch count minimizes val loss without overfitting train? | Epoch sweep on registry split; train–val gap |
-| E4 | Would a new model beat **production** on honest val? | Promotion sibling: Δ val top1, Δ disagree_t1 |
-| E5 | Do defaults hold at `--limit 10000+`? | Repeat best config; val game count ≥ ~100 |
+| E3 | What epoch count minimizes val loss without overfitting train? | **Justified pick `20`.** Grid 3–20 on `--limit 10000` (32 val games): `disagree_t1` still climbing (3: 0.20 → 20: 0.265); va_loss still falling; train–val top1 gap modest (0.008 at 20). No plateau. Revisit in 2b if larger val or replay disagrees. |
+| E4 | *(optional)* Cheap sanity: new cold train vs POC production URI on the **same `--limit` val slice** | Done informational: inline@20 vs v50, `disagree_t1 +0.057` on 32-game slice. **Not a gate.** Skip `--full-val` vs v50/v51. |
+| E5 | Do defaults hold at `--limit 10000+`? | 10k sample only so far; val games=32 ≪ registry val (1311). 2b replay / larger sample can revisit. |
 
 ### Baseline — capacity, features, incremental (Phase 2b)
 
@@ -383,7 +384,7 @@ Split into **2a** (compare / tune on fixed val) then **2b** (incremental replay)
 
 ### Phase 2a — Promotion sibling + sweeps
 
-**Goal:** Compare models on **honest registry val**; pick epoch/arch defaults.
+**Goal:** Pick epoch (then later arch) defaults on **honest registry val**. Rank candidate vs candidate, not vs POC production.
 
 **Prerequisite:** Phase 1 terminal experiments trusted (`--limit 10000+`).
 
@@ -403,7 +404,7 @@ Split into **2a** (compare / tune on fixed val) then **2b** (incremental replay)
 → print stratified val for both; print delta; exit (no promote)
 ```
 
-**Exit criteria (2a):** Documented defaults for `epochs`, `hidden`, `score_hidden`, `style_disagree_boost`. Can answer “would this beat production on registry val?” — **tools ready; defaults not locked until sweep + prod compare are run.**
+**Exit criteria (2a):** Documented `epochs` default from the registry-val sweep (plateau or justified pick). ✅ `BaselineTrainer.DEFAULT_EPOCHS = 20` — peak on 3–20, still climbing, 32-game val; justified not plateaued. Arch / `style_disagree_boost` stay 2b. **Beating v50/v51 is not an exit criterion.** Promotion sibling stays for Phase 4 ports and optional cheap `--train-inline` deltas.
 
 ### Phase 2b — Catch-up sibling + batch replay
 
@@ -608,16 +609,17 @@ When asked to implement part of this roadmap:
 6. Report **stratified** metrics (overall / SF-agree / SF-disagree) in every eval script and notebook cell
 7. **Ops siblings** mimic `scripts/entrypoints/` and `scripts/ops/` shape but stay split-based and non-promoting until Phase 4
 8. **Notebook:** add cells that call the same library functions as scripts — no notebook-only training logic
-9. Do not run `pytest` / `mypy` in agent — ask the user to run manually (project rule)
+9. Run `pytest` / `mypy` / `ruff` via the venv when changing NN code (project rule).
 10. Serious offline runs: `--limit 10000+`; small limits are smoke tests only
+11. Treat current production/candidate Keras rows as **POC**. Do not plan `--full-val` or S3 archaeology vs v50/v51. Rank new models on registry val. Cheap `--train-inline` vs a still-present URI is optional.
 
 ---
 
 ## Current workflow (you are here)
 
 1. **Terminal-only** — `backfill_game_splits.py` then `offline_baseline_train_eval.py` ✅
-2. **Phase 2a** — run `experiment_baseline_epochs.py --limit 10000` and `offline_baseline_promotion.py` (tools exist; lock defaults after those runs)
-3. **Phase 2b** — catch-up sibling + notebook replay plot
+2. **Phase 2a** — epoch sweep + promotion sibling + `DEFAULT_EPOCHS=20` (justified pick) ✅
+3. **Phase 2b** — catch-up sibling + arch sweep + feat investigation
 4. **Phase 3** — user tools + user ops siblings + notebook user section
 5. **Phase 4** — merge into entrypoints; **consolidate** NN pipelines (≤2); fold split assign into preprocess; **orchestrated** train / promote / catch-up
 6. **Phase 5** — product polish

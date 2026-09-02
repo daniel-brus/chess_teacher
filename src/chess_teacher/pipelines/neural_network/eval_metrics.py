@@ -105,9 +105,7 @@ def compute_candidate_style_metrics(
 
     weights = candidate_style_sample_weights(plies, move_feats, labels)
     w_sum = float(np.sum(weights))
-    top1_weighted = (
-        float(np.sum(top1.astype(np.float64) * weights) / w_sum) if w_sum else 0.0
-    )
+    top1_weighted = float(np.sum(top1.astype(np.float64) * weights) / w_sum) if w_sum else 0.0
 
     return EvalMetrics(
         top1_overall=float(np.mean(top1)),
@@ -190,7 +188,7 @@ def format_eval_delta(
     candidate_name: str = "candidate",
     baseline_name: str = "production",
 ) -> str:
-    """Printable deltas (candidate − baseline). Does not decide promotion."""
+    """Printable deltas (candidate - baseline). Does not decide promotion."""
 
     def _fmt(value: float | None) -> str:
         if value is None:
@@ -212,13 +210,9 @@ def format_eval_delta(
 
 def format_eval_metrics(name: str, metrics: EvalMetrics) -> str:
     """Single-line human-readable summary for scripts."""
-    agree_t1 = (
-        f"{metrics.top1_sf_agree:.4f}" if metrics.top1_sf_agree is not None else "n/a"
-    )
+    agree_t1 = f"{metrics.top1_sf_agree:.4f}" if metrics.top1_sf_agree is not None else "n/a"
     disagree_t1 = (
-        f"{metrics.top1_sf_disagree:.4f}"
-        if metrics.top1_sf_disagree is not None
-        else "n/a"
+        f"{metrics.top1_sf_disagree:.4f}" if metrics.top1_sf_disagree is not None else "n/a"
     )
     return (
         f"{name:5s} top1={metrics.top1_overall:.4f} top3={metrics.top3_overall:.4f} "
