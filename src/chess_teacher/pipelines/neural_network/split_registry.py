@@ -203,6 +203,20 @@ class SplitRegistry:
             already_assigned=already_assigned,
         )
 
+    def fetch_game_ids_for_bucket(self, bucket: SplitBucket) -> list[str]:
+        """Return stored ``game_id``s for one bucket of this ``split_version``."""
+        self.ensure_table()
+        where = (
+            f"{generate_ident_is_literal('split_version', self.split_version)} "
+            f"AND {generate_ident_is_literal('bucket', bucket.value)}"
+        )
+        rows = GameSplitAssignment.fetch_all_from_db(
+            self.db_client,
+            where=where,
+            order_by='"game_id" ASC',
+        )
+        return [row.game_id for row in rows]
+
     def exclude_holdout_games_sql(self, *, game_id_column: str = "g.game_id") -> str:
         """SQL fragment: true when ``game_id`` is not registry val/test (Phase 4 train filter)."""
         version_lit = quote_literal(self.split_version)

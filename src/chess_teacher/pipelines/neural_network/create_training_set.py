@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from typing import Any, Literal
@@ -1190,6 +1191,31 @@ class TrainingDataStore:
         if not rows:
             return []
         move_ids = [str(r["move_id"]) for r in rows]
+        return self._datums_for_move_ids(move_ids)
+
+    def fetch_for_game_ids(self, game_ids: Sequence[str]) -> list[TrainingDatum]:
+        """Load eligible moves for the given games (oldest ``end_time`` first)."""
+        unique = sorted({gid for gid in game_ids if gid})
+        if not unique:
+            return []
+        self._ensure_training_tables()
+        batch_size = 500
+        move_ids: list[str] = []
+        for offset in range(0, len(unique), batch_size):
+            chunk = unique[offset : offset + batch_size]
+            game_id_list = ", ".join(quote_literal(gid) for gid in chunk)
+            sql = (
+                f"SELECT m.move_id AS move_id{_SQL_MOVES_WITH_CHARS} "
+                f"AND g.game_id IN ({game_id_list}) "
+                "ORDER BY g.end_time ASC, m.game_id ASC, m.move_nr ASC"
+            )
+            logger.info(
+                "Querying training move ids for %s games (batch offset=%s)…",
+                len(chunk),
+                offset,
+            )
+            rows = self._query_moves_sql(sql, {})
+            move_ids.extend(str(r["move_id"]) for r in rows)
         return self._datums_for_move_ids(move_ids)
 
 

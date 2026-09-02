@@ -66,6 +66,23 @@ class GameSplitResult:
         return list(self.test)
 
 
+def format_split_summary(split: GameSplitResult, *, heading: str | None = None) -> str:
+    """Human-readable split counts for scripts and notebook cells."""
+    title = heading or "game-level split (persistent registry)"
+    lines = [f"=== {title} ===", f"split_version={split.salt!r}"]
+    for counts in split.counts:
+        disagree = (
+            f"{counts.sf_disagree_frac:.3f}"
+            if counts.sf_disagree_frac is not None
+            else "n/a"
+        )
+        lines.append(
+            f"  {counts.bucket.value:5s} games={counts.n_games:5d} "
+            f"moves={counts.n_moves:6d} sf_disagree_frac={disagree}"
+        )
+    return "\n".join(lines)
+
+
 def game_split_bucket(game_id: str, *, salt: str = DEFAULT_SPLIT_SALT) -> SplitBucket:
     """Map one game to train / val / test via ``md5(game_id:salt) % 100``."""
     digest = hashlib.md5(f"{game_id}:{salt}".encode(), usedforsecurity=False).hexdigest()

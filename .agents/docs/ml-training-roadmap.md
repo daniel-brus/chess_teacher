@@ -1,10 +1,10 @@
 # ML training roadmap — baseline + personalized bots
 
-**Status:** Phase 1 + 1b implemented on branch `feature/ml-phase1-eval-splits` (Phases 2–3 offline; production pipelines unchanged until Phase 4)
+**Status:** Phase 1 + 1b on `develop`. Phase 2a **tools** on `feature/ml-phase2a-offline-compare` (exit criteria still need epoch sweep + production compare runs). Phases 2b–3 offline; production pipelines unchanged until Phase 4.
 
 **Audience:** humans and coding agents working on `src/chess_teacher/pipelines/neural_network/`
 
-**Last updated:** 2026-09-01 (rev: experimental questions, feat investigation, orchestration end-state)
+**Last updated:** 2026-09-02 (rev: Phase 2a tools; 10k reference run)
 
 ---
 
@@ -103,6 +103,8 @@ Use **registry val** + stratified metrics unless noted. Primary success metric f
 | E1 | Do game-level splits give stable, reproducible val sets? | Same `split_version` → same val games across runs |
 | E2 | Are stratified metrics computable and sensible? | agree_t1 ≥ disagree_t1 typically; counts in split summary |
 
+**Reference run (trusted for relative compares, not locked HPs):** `--limit 10000`, cold 128/64, 3 epochs, registry val `disagree_t1≈0.20`.
+
 ### Baseline — tuning & comparison (Phase 2a)
 
 | # | Question | How we know |
@@ -172,7 +174,7 @@ Same capabilities should be reachable from three places — **one library, many 
 | Production (today) | Split-based sibling (offline) | Phase |
 |--------------------|----------------------------------|-------|
 | `scripts/entrypoints/baseline_training.py` | `scripts/tools/offline_baseline_train_eval.py` ✅ | 1 |
-| `scripts/entrypoints/baseline_promotion.py` | `scripts/ops/offline_baseline_promotion.py` (proposed) | **2a** |
+| `scripts/entrypoints/baseline_promotion.py` | `scripts/ops/offline_baseline_promotion.py` ✅ | **2a** |
 | `scripts/ops/baseline_train_until_caught_up.py` | `scripts/ops/offline_baseline_catch_up.py` (proposed) | **2b** |
 
 Siblings use **registry val** + **stratified metrics**; exclude val/test from train. They do **not** replace entrypoints until Phase 4 merges the same eval/split logic inward.
@@ -194,7 +196,7 @@ Root notebook for interactive baseline work on develop. Extend incrementally —
 | Phase | Notebook additions (proposed) |
 |-------|-------------------------------|
 | **1 / 1b** ✅ | Cells: backfill status, registry split summary, call `evaluate_datums` on a loaded model URI |
-| **2a** | Promotion-style compare (production vs candidate / two URIs) on registry val; epoch sweep table |
+| **2a** ✅ (local notebook; file is gitignored) | Promotion-style compare on registry val; epoch sweep via `experiment_baseline_epochs.py` |
 | **2b** | Mini catch-up replay (1–3 batches) with val curve plot; **feat error analysis** (E10–E11) on endgame val failures |
 | **3** | User section: pick `account_id`, time split, finetune, disagree metric vs baseline on user val |
 | **4+** | Optional cells mirroring production promotion gates (read-only inspect before wiring) |
@@ -210,7 +212,7 @@ Notebook may call pipeline functions **or** offline library helpers — prefer *
 | Model | Candidate-style: state tower `128→128`, per-move scorer `64`, up to 128 candidates × 55 move feats (**~30–40k params** — `hidden`/`score_hidden` are layer widths, not param count) |
 | Training | Incremental batches via `main.py` pipeline; trains on all fetched moves |
 | Promotion | `RandomEvalSetProvider` — random 2k moves, may overlap training |
-| Offline sweep | `scripts/tools/experiment_baseline_epochs.py` — 80/20 split by **move** (leakage risk) |
+| Offline sweep | `scripts/tools/experiment_baseline_epochs.py` — registry split + stratified val (Phase 2a) |
 | Develop notebook | `training_develop.ipynb` — interactive baseline train/inspect (pipeline today; extend for split eval) |
 | Personalization | Not implemented; `fetch_for_account()` and `training_state.scope = user:{id}` exist as scaffolding |
 | Style weighting | `ply_weights.py` — ply reweight + SF-disagree boost (default max 2×) |
@@ -222,6 +224,7 @@ Key files:
 - `src/chess_teacher/pipelines/neural_network/create_training_set.py` — data loading
 - `src/chess_teacher/pipelines/neural_network/ply_weights.py` — sample weights
 - `src/chess_teacher/pipelines/neural_network/main.py` — production entrypoints
+- `src/chess_teacher/pipelines/neural_network/offline_eval.py` — shared offline split/URI helpers
 
 ---
 
@@ -368,10 +371,10 @@ Split into **2a** (compare / tune on fixed val) then **2b** (incremental replay)
 
 | Item | Path | Notes |
 |------|------|-------|
-| Epoch sweep | Upgrade `experiment_baseline_epochs.py` | Registry split + stratified val (not move-level 80/20) |
-| **Promotion sibling** | `scripts/ops/offline_baseline_promotion.py` | Mimics `baseline_promotion.py`: score model A vs B on **full registry val**; stratified metrics; **no** `ApplyPromotionStep` / no DB promote |
-| Arch sweep (optional) | `scripts/tools/offline_baseline_arch_sweep.py` | hidden 128 vs 256, score_hidden 64 vs 128 |
-| Notebook | `training_develop.ipynb` | Cells: val compare two URIs; sweep results table |
+| Epoch sweep | Upgrade `experiment_baseline_epochs.py` | Registry split + stratified val (not move-level 80/20) ✅ |
+| **Promotion sibling** | `scripts/ops/offline_baseline_promotion.py` | Mimics `baseline_promotion.py`: score model A vs B on **registry val**; stratified metrics; **no** `ApplyPromotionStep` / no DB promote ✅ |
+| Arch sweep (optional) | `scripts/tools/offline_baseline_arch_sweep.py` | hidden 128 vs 256, score_hidden 64 vs 128 — **Phase 2b** |
+| Notebook | `training_develop.ipynb` | Cells: val compare two URIs ✅; sweep via CLI |
 
 **Promotion sibling behaviour (sketch):**
 
@@ -382,7 +385,7 @@ Split into **2a** (compare / tune on fixed val) then **2b** (incremental replay)
 → print stratified val for both; print delta; exit (no promote)
 ```
 
-**Exit criteria (2a):** Documented defaults for `epochs`, `hidden`, `score_hidden`, `style_disagree_boost`. Can answer “would this beat production on registry val?”
+**Exit criteria (2a):** Documented defaults for `epochs`, `hidden`, `score_hidden`, `style_disagree_boost`. Can answer “would this beat production on registry val?” — **tools ready; defaults not locked until sweep + prod compare are run.**
 
 ### Phase 2b — Catch-up sibling + batch replay
 
@@ -527,9 +530,9 @@ Test set: manual / release-tag evaluation only — never promotion or epoch tuni
 | 3 | `offline_baseline_train_eval.py` | tools | No | done |
 | 3b | Split registry + backfill | library + tools | No | done |
 | 3c | Offline train uses registry | tools | No | done |
-| 4a | Upgrade `experiment_baseline_epochs.py` | tools | No | |
-| 4b | `offline_baseline_promotion.py` | **ops** | No | |
-| 4c | Notebook: registry val compare | notebook | No | |
+| 4a | Upgrade `experiment_baseline_epochs.py` | tools | No | done |
+| 4b | `offline_baseline_promotion.py` | **ops** | No | done |
+| 4c | Notebook: registry val compare | notebook | No | done |
 | 5a | `offline_baseline_catch_up.py` | **ops** | No | |
 | 5b | `offline_baseline_arch_sweep.py` | tools | No | |
 | 5b2 | Feat investigation (phase slices, passed pawn shortlist) | notebook + tools | No | |
@@ -552,7 +555,7 @@ When asked to implement part of this roadmap:
 
 1. Read this file and the referenced source files under `pipelines/neural_network/`
 2. Respect phase boundaries — **Phases 1–3 = library + tools/ops + notebook only**
-3. Reuse `BaselineTrainer`, `TrainingBatch`, `candidate_style_sample_weights`, promotion scorers where possible
+3. Reuse `BaselineTrainer`, `TrainingBatch`, `candidate_style_sample_weights`, `offline_eval` helpers, promotion scorers where possible
 4. Split by **`game_id`**, not by move index; prefer **registry** for platform baseline
 5. User bots: **time split per account** in Phase 3 — not platform hash registry
 6. Report **stratified** metrics (overall / SF-agree / SF-disagree) in every eval script and notebook cell
@@ -565,8 +568,8 @@ When asked to implement part of this roadmap:
 
 ## Current workflow (you are here)
 
-1. **Terminal-only** — `backfill_game_splits.py` then `offline_baseline_train_eval.py` (no persist, no siblings yet)
-2. **Phase 2a** — promotion sibling + epoch sweep + notebook compare cells
+1. **Terminal-only** — `backfill_game_splits.py` then `offline_baseline_train_eval.py` ✅
+2. **Phase 2a** — run `experiment_baseline_epochs.py --limit 10000` and `offline_baseline_promotion.py` (tools exist; lock defaults after those runs)
 3. **Phase 2b** — catch-up sibling + notebook replay plot
 4. **Phase 3** — user tools + user ops siblings + notebook user section
 5. **Phase 4** — merge into entrypoints; **orchestrated** train / promote / catch-up

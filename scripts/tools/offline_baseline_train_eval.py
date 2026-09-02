@@ -29,37 +29,18 @@ from __future__ import annotations
 import argparse
 import time
 
-from chess_teacher.pipelines.neural_network.create_training_set import TrainingDataStore
 from chess_teacher.pipelines.neural_network.eval_metrics import (
     evaluate_datums,
     format_eval_metrics,
 )
-from chess_teacher.pipelines.neural_network.split_registry import get_split_registry
-from chess_teacher.pipelines.neural_network.splits import (
-    DEFAULT_SPLIT_SALT,
-    GameSplitResult,
-)
+from chess_teacher.pipelines.neural_network.offline_eval import load_registry_split
+from chess_teacher.pipelines.neural_network.splits import DEFAULT_SPLIT_SALT, format_split_summary
 from chess_teacher.pipelines.neural_network.train import BaselineTrainer
 from chess_teacher.utils.db.client import get_db_client
 from chess_teacher.utils.logging import get_logger
 from chess_teacher.utils.process_utils import log_script_runtime_context, run_script_main
 
 logger = get_logger()
-
-
-def _print_split_summary(split: GameSplitResult) -> None:
-    print("\n=== game-level split (persistent registry) ===")
-    print(f"split_version={split.salt!r}")
-    for counts in split.counts:
-        disagree = (
-            f"{counts.sf_disagree_frac:.3f}"
-            if counts.sf_disagree_frac is not None
-            else "n/a"
-        )
-        print(
-            f"  {counts.bucket.value:5s} games={counts.n_games:5d} "
-            f"moves={counts.n_moves:6d} sf_disagree_frac={disagree}"
-        )
 
 
 def run_offline_train_eval(
@@ -73,14 +54,13 @@ def run_offline_train_eval(
 ) -> int:
     db = get_db_client()
     logger.info("Loading datums limit=%s (cutoff=None for offline sample)…", limit)
-    datums, _cutoff = TrainingDataStore(db).fetch_since(None, limit=limit)
-    if len(datums) < 50:
-        logger.error("Need more datums; got %s", len(datums))
+    split = load_registry_split(db, limit=limit, split_version=salt)
+    n_datums = sum(c.n_moves for c in split.counts)
+    if n_datums < 50:
+        logger.error("Need more datums; got %s", n_datums)
         return 1
 
-    registry = get_split_registry(db, split_version=salt)
-    split = registry.split_datums(datums, assign_if_missing=True)
-    _print_split_summary(split)
+    print("\n" + format_split_summary(split))
 
     train = split.train_datums
     val = split.val_datums

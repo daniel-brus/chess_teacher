@@ -115,3 +115,22 @@ def test_split_datums_uses_registry_buckets() -> None:
         assert g1_in_val == 2
     else:
         assert g1_in_test == 2
+
+
+def test_fetch_game_ids_for_bucket_uses_version_and_bucket() -> None:
+    db = MagicMock()
+    registry = SplitRegistry(db, split_version="baseline-v1")
+    rows = [
+        GameSplitAssignment(
+            split_version="baseline-v1",
+            game_id="g-val-1",
+            bucket=SplitBucket.VAL.value,
+            assigned_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+    ]
+    with patch.object(GameSplitAssignment, "fetch_all_from_db", return_value=rows) as fetch:
+        ids = registry.fetch_game_ids_for_bucket(SplitBucket.VAL)
+    assert ids == ["g-val-1"]
+    where = fetch.call_args.kwargs["where"]
+    assert "baseline-v1" in where
+    assert "val" in where

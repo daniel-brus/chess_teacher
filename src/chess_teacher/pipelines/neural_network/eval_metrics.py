@@ -159,6 +159,57 @@ def evaluate_datums(
     )
 
 
+def evaluate_model_uri(
+    model_uri: str,
+    datums: list[TrainingDatum],
+    *,
+    max_candidates: int = MAX_CANDIDATES,
+    tracker: Any | None = None,
+) -> EvalMetrics:
+    """Load a candidate-style artifact and score stratified metrics on ``datums``."""
+    from chess_teacher.pipelines.neural_network.train import load_candidate_style_from_uri
+
+    model = load_candidate_style_from_uri(
+        model_uri,
+        tracker=tracker,
+        max_candidates=max_candidates,
+    )
+    return evaluate_datums(model, datums, max_candidates=max_candidates)
+
+
+def _signed_delta(candidate: float | None, baseline: float | None) -> float | None:
+    if candidate is None or baseline is None:
+        return None
+    return float(candidate) - float(baseline)
+
+
+def format_eval_delta(
+    candidate: EvalMetrics,
+    baseline: EvalMetrics,
+    *,
+    candidate_name: str = "candidate",
+    baseline_name: str = "production",
+) -> str:
+    """Printable deltas (candidate − baseline). Does not decide promotion."""
+
+    def _fmt(value: float | None) -> str:
+        if value is None:
+            return "n/a"
+        return f"{value:+.4f}"
+
+    d_top1 = _signed_delta(candidate.top1_overall, baseline.top1_overall)
+    d_dis = _signed_delta(candidate.top1_sf_disagree, baseline.top1_sf_disagree)
+    d_agr = _signed_delta(candidate.top1_sf_agree, baseline.top1_sf_agree)
+    beat_top1 = d_top1 is not None and d_top1 >= 0.0
+    beat_dis = d_dis is not None and d_dis >= 0.0
+    return (
+        f"delta ({candidate_name} - {baseline_name}) "
+        f"top1={_fmt(d_top1)} agree_t1={_fmt(d_agr)} disagree_t1={_fmt(d_dis)} "
+        f"informational_beats_top1={str(beat_top1).lower()} "
+        f"informational_beats_disagree={str(beat_dis).lower()}"
+    )
+
+
 def format_eval_metrics(name: str, metrics: EvalMetrics) -> str:
     """Single-line human-readable summary for scripts."""
     agree_t1 = (
