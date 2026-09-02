@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
-
-import pytest
 
 from chess_teacher.pipelines.neural_network.models import GameSplitAssignment
 from chess_teacher.pipelines.neural_network.split_registry import SplitRegistry
@@ -72,7 +70,7 @@ def test_ensure_games_skips_existing() -> None:
         split_version=DEFAULT_SPLIT_SALT,
         game_id="game-a",
         bucket=SplitBucket.TRAIN.value,
-        assigned_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        assigned_at=datetime(2026, 1, 1, tzinfo=UTC),
     )
 
     with patch.object(

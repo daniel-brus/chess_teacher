@@ -44,9 +44,6 @@ def test_all_moves_from_game_share_bucket() -> None:
         _FakeDatum(game_id="g2", move_id="m3"),
     ]
     split = split_datums_by_game(datums, compute_disagree_frac=False)  # type: ignore[arg-type]
-    g1_buckets = {
-        game_split_bucket("g1", salt=split.salt),
-    }
     assert len(split.train) + len(split.val) + len(split.test) == 3
     # Both g1 moves in same partition
     train_g1 = sum(1 for d in split.train if d.game_id == "g1")

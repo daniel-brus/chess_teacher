@@ -9,9 +9,9 @@ See ``.agents/docs/ml-training-roadmap.md`` Phase 1.
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
-from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 import numpy as np
