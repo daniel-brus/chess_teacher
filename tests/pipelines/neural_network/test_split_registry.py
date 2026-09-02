@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from chess_teacher.pipelines.neural_network.models import GameSplitAssignment
 from chess_teacher.pipelines.neural_network.split_registry import SplitRegistry
 from chess_teacher.pipelines.neural_network.splits import (
@@ -134,3 +136,21 @@ def test_fetch_game_ids_for_bucket_uses_version_and_bucket() -> None:
     where = fetch.call_args.kwargs["where"]
     assert "baseline-v1" in where
     assert "val" in where
+
+
+def test_eligible_sql_filters_account_when_set() -> None:
+    db = MagicMock()
+    registry = SplitRegistry(db, split_version=DEFAULT_SPLIT_SALT)
+    sql, params = registry._eligible_from_sql(account_id="acct-1")
+    assert "g.account_id = :account_id" in sql
+    assert params["account_id"] == "acct-1"
+    sql_all, params_all = registry._eligible_from_sql()
+    assert "account_id" not in sql_all
+    assert params_all == {}
+
+
+def test_ensure_eligible_games_for_account_requires_id() -> None:
+    db = MagicMock()
+    registry = SplitRegistry(db, split_version=DEFAULT_SPLIT_SALT)
+    with pytest.raises(ValueError, match="account_id is required"):
+        registry.ensure_eligible_games_for_account("")

@@ -7,7 +7,7 @@ Streamlit chess teaching app with local dev infra (Postgres, MinIO, Redis via Do
 - Interactive chess board visualization with Streamlit
 - Move history and game statistics
 - Stockfish integration for analysis
-- Pipelines for game ingestion and preprocessing
+- Pipelines for game ingestion, preprocessing, and game-split assignment
 - Local dev stack or cloud backends (Supabase, S3, Redis) via Doppler configs
 
 ## Prerequisites

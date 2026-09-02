@@ -148,7 +148,7 @@ def main() -> int:
     parser.add_argument(
         "--full-val",
         action="store_true",
-        help="Score all registry val games instead of a --limit sample.",
+        help="Score all registry val games (official frozen val; new games lag ≤1 user-pipeline run).",
     )
     parser.add_argument("--candidate-uri", type=str, default=None)
     parser.add_argument(

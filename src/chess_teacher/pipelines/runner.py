@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from chess_teacher.pipelines.ingestion.main import run_ingestion_pipeline
 from chess_teacher.pipelines.modes import PipelineMode
+from chess_teacher.pipelines.neural_network.main import run_assign_game_splits_pipeline
 from chess_teacher.pipelines.preprocessing.main import run_preprocessing_pipeline
 from chess_teacher.platform.account import Account
 from chess_teacher.platform.user import User
@@ -20,7 +21,7 @@ _DEFAULT_MAX_ACCOUNT_WORKERS = 4
 
 
 class PipelineRunner:
-    """Top-level orchestrator that runs ingestion then preprocessing per account."""
+    """Top-level orchestrator: ingestion → preprocessing → game-split assignment per account."""
 
     def __init__(
         self,
@@ -89,8 +90,26 @@ class PipelineRunner:
             account.account_id,
             preprocessing_result.result.value,
         )
+
+        logger.info(
+            "Starting game-split assignment for user=%s account=%s (%s).",
+            self.user.user_id,
+            account.account_id,
+            account.format_label(),
+        )
+        split_result = run_assign_game_splits_pipeline(
+            self.user.user_id,
+            account,
+            progress_window=self.progress_window,
+        )
+        logger.info(
+            "Finished game-split assignment for user=%s account=%s with result=%s.",
+            self.user.user_id,
+            account.account_id,
+            split_result.result.value,
+        )
         # Follow-up: run_user_finetune_pipeline(self.user.user_id) after baseline exists.
-        return [ingestion_result, preprocessing_result]
+        return [ingestion_result, preprocessing_result, split_result]
 
     def _run_accounts_sequential(self, accounts: list[Account]) -> list[PipelineRunResult]:
         results: list[PipelineRunResult] = []
@@ -117,7 +136,7 @@ def run_pipeline(
     mode: PipelineMode = PipelineMode.INCREMENTAL,
     progress_window: ProgressWindow | None = None,
 ) -> list[PipelineRunResult]:
-    """Run ingestion then preprocessing for every linked account."""
+    """Run ingestion, preprocessing, then game-split assignment for every linked account."""
     return PipelineRunner(
         user,
         db_client,
