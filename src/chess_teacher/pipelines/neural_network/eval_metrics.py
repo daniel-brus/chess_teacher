@@ -342,7 +342,10 @@ def format_phase_error_report(
         if not sliced:
             by_name[phase] = None
             continue
-        by_name[phase] = evaluate_datums(model, sliced, max_candidates=max_candidates)
+        try:
+            by_name[phase] = evaluate_datums(model, sliced, max_candidates=max_candidates)
+        except ValueError:
+            by_name[phase] = None
 
     batch = TrainingBatch(datums)
     feats, mask, labels, kept = batch.candidate_style_targets()

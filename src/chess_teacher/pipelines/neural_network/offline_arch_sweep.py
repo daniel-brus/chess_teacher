@@ -53,13 +53,18 @@ def run_arch_sweep(
 ) -> int:
     db = get_db_client()
     logger.info(
-        "Loading registry split once limit=%s split_version=%s feat_version=%s feat_dim=%s…",
+        "Loading registry split once limit=%s split_version=%s feat_version=%s feat_dim=%s...",
         limit,
         split_version,
         CANDIDATE_MOVE_FEAT_VERSION,
         MOVE_FEAT_DIM,
     )
-    split = load_registry_split(db, limit=limit, split_version=split_version)
+    split = load_registry_split(
+        db,
+        limit=limit,
+        split_version=split_version,
+        assign_if_missing=False,
+    )
     print("\n" + format_split_summary(split))
     train = split.train_datums
     val = split.val_datums

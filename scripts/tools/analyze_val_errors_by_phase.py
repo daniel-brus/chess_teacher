@@ -46,7 +46,7 @@ def run_analyze_val_errors_by_phase(
 ) -> int:
     db = get_db_client()
     logger.info(
-        "Loading frozen registry val full=%s limit=%s split_version=%s…",
+        "Loading frozen registry val full=%s limit=%s split_version=%s...",
         full_val,
         limit,
         split_version,
@@ -56,6 +56,7 @@ def run_analyze_val_errors_by_phase(
         split_version=split_version,
         limit=None if full_val else limit,
         full=full_val,
+        assign_if_missing=False,
     )
     if len(val) < 10:
         logger.error("Val set too small: %s moves", len(val))
@@ -74,7 +75,11 @@ def main() -> int:
     parser.add_argument("--model-uri", type=str, required=True)
     parser.add_argument("--split-version", type=str, default=DEFAULT_SPLIT_SALT)
     parser.add_argument("--limit", type=int, default=10000)
-    parser.add_argument("--full-val", action="store_true")
+    parser.add_argument(
+        "--full-val",
+        action="store_true",
+        help="Score all registry val games; --limit is ignored.",
+    )
     parser.add_argument("--error-limit", type=int, default=30)
     args = parser.parse_args()
     log_script_runtime_context(logger, script="analyze_val_errors_by_phase")

@@ -65,12 +65,10 @@ def test_run_arch_sweep_cold_starts_each_cell(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    load = MagicMock(return_value=_split())
-    monkeypatch.setattr(offline_arch_sweep, "load_registry_split", load)
-    monkeypatch.setattr(offline_arch_sweep, "get_db_client", lambda: MagicMock())
-
     created: list[dict[str, object]] = []
     fit_parents: list[object] = []
+    fit_datums: list[object] = []
+    eval_datums: list[object] = []
 
     class FakeTrainer:
         DEFAULT_EPOCHS = 20
@@ -82,16 +80,22 @@ def test_run_arch_sweep_cold_starts_each_cell(
             self, datums: object, *, weights_path: object = None
         ) -> tuple[MagicMock, dict[str, float]]:
             fit_parents.append(weights_path)
+            fit_datums.append(datums)
             model = MagicMock()
             model.count_params.return_value = 12345
             return model, {}
 
+    split = _split()
+    load = MagicMock(return_value=split)
+    monkeypatch.setattr(offline_arch_sweep, "load_registry_split", load)
+    monkeypatch.setattr(offline_arch_sweep, "get_db_client", lambda: MagicMock())
     monkeypatch.setattr(offline_arch_sweep, "BaselineTrainer", FakeTrainer)
-    monkeypatch.setattr(
-        offline_arch_sweep,
-        "evaluate_datums",
-        lambda model, datums: _metrics(disagree=0.22),
-    )
+
+    def _eval(model: object, datums: object) -> EvalMetrics:
+        eval_datums.append(datums)
+        return _metrics(disagree=0.22)
+
+    monkeypatch.setattr(offline_arch_sweep, "evaluate_datums", _eval)
 
     assert (
         offline_arch_sweep.run_arch_sweep(
@@ -105,8 +109,11 @@ def test_run_arch_sweep_cold_starts_each_cell(
     )
 
     load.assert_called_once()
+    assert load.call_args.kwargs["assign_if_missing"] is False
     assert len(created) == 4
     assert fit_parents == [None, None, None, None]
+    assert fit_datums == [split.train_datums] * 4
+    assert eval_datums == [split.val_datums] * 4
     hiddens = {(int(c["hidden"]), int(c["score_hidden"])) for c in created}
     assert hiddens == set(offline_arch_sweep.ARCH_SWEEP_GRID)
     for kwargs in created:

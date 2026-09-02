@@ -68,7 +68,7 @@ def _print_val_curve(rows: list[tuple[int, datetime | None, int, EvalMetrics]]) 
 def run_offline_catch_up(
     *,
     split_version: str,
-    limit: int,
+    val_limit: int,
     full_val: bool,
     max_rounds: int,
     min_new_moves: int,
@@ -87,16 +87,17 @@ def run_offline_catch_up(
 
     db = get_db_client()
     logger.info(
-        "Loading frozen registry val full=%s limit=%s split_version=%s (once)…",
+        "Loading frozen registry val full=%s val_limit=%s split_version=%s (once)...",
         full_val,
-        limit,
+        val_limit,
         split_version,
     )
     val = load_registry_val_datums(
         db,
         split_version=split_version,
-        limit=None if full_val else limit,
+        limit=None if full_val else val_limit,
         full=full_val,
+        assign_if_missing=False,
     )
     if len(val) < 10:
         logger.error("Val set too small: %s moves", len(val))
@@ -160,10 +161,13 @@ def run_offline_catch_up(
                 limit=batch_limit,
                 extra_where=exclude_sql,
             )
-            split = registry.split_datums(datums, assign_if_missing=True)
+            split = registry.split_datums(datums, assign_if_missing=False)
             train = split.train_datums
             if not train:
-                logger.error("No train datums after registry split (assign_if_missing=True).")
+                logger.error(
+                    "No train datums after registry split (assign_if_missing=False). "
+                    "Backfill ml.game_split_assignments first."
+                )
                 _print_val_curve(curve)
                 return 1
 
@@ -204,11 +208,21 @@ def run_offline_catch_up(
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--split-version", type=str, default=DEFAULT_SPLIT_SALT)
-    parser.add_argument("--limit", type=int, default=10000)
+    parser.add_argument(
+        "--val-limit",
+        "--limit",
+        dest="val_limit",
+        type=int,
+        default=10000,
+        help=(
+            "Val SAMPLE size when not --full-val (oldest-N then val slice). "
+            "Does not cap training batches; see --batch-limit. Ignored if --full-val."
+        ),
+    )
     parser.add_argument(
         "--full-val",
         action="store_true",
-        help="Score all registry val games (official frozen val).",
+        help="Score all registry val games (official frozen val; ignores --val-limit).",
     )
     parser.add_argument("--max-rounds", type=int, default=50)
     parser.add_argument("--min-new-moves", type=int, default=MIN_NEW_MOVES_BASELINE)
@@ -249,7 +263,7 @@ def main() -> int:
             return 1
     return run_offline_catch_up(
         split_version=str(args.split_version),
-        limit=max(50, int(args.limit)),
+        val_limit=max(50, int(args.val_limit)),
         full_val=bool(args.full_val),
         max_rounds=max(1, int(args.max_rounds)),
         min_new_moves=max(1, int(args.min_new_moves)),

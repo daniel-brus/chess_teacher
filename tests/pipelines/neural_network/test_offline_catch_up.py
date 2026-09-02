@@ -102,7 +102,7 @@ def _patch_common(
 def _run(**overrides: object) -> int:
     kwargs: dict[str, object] = {
         "split_version": "baseline-v1",
-        "limit": 100,
+        "val_limit": 100,
         "full_val": False,
         "max_rounds": 5,
         "min_new_moves": MIN_NEW_MOVES_BASELINE,
@@ -124,6 +124,8 @@ def test_source_does_not_import_production_pipelines() -> None:
     assert "run_baseline_training_pipeline" not in src
     assert "run_baseline_promotion_pipeline" not in src
     assert "loop_until_caught_up" not in src
+    assert "from chess_teacher.pipelines.neural_network.catch_up" not in src
+    assert "from chess_teacher.pipelines.neural_network import catch_up" not in src
 
 
 def test_already_caught_up_returns_zero(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -142,19 +144,60 @@ def test_already_caught_up_returns_zero(monkeypatch: pytest.MonkeyPatch) -> None
 
 def test_one_round_then_floor(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     t1 = datetime(2026, 2, 1, tzinfo=UTC)
-    ctx = _patch_common(
-        monkeypatch,
-        counts=[2500, 400, 400],
-        fetch_max=t1,
+    train_d = MagicMock(game_id="train1")
+    val_d = MagicMock(game_id="holdout_val")
+    test_d = MagicMock(game_id="holdout_test")
+    mixed = [train_d, val_d, test_d]
+    frozen_val = _val_datums()
+
+    store = MagicMock()
+    store.count_since.side_effect = [2500, 400, 400]
+    store.fetch_since.return_value = (mixed, t1)
+    trainer = MagicMock()
+    trainer.fit.return_value = (MagicMock(), {})
+    trainer_cls = MagicMock(return_value=trainer)
+    trainer_cls.save = staticmethod(
+        lambda model, path: (
+            Path(path).parent.mkdir(parents=True, exist_ok=True) or Path(path).write_text("k")
+        )
     )
+    registry = MagicMock()
+    registry.exclude_holdout_games_sql.return_value = "NOT EXISTS (holdout)"
+    registry.split_datums.return_value = GameSplitResult(
+        train=(train_d,),  # type: ignore[arg-type]
+        val=(val_d,),  # type: ignore[arg-type]
+        test=(test_d,),  # type: ignore[arg-type]
+        salt="baseline-v1",
+        counts=(
+            SplitCounts(bucket=SplitBucket.TRAIN, n_games=1, n_moves=1),
+            SplitCounts(bucket=SplitBucket.VAL, n_games=1, n_moves=1),
+            SplitCounts(bucket=SplitBucket.TEST, n_games=1, n_moves=1),
+        ),
+    )
+    val_loader = MagicMock(return_value=frozen_val)
+    eval_fn = MagicMock(return_value=_metrics())
+
+    monkeypatch.setattr(offline_catch_up, "get_db_client", lambda: MagicMock())
+    monkeypatch.setattr(offline_catch_up, "TrainingDataStore", MagicMock(return_value=store))
+    monkeypatch.setattr(offline_catch_up, "BaselineTrainer", trainer_cls)
+    monkeypatch.setattr(offline_catch_up, "get_split_registry", lambda _db, split_version: registry)
+    monkeypatch.setattr(offline_catch_up, "load_registry_val_datums", val_loader)
+    monkeypatch.setattr(offline_catch_up, "evaluate_datums", eval_fn)
+
     assert _run(output_dir=tmp_path, max_rounds=5) == 0
-    assert ctx["trainer"].fit.call_count == 1  # type: ignore[union-attr]
-    ctx["val_loader"].assert_called_once()  # type: ignore[union-attr]
-    fetch_kwargs = ctx["store"].fetch_since.call_args.kwargs  # type: ignore[union-attr]
+    assert trainer.fit.call_count == 1
+    fit_datums = trainer.fit.call_args.args[0]
+    assert list(fit_datums) == [train_d]
+    assert val_d not in fit_datums
+    assert test_d not in fit_datums
+    val_loader.assert_called_once()
+    assert val_loader.call_args.kwargs["assign_if_missing"] is False
+    eval_fn.assert_called()
+    assert eval_fn.call_args.args[1] is frozen_val
+    fetch_kwargs = store.fetch_since.call_args.kwargs
     assert fetch_kwargs["extra_where"] == "NOT EXISTS (holdout)"
     assert fetch_kwargs["limit"] == 100
-    ctx["registry"].split_datums.assert_called()  # type: ignore[union-attr]
-    assert ctx["registry"].split_datums.call_args.kwargs["assign_if_missing"] is True  # type: ignore[union-attr]
+    assert registry.split_datums.call_args.kwargs["assign_if_missing"] is False
 
 
 def test_stall_when_cutoff_and_count_unchanged(
@@ -189,19 +232,19 @@ def test_max_rounds_returns_three(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     registry = MagicMock()
     registry.exclude_holdout_games_sql.return_value = "NOT EXISTS (holdout)"
-    registry.split_datums.side_effect = lambda datums, assign_if_missing=True: _split(list(datums))
+    registry.split_datums.side_effect = lambda datums, assign_if_missing=False: _split(list(datums))
 
+    val_loader = MagicMock(return_value=_val_datums())
     monkeypatch.setattr(offline_catch_up, "get_db_client", lambda: MagicMock())
     monkeypatch.setattr(offline_catch_up, "TrainingDataStore", MagicMock(return_value=store))
     monkeypatch.setattr(offline_catch_up, "BaselineTrainer", trainer_cls)
     monkeypatch.setattr(offline_catch_up, "get_split_registry", lambda _db, split_version: registry)
-    monkeypatch.setattr(
-        offline_catch_up, "load_registry_val_datums", lambda *_a, **_k: _val_datums()
-    )
+    monkeypatch.setattr(offline_catch_up, "load_registry_val_datums", val_loader)
     monkeypatch.setattr(offline_catch_up, "evaluate_datums", lambda *_a, **_k: _metrics())
 
     assert _run(max_rounds=2) == 3
     assert trainer.fit.call_count == 2
+    val_loader.assert_called_once()
 
 
 def test_start_from_production_cutoff_is_read_only(
@@ -241,6 +284,8 @@ def test_parser_has_no_hidden_or_promote() -> None:
     help_text = offline_catch_up.build_arg_parser().format_help()
     assert "--hidden" not in help_text
     assert "--promote" not in help_text
+    assert "--val-limit" in help_text
+    assert "--batch-limit" in help_text
 
 
 def test_run_rejects_mutex_kwargs(monkeypatch: pytest.MonkeyPatch) -> None:
