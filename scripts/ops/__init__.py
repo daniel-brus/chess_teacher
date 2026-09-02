@@ -1,1 +1,1 @@
-"""One-shot prod ops scripts (backfill, reset, catch-up training)."""
+"""Ops scripts: production catch-up/reset plus offline siblings (no DB promote)."""

@@ -1,10 +1,10 @@
 # ML training roadmap — baseline + personalized bots
 
-**Status:** Phase 1 + 1b implemented on branch `feature/ml-phase1-eval-splits` (Phases 2–3 offline; production pipelines unchanged until Phase 4)
+**Status:** Phase 1 + 1b on `develop`. Game-split **assignment** runs in the daily user `PipelineRunner` after preprocess (not train/promote). Phase 2a **tools + `DEFAULT_EPOCHS=20`** (justified pick, not a plateau). Phases 2b–3 offline; production train/promote unchanged until Phase 4.
 
 **Audience:** humans and coding agents working on `src/chess_teacher/pipelines/neural_network/`
 
-**Last updated:** 2026-09-01 (rev: experimental questions, feat investigation, orchestration end-state)
+**Last updated:** 2026-09-02 (rev: `DEFAULT_EPOCHS=20` justified pick; 2a sweep 3–20)
 
 ---
 
@@ -45,6 +45,7 @@ These choices simplify the roadmap; revisit only if metrics or product needs cha
 | **Recency (user bots)** | Strong recency weights + time-ordered user val split (Phase 3). |
 | **Baseline capacity** | Shared trunk must grow as platform user diversity grows — enables effective per-user finetune later (wider/deeper ≠ per-user input dims). |
 | **Input features** | Separate hypothesis: richer **cues** per position (phase-specific structure, etc.) — investigate before feat version bump. |
+| **Existing `baseline_models` (v50 / v51, ~2026-08)** | **POC only.** Deletable. Do **not** spend on `--full-val` or artifact archaeology vs those URIs. Optional cheap `--train-inline` vs production on the same `--limit` slice is nice-to-have, never a gate. New work is ranked on **registry val vs itself**. Phase 4 starts a **fresh** train/promote chain. |
 
 ---
 
@@ -88,7 +89,9 @@ This document captures the agreed phased plan for:
 4. Adding **recency bias** for user finetune (not baseline)
 5. Delivering a **production-ready, orchestratable** training + promotion routine (Phase 4)
 
-During **Phases 1–3**, implement **library code** under `pipelines/neural_network/` plus **thin scripts** under `scripts/tools/` and `scripts/ops/`. Do **not** wire new logic into `run_baseline_training_pipeline()` / orchestrated entrypoints until Phase 4.
+During **Phases 1–3**, implement **library code** under `pipelines/neural_network/` plus **thin scripts** under `scripts/tools/` and `scripts/ops/`. Do **not** wire new logic into `run_baseline_training_pipeline()` / `run_baseline_promotion_pipeline()` until Phase 4.
+
+**Interim (Phases 1–3):** `AssignGameSplitsStep` runs from the per-account user `PipelineRunner` via `run_assign_game_splits_pipeline()` so `ml.game_split_assignments` stays current. That is assignment only — not train exclusion or promotion eval. **Phase 4:** drop the standalone split “pipeline”; fold assignment into preprocessing (or a direct `split_registry` call). See [Pipeline consolidation](#pipeline-consolidation-phase-4).
 
 ---
 
@@ -103,13 +106,15 @@ Use **registry val** + stratified metrics unless noted. Primary success metric f
 | E1 | Do game-level splits give stable, reproducible val sets? | Same `split_version` → same val games across runs |
 | E2 | Are stratified metrics computable and sensible? | agree_t1 ≥ disagree_t1 typically; counts in split summary |
 
+**Reference run (trusted for relative compares, not locked HPs):** `--limit 10000`, cold 128/64, 3 epochs, registry val `disagree_t1≈0.20`.
+
 ### Baseline — tuning & comparison (Phase 2a)
 
 | # | Question | How we know |
 |---|----------|-------------|
-| E3 | What epoch count minimizes val loss without overfitting train? | Epoch sweep on registry split; train–val gap |
-| E4 | Would a new model beat **production** on honest val? | Promotion sibling: Δ val top1, Δ disagree_t1 |
-| E5 | Do defaults hold at `--limit 10000+`? | Repeat best config; val game count ≥ ~100 |
+| E3 | What epoch count minimizes val loss without overfitting train? | **Justified pick `20`.** Grid 3–20 on `--limit 10000` (32 val games): `disagree_t1` still climbing (3: 0.20 → 20: 0.265); va_loss still falling; train–val top1 gap modest (0.008 at 20). No plateau. Revisit in 2b if larger val or replay disagrees. |
+| E4 | *(optional)* Cheap sanity: new cold train vs POC production URI on the **same `--limit` val slice** | Done informational: inline@20 vs v50, `disagree_t1 +0.057` on 32-game slice. **Not a gate.** Skip `--full-val` vs v50/v51. |
+| E5 | Do defaults hold at `--limit 10000+`? | 10k sample only so far; val games=32 ≪ registry val (1311). 2b replay / larger sample can revisit. |
 
 ### Baseline — capacity, features, incremental (Phase 2b)
 
@@ -172,7 +177,7 @@ Same capabilities should be reachable from three places — **one library, many 
 | Production (today) | Split-based sibling (offline) | Phase |
 |--------------------|----------------------------------|-------|
 | `scripts/entrypoints/baseline_training.py` | `scripts/tools/offline_baseline_train_eval.py` ✅ | 1 |
-| `scripts/entrypoints/baseline_promotion.py` | `scripts/ops/offline_baseline_promotion.py` (proposed) | **2a** |
+| `scripts/entrypoints/baseline_promotion.py` | `scripts/ops/offline_baseline_promotion.py` ✅ | **2a** |
 | `scripts/ops/baseline_train_until_caught_up.py` | `scripts/ops/offline_baseline_catch_up.py` (proposed) | **2b** |
 
 Siblings use **registry val** + **stratified metrics**; exclude val/test from train. They do **not** replace entrypoints until Phase 4 merges the same eval/split logic inward.
@@ -194,7 +199,7 @@ Root notebook for interactive baseline work on develop. Extend incrementally —
 | Phase | Notebook additions (proposed) |
 |-------|-------------------------------|
 | **1 / 1b** ✅ | Cells: backfill status, registry split summary, call `evaluate_datums` on a loaded model URI |
-| **2a** | Promotion-style compare (production vs candidate / two URIs) on registry val; epoch sweep table |
+| **2a** ✅ (local notebook; file is gitignored) | Promotion-style compare on registry val; epoch sweep via `experiment_baseline_epochs.py` |
 | **2b** | Mini catch-up replay (1–3 batches) with val curve plot; **feat error analysis** (E10–E11) on endgame val failures |
 | **3** | User section: pick `account_id`, time split, finetune, disagree metric vs baseline on user val |
 | **4+** | Optional cells mirroring production promotion gates (read-only inspect before wiring) |
@@ -210,10 +215,11 @@ Notebook may call pipeline functions **or** offline library helpers — prefer *
 | Model | Candidate-style: state tower `128→128`, per-move scorer `64`, up to 128 candidates × 55 move feats (**~30–40k params** — `hidden`/`score_hidden` are layer widths, not param count) |
 | Training | Incremental batches via `main.py` pipeline; trains on all fetched moves |
 | Promotion | `RandomEvalSetProvider` — random 2k moves, may overlap training |
-| Offline sweep | `scripts/tools/experiment_baseline_epochs.py` — 80/20 split by **move** (leakage risk) |
+| Offline sweep | `scripts/tools/experiment_baseline_epochs.py` — registry split + stratified val (Phase 2a) |
 | Develop notebook | `training_develop.ipynb` — interactive baseline train/inspect (pipeline today; extend for split eval) |
 | Personalization | Not implemented; `fetch_for_account()` and `training_state.scope = user:{id}` exist as scaffolding |
 | Style weighting | `ply_weights.py` — ply reweight + SF-disagree boost (default max 2×) |
+| Split registry | User `PipelineRunner` assigns after preprocess (`AssignGameSplitsStep`). Train/promote still ignore it until Phase 4 |
 
 Key files:
 
@@ -222,6 +228,8 @@ Key files:
 - `src/chess_teacher/pipelines/neural_network/create_training_set.py` — data loading
 - `src/chess_teacher/pipelines/neural_network/ply_weights.py` — sample weights
 - `src/chess_teacher/pipelines/neural_network/main.py` — production entrypoints
+- `src/chess_teacher/pipelines/neural_network/offline_eval.py` — shared offline split/URI helpers
+- `src/chess_teacher/pipelines/neural_network/split_steps.py` — `AssignGameSplitsStep` (user pipeline)
 
 ---
 
@@ -257,7 +265,14 @@ Personalization quality is measured mainly on **SF-disagree** positions (user di
 
 ```mermaid
 flowchart TB
-  subgraph today ["Production today (unchanged Phases 1–3)"]
+  subgraph today ["Production user pipeline"]
+    U1[ingestion]
+    U2[preprocessing]
+    U3[AssignGameSplits]
+    U1 --> U2 --> U3
+  end
+
+  subgraph train ["Production train/promote (unchanged until Phase 4)"]
     P1[baseline_training pipeline]
     P2[baseline_promotion pipeline]
   end
@@ -271,6 +286,7 @@ flowchart TB
   end
 
   DB[(Postgres)]
+  U3 --> DB
   DB --> P1
   DB --> dev
   dev --> NB
@@ -278,6 +294,8 @@ flowchart TB
   dev -->|"Phase 4+"| P1
   dev -->|"Phase 4+"| P2
 ```
+
+**Phase 4 orchestration:** `AssignGameSplits` merges into preprocessing (not a separate user-pipeline stage). Platform baseline train/promote/catch-up consolidate into ≤2 NN pipelines — see [Pipeline consolidation](#pipeline-consolidation-phase-4).
 
 ---
 
@@ -329,7 +347,8 @@ Log per-split: game counts, move counts, SF-disagree fraction.
 |------|-----------------|-------|
 | Schema | `metadata.yml` → `ml.game_split_assignments` | PK `(split_version, game_id)`; columns `bucket`, `assigned_at` |
 | Registry module | `split_registry.py` | `get_bucket(game_id)`, `ensure_assigned(game_id)`, bulk backfill, SQL exclude clause for val/test |
-| Backfill script | `scripts/tools/backfill_game_splits.py` | Assign all known games for a `split_version`; idempotent |
+| Backfill script | `scripts/tools/backfill_game_splits.py` | One-shot assign all known games; idempotent. Daily catch-up is the user-pipeline step |
+| User pipeline step | `AssignGameSplitsStep` via `run_assign_game_splits_pipeline` | After preprocess in `PipelineRunner`; account-scoped; ≤1 day lag for new games |
 | Wire offline tools | `offline_baseline_train_eval.py`, later epoch sweep | Filter datums via registry (or assign-on-read) instead of only in-memory split |
 | Tests | `test_split_registry.py` | Deterministic assign; idempotent backfill; exclude filter |
 
@@ -348,11 +367,14 @@ game_split_assignments:
 
 **Assign rule:** same as `game_split_bucket()` — registry is the persistence layer, not a new policy.
 
-**Phase 1b does not wire production training** — only DB + library + offline scripts. Phase 4 adds `fetch_since` / `LoadNewDataStep` exclusion using the registry.
+**Production assignment (user pipeline):** after `EnrichMoveCharacteristicsStep`, `PipelineRunner` runs `game_split_assignment` for that account. New eligible games enter the registry on the next user-pipeline run (cron / Streamlit; typically ≤1 day). `--full-val` is the official frozen val set plus that lag. One-shot `backfill_game_splits.py` remains for empty environments.
+
+**Phase 1b does not wire production training or promotion** — no `fetch_since` exclusion, no registry eval in `baseline_promotion`. Phase 4 adds those.
 
 ### Exit criteria (Phase 1b)
 
 - Backfill populates assignments for develop DB
+- Daily user pipeline assigns new eligible games per account (`AssignGameSplitsStep`)
 - Offline train+eval uses registry; val game set stable across runs
 - Documented `split_version` logged in script output (prep for MLflow in Phase 2+)
 
@@ -362,16 +384,16 @@ Split into **2a** (compare / tune on fixed val) then **2b** (incremental replay)
 
 ### Phase 2a — Promotion sibling + sweeps
 
-**Goal:** Compare models on **honest registry val**; pick epoch/arch defaults.
+**Goal:** Pick epoch (then later arch) defaults on **honest registry val**. Rank candidate vs candidate, not vs POC production.
 
 **Prerequisite:** Phase 1 terminal experiments trusted (`--limit 10000+`).
 
 | Item | Path | Notes |
 |------|------|-------|
-| Epoch sweep | Upgrade `experiment_baseline_epochs.py` | Registry split + stratified val (not move-level 80/20) |
-| **Promotion sibling** | `scripts/ops/offline_baseline_promotion.py` | Mimics `baseline_promotion.py`: score model A vs B on **full registry val**; stratified metrics; **no** `ApplyPromotionStep` / no DB promote |
-| Arch sweep (optional) | `scripts/tools/offline_baseline_arch_sweep.py` | hidden 128 vs 256, score_hidden 64 vs 128 |
-| Notebook | `training_develop.ipynb` | Cells: val compare two URIs; sweep results table |
+| Epoch sweep | Upgrade `experiment_baseline_epochs.py` | Registry split + stratified val (not move-level 80/20) ✅ |
+| **Promotion sibling** | `scripts/ops/offline_baseline_promotion.py` | Mimics `baseline_promotion.py`: score model A vs B on **registry val**; stratified metrics; **no** `ApplyPromotionStep` / no DB promote ✅ |
+| Arch sweep (optional) | `scripts/tools/offline_baseline_arch_sweep.py` | hidden 128 vs 256, score_hidden 64 vs 128 — **Phase 2b** |
+| Notebook | `training_develop.ipynb` | Cells: val compare two URIs ✅; sweep via CLI |
 
 **Promotion sibling behaviour (sketch):**
 
@@ -382,7 +404,7 @@ Split into **2a** (compare / tune on fixed val) then **2b** (incremental replay)
 → print stratified val for both; print delta; exit (no promote)
 ```
 
-**Exit criteria (2a):** Documented defaults for `epochs`, `hidden`, `score_hidden`, `style_disagree_boost`. Can answer “would this beat production on registry val?”
+**Exit criteria (2a):** Documented `epochs` default from the registry-val sweep (plateau or justified pick). ✅ `BaselineTrainer.DEFAULT_EPOCHS = 20` — peak on 3–20, still climbing, 32-game val; justified not plateaued. Arch / `style_disagree_boost` stay 2b. **Beating v50/v51 is not an exit criterion.** Promotion sibling stays for Phase 4 ports and optional cheap `--train-inline` deltas.
 
 ### Phase 2b — Catch-up sibling + batch replay
 
@@ -484,6 +506,31 @@ w = normalize(ply_weight * style_disagree_weight * recency_weight)
 
 **Only after Phases 2–3 validated on develop data.** Merge proven **library + sibling** behaviour into entrypoints — offline ops siblings remain for sandbox experiments. **This phase delivers what you orchestrate on the platform.**
 
+### Pipeline consolidation (Phase 4)
+
+When wiring neural-network work into orchestration, **collapse today’s fragmented entrypoints** — do not add more one-off pipelines for small operations.
+
+**Intent (owner preference):**
+
+| Today (interim) | Phase 4 target |
+|-----------------|----------------|
+| `run_assign_game_splits_pipeline()` — full `Pipeline` with one step | **Not a pipeline.** Call `SplitRegistry.ensure_games()` / `AssignGameSplitsStep` logic inline at the **end of preprocessing** (per account), or as the last step inside `run_preprocessing_pipeline()` — same as any other small transform |
+| `run_baseline_training_pipeline()` | Part of **one** platform baseline orchestration surface (see below) |
+| `run_baseline_promotion_pipeline()` | Same — not a third scheduled “pipeline” unless ops genuinely need independent cadence |
+| `baseline_train_until_caught_up` (ops job) | Same train/promote library; optional loop wrapper in `scripts/ops/` or a single orchestrated job |
+| `run_user_finetune_pipeline()` (proposed) | Second surface **only if** per-user finetune is conceptually separate from platform baseline |
+
+**Target shape — at most two orchestrated neural-network pipelines:**
+
+1. **Platform baseline** — train (+ optional promote / catch-up in one job or chained entrypoints sharing one `Pipeline` name). Registry train exclusion, registry val eval, MLflow, cutoff updates.
+2. **User finetune** (Phase 4+) — per-user scope, time split, recency weights — **only if** it stays a distinct product operation from platform baseline.
+
+Everything else (`split_registry` assign, metric helpers, split filters) stays **library code** invoked from preprocessing or baseline steps — not its own `Pipeline(name=…)` or cron job.
+
+**Rationale:** `game_split_assignment` is a small, idempotent DB write (hash bucket per eligible `game_id`). Calling it a pipeline overstates the operation and clutters `PipelineRunner` / orchestration. Preprocessing already produces the rows splits depend on; assignment belongs on that tail.
+
+**Non-goals:** Do not merge ingestion/preprocessing into baseline training — data prep and ML train remain separate domains. Consolidation applies to **neural_network entrypoints** and **split assignment**, not the whole user `PipelineRunner` chain.
+
 ### Acceptance criteria (production-ready routine)
 
 - [ ] **E16–E18** passed on develop (no val leakage; offline/online metric parity)
@@ -494,12 +541,14 @@ w = normalize(ply_weight * style_disagree_weight * recency_weight)
 
 | Component | Change |
 |-----------|--------|
+| **Orchestration** | Consolidate NN entrypoints per [Pipeline consolidation](#pipeline-consolidation-phase-4); remove `run_assign_game_splits_pipeline()` as a standalone pipeline |
+| `AssignGameSplitsStep` | Move to preprocessing tail (or inline registry call); keep `backfill_game_splits.py` for empty envs only |
 | `LoadNewDataStep` | Exclude val/test `game_id`s via **split registry** (`split_version=baseline-v1`) |
 | `RandomEvalSetProvider` | Replace with registry-backed val provider (same fixed games every promotion) |
 | `DecidePromotionStep` | Primary: val overall top1; guardrail: val disagree top1 must not drop > X |
 | `TrainIncrementalStep` | Optional early stopping on registry val; log `split_version` + val metrics to MLflow |
-| `baseline_promotion.py` / catch-up ops | Use same scorers/splits as `offline_baseline_*` siblings |
-| New pipeline | `run_user_finetune_pipeline(user_id)` — port logic from Phase 3 ops siblings |
+| `baseline_promotion.py` / catch-up ops | Use same scorers/splits as `offline_baseline_*` siblings; prefer one baseline job chain over many pipeline names |
+| User finetune | Second orchestrated pipeline **only if** still distinct from platform baseline — port from Phase 3 ops siblings |
 | Inference | User model if exists, else baseline |
 | Notebook | Document production vs offline paths; cells call production pipelines where appropriate |
 
@@ -527,9 +576,10 @@ Test set: manual / release-tag evaluation only — never promotion or epoch tuni
 | 3 | `offline_baseline_train_eval.py` | tools | No | done |
 | 3b | Split registry + backfill | library + tools | No | done |
 | 3c | Offline train uses registry | tools | No | done |
-| 4a | Upgrade `experiment_baseline_epochs.py` | tools | No | |
-| 4b | `offline_baseline_promotion.py` | **ops** | No | |
-| 4c | Notebook: registry val compare | notebook | No | |
+| 3d | `AssignGameSplitsStep` in user `PipelineRunner` | entrypoints (assignment only) | **Yes** (registry writes) | done |
+| 4a | Upgrade `experiment_baseline_epochs.py` | tools | No | done |
+| 4b | `offline_baseline_promotion.py` | **ops** | No | done |
+| 4c | Notebook: registry val compare | notebook | No | done |
 | 5a | `offline_baseline_catch_up.py` | **ops** | No | |
 | 5b | `offline_baseline_arch_sweep.py` | tools | No | |
 | 5b2 | Feat investigation (phase slices, passed pawn shortlist) | notebook + tools | No | |
@@ -541,6 +591,7 @@ Test set: manual / release-tag evaluation only — never promotion or epoch tuni
 | 7b | `offline_user_promotion.py` + `offline_user_catch_up.py` | **ops** | No | |
 | 7c | Notebook: user finetune section | notebook | No | |
 | 8 | Promotion + train exclusion via registry | entrypoints | **Yes** | |
+| 8b | Consolidate NN pipelines; fold split assign into preprocess | entrypoints + runner | **Yes** | |
 | 9 | User finetune pipeline + inference | entrypoints | **Yes** | |
 | 10 | Orchestration parity check (E16–E18) | entrypoints + ops | **Yes** | |
 
@@ -551,25 +602,26 @@ Test set: manual / release-tag evaluation only — never promotion or epoch tuni
 When asked to implement part of this roadmap:
 
 1. Read this file and the referenced source files under `pipelines/neural_network/`
-2. Respect phase boundaries — **Phases 1–3 = library + tools/ops + notebook only**
-3. Reuse `BaselineTrainer`, `TrainingBatch`, `candidate_style_sample_weights`, promotion scorers where possible
+2. Respect phase boundaries — **Phases 1–3 = library + tools/ops + notebook**, except **split assignment** in the user `PipelineRunner` (interim). Do **not** change `run_baseline_training_pipeline()` / `run_baseline_promotion_pipeline()` until Phase 4. In Phase 4, **consolidate** NN orchestration per [Pipeline consolidation](#pipeline-consolidation-phase-4) — no standalone `game_split_assignment` pipeline
+3. Reuse `BaselineTrainer`, `TrainingBatch`, `candidate_style_sample_weights`, `offline_eval` helpers, promotion scorers where possible
 4. Split by **`game_id`**, not by move index; prefer **registry** for platform baseline
 5. User bots: **time split per account** in Phase 3 — not platform hash registry
 6. Report **stratified** metrics (overall / SF-agree / SF-disagree) in every eval script and notebook cell
 7. **Ops siblings** mimic `scripts/entrypoints/` and `scripts/ops/` shape but stay split-based and non-promoting until Phase 4
 8. **Notebook:** add cells that call the same library functions as scripts — no notebook-only training logic
-9. Do not run `pytest` / `mypy` in agent — ask the user to run manually (project rule)
+9. Run `pytest` / `mypy` / `ruff` via the venv when changing NN code (project rule).
 10. Serious offline runs: `--limit 10000+`; small limits are smoke tests only
+11. Treat current production/candidate Keras rows as **POC**. Do not plan `--full-val` or S3 archaeology vs v50/v51. Rank new models on registry val. Cheap `--train-inline` vs a still-present URI is optional.
 
 ---
 
 ## Current workflow (you are here)
 
-1. **Terminal-only** — `backfill_game_splits.py` then `offline_baseline_train_eval.py` (no persist, no siblings yet)
-2. **Phase 2a** — promotion sibling + epoch sweep + notebook compare cells
-3. **Phase 2b** — catch-up sibling + notebook replay plot
+1. **Terminal-only** — `backfill_game_splits.py` then `offline_baseline_train_eval.py` ✅
+2. **Phase 2a** — epoch sweep + promotion sibling + `DEFAULT_EPOCHS=20` (justified pick) ✅
+3. **Phase 2b** — catch-up sibling + arch sweep + feat investigation
 4. **Phase 3** — user tools + user ops siblings + notebook user section
-5. **Phase 4** — merge into entrypoints; **orchestrated** train / promote / catch-up
+5. **Phase 4** — merge into entrypoints; **consolidate** NN pipelines (≤2); fold split assign into preprocess; **orchestrated** train / promote / catch-up
 6. **Phase 5** — product polish
 
 Each phase should close the **experimental questions** (E1–E18) listed above for that scope.
@@ -578,4 +630,4 @@ Each phase should close the **experimental questions** (E1–E18) listed above f
 
 ## Related conversation
 
-Plan derived from architecture review session (baseline bot maturity, personalization, recency, ops siblings, `training_develop.ipynb`). Production pipelines intentionally left unchanged until offline phases prove metrics.
+Plan derived from architecture review session (baseline bot maturity, personalization, recency, ops siblings, `training_develop.ipynb`). Production **train/promote** stay unchanged until Phase 4. Game-split **assignment** runs in the daily user pipeline today (interim); Phase 4 folds it into preprocessing and consolidates NN orchestration.

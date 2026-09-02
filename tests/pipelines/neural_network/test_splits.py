@@ -9,6 +9,7 @@ import pytest
 from chess_teacher.pipelines.neural_network.splits import (
     DEFAULT_SPLIT_SALT,
     SplitBucket,
+    format_split_summary,
     game_split_bucket,
     split_datums_by_game,
 )
@@ -74,3 +75,13 @@ def test_split_bucket_distribution_roughly_matches_targets() -> None:
     assert train_frac == pytest.approx(0.85, abs=0.03)
     assert val_frac == pytest.approx(0.10, abs=0.02)
     assert test_frac == pytest.approx(0.05, abs=0.02)
+
+
+def test_format_split_summary_includes_version_and_counts() -> None:
+    datums = [_FakeDatum(game_id=f"g{i}", move_id=f"m{i}") for i in range(20)]
+    split = split_datums_by_game(datums, compute_disagree_frac=False)  # type: ignore[arg-type]
+    text = format_split_summary(split)
+    assert f"split_version={DEFAULT_SPLIT_SALT!r}" in text
+    assert "train" in text
+    assert "val" in text
+    assert "test" in text

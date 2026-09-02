@@ -166,8 +166,17 @@ class SplitRegistry:
             bucket_for_game=bucket_for_game,
         )
 
-    def backfill_eligible_games(self, *, batch_size: int = 500) -> BackfillResult:
-        """Assign every training-eligible game not yet in the registry."""
+    def backfill_eligible_games(
+        self,
+        *,
+        batch_size: int = 500,
+        account_id: str | None = None,
+    ) -> BackfillResult:
+        """Assign training-eligible games not yet in the registry.
+
+        When ``account_id`` is set, only that account's games are scanned
+        (used by the daily user pipeline). Platform-wide backfill omits it.
+        """
         if batch_size < 1:
             raise ValueError(f"batch_size must be >= 1, got {batch_size}")
         self.ensure_table()
@@ -177,12 +186,16 @@ class SplitRegistry:
             MoveCharacteristics.get_metadata(),
         )
 
-        eligible = self._count_eligible_games()
+        eligible = self._count_eligible_games(account_id=account_id)
         newly_assigned = 0
         already_assigned = 0
         offset = 0
         while offset < eligible:
-            game_ids = self._fetch_eligible_game_ids(limit=batch_size, offset=offset)
+            game_ids = self._fetch_eligible_game_ids(
+                limit=batch_size,
+                offset=offset,
+                account_id=account_id,
+            )
             if not game_ids:
                 break
             existing = self.fetch_buckets(game_ids)
@@ -190,8 +203,9 @@ class SplitRegistry:
             newly_assigned += self.ensure_games(game_ids)
             offset += len(game_ids)
             logger.info(
-                "Backfill progress split_version=%s offset=%s/%s batch=%s",
+                "Backfill progress split_version=%s account_id=%s offset=%s/%s batch=%s",
                 self.split_version,
+                account_id,
                 offset,
                 eligible,
                 len(game_ids),
@@ -202,6 +216,31 @@ class SplitRegistry:
             newly_assigned=newly_assigned,
             already_assigned=already_assigned,
         )
+
+    def ensure_eligible_games_for_account(
+        self,
+        account_id: str,
+        *,
+        batch_size: int = 500,
+    ) -> BackfillResult:
+        """Assign eligible games for one account (idempotent)."""
+        if not account_id:
+            raise ValueError("account_id is required")
+        return self.backfill_eligible_games(batch_size=batch_size, account_id=account_id)
+
+    def fetch_game_ids_for_bucket(self, bucket: SplitBucket) -> list[str]:
+        """Return stored ``game_id``s for one bucket of this ``split_version``."""
+        self.ensure_table()
+        where = (
+            f"{generate_ident_is_literal('split_version', self.split_version)} "
+            f"AND {generate_ident_is_literal('bucket', bucket.value)}"
+        )
+        rows = GameSplitAssignment.fetch_all_from_db(
+            self.db_client,
+            where=where,
+            order_by='"game_id" ASC',
+        )
+        return [row.game_id for row in rows]
 
     def exclude_holdout_games_sql(self, *, game_id_column: str = "g.game_id") -> str:
         """SQL fragment: true when ``game_id`` is not registry val/test (Phase 4 train filter)."""
@@ -220,24 +259,41 @@ class SplitRegistry:
             f"AND {generate_ident_is_literal('game_id', game_id)}"
         )
 
-    def _count_eligible_games(self) -> int:
-        sql = f"SELECT COUNT(DISTINCT m.game_id) AS n{_ELIGIBLE_GAMES_SQL}"
+    def _eligible_from_sql(self, *, account_id: str | None = None) -> tuple[str, dict[str, object]]:
+        sql = _ELIGIBLE_GAMES_SQL
+        params: dict[str, object] = {}
+        if account_id is not None:
+            sql += " AND g.account_id = :account_id"
+            params["account_id"] = account_id
+        return sql, params
+
+    def _count_eligible_games(self, *, account_id: str | None = None) -> int:
+        from_sql, params = self._eligible_from_sql(account_id=account_id)
+        sql = f"SELECT COUNT(DISTINCT m.game_id) AS n{from_sql}"
         rows = self.db_client.engine.execute_parameterized_query(
             sql,
-            {},
+            params,
             session_settings=_MOVES_QUERY_SESSION_SETTINGS,
         )
         return int(rows[0]["n"]) if rows else 0
 
-    def _fetch_eligible_game_ids(self, *, limit: int, offset: int) -> list[str]:
+    def _fetch_eligible_game_ids(
+        self,
+        *,
+        limit: int,
+        offset: int,
+        account_id: str | None = None,
+    ) -> list[str]:
+        from_sql, params = self._eligible_from_sql(account_id=account_id)
         sql = (
-            f"SELECT DISTINCT m.game_id AS game_id{_ELIGIBLE_GAMES_SQL} "
+            f"SELECT DISTINCT m.game_id AS game_id{from_sql} "
             "ORDER BY m.game_id "
             "LIMIT :limit OFFSET :offset"
         )
+        params = {**params, "limit": limit, "offset": offset}
         rows = self.db_client.engine.execute_parameterized_query(
             sql,
-            {"limit": limit, "offset": offset},
+            params,
             session_settings=_MOVES_QUERY_SESSION_SETTINGS,
         )
         return [str(row["game_id"]) for row in rows]

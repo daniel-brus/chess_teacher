@@ -8,7 +8,11 @@ from chess_teacher.pipelines.neural_network.candidate_eval import (
     CANDIDATE_MOVE_FEAT_KEYS,
     MOVE_FEAT_DIM,
 )
-from chess_teacher.pipelines.neural_network.eval_metrics import compute_candidate_style_metrics
+from chess_teacher.pipelines.neural_network.eval_metrics import (
+    EvalMetrics,
+    compute_candidate_style_metrics,
+    format_eval_delta,
+)
 
 
 def _synthetic_batch(
@@ -87,3 +91,32 @@ def test_as_dict_includes_stratified_keys() -> None:
     assert "top1_sf_agree" in d
     assert "top1_sf_disagree" in d
     assert d["n_eval"] == 2.0
+
+
+def _metrics(*, top1: float, agree: float, disagree: float) -> EvalMetrics:
+    return EvalMetrics(
+        top1_overall=top1,
+        top3_overall=0.9,
+        top1_sf_agree=agree,
+        top3_sf_agree=0.95,
+        top1_sf_disagree=disagree,
+        top3_sf_disagree=0.4,
+        top1_overall_weighted=top1,
+        n_eval=100,
+        n_dropped=0,
+        n_sf_agree=50,
+        n_sf_disagree=50,
+        sf_disagree_frac=0.5,
+    )
+
+
+def test_format_eval_delta_signs_and_informational_flags() -> None:
+    text = format_eval_delta(
+        _metrics(top1=0.42, agree=0.70, disagree=0.22),
+        _metrics(top1=0.40, agree=0.71, disagree=0.20),
+    )
+    assert "top1=+0.0200" in text
+    assert "agree_t1=-0.0100" in text
+    assert "disagree_t1=+0.0200" in text
+    assert "informational_beats_top1=true" in text
+    assert "informational_beats_disagree=true" in text

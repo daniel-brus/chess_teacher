@@ -5,6 +5,7 @@ Roadmap: ``.agents/docs/ml-training-roadmap.md`` (Phase 4+ wires held-out eval h
 Follow-ups (not wired here yet):
 - ``run_user_finetune_pipeline(user_id)`` — hook from daily ``PipelineRunner`` after preprocess.
 - Held-out validation set with periodic rotation (replace ``RandomEvalSetProvider``).
+- Train exclusion of registry val/test (Phase 4). Split *assignment* already runs from ``PipelineRunner``.
 """
 
 from __future__ import annotations
@@ -25,6 +26,9 @@ from chess_teacher.pipelines.neural_network.promotion_steps import (
     SampleEvalSetStep,
     ScoreModelsStep,
 )
+from chess_teacher.pipelines.neural_network.split_steps import AssignGameSplitsStep
+from chess_teacher.pipelines.neural_network.splits import DEFAULT_SPLIT_SALT
+from chess_teacher.platform.account import Account
 from chess_teacher.utils.pipeline_utils.pipeline_base import Pipeline
 from chess_teacher.utils.pipeline_utils.pipeline_helpers import PipelineRunResult, ProgressWindow
 
@@ -76,5 +80,23 @@ def run_baseline_promotion_pipeline(
         ],
         progress_window=progress_window,
         lock_timeout_hours=2.0,
+    )
+    return pipeline.run()
+
+
+def run_assign_game_splits_pipeline(
+    user_id: str,
+    account: Account,
+    *,
+    split_version: str = DEFAULT_SPLIT_SALT,
+    progress_window: ProgressWindow | None = None,
+) -> PipelineRunResult:
+    """Assign train/val/test buckets for this account's eligible games."""
+    pipeline = Pipeline(
+        name="game_split_assignment",
+        user_id=user_id,
+        account_id=account.account_id,
+        steps=[AssignGameSplitsStep(split_version=split_version)],
+        progress_window=progress_window,
     )
     return pipeline.run()
