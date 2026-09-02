@@ -68,7 +68,7 @@ class GameSplitResult:
 
 def game_split_bucket(game_id: str, *, salt: str = DEFAULT_SPLIT_SALT) -> SplitBucket:
     """Map one game to train / val / test via ``md5(game_id:salt) % 100``."""
-    digest = hashlib.md5(f"{game_id}:{salt}".encode()).hexdigest()
+    digest = hashlib.md5(f"{game_id}:{salt}".encode(), usedforsecurity=False).hexdigest()
     bucket = int(digest, 16) % 100
     if bucket <= TRAIN_BUCKET_MAX:
         return SplitBucket.TRAIN
