@@ -119,6 +119,29 @@ def test_split_datums_uses_registry_buckets() -> None:
         assert g1_in_test == 2
 
 
+def test_split_datums_assign_if_missing_false_skips_ensure() -> None:
+    db = MagicMock()
+    registry = SplitRegistry(db, split_version=DEFAULT_SPLIT_SALT)
+    datums = [_FakeDatum(game_id="g1", move_id="m1")]
+
+    with (
+        patch.object(SplitRegistry, "ensure_games", return_value=0) as ensure,
+        patch.object(
+            SplitRegistry,
+            "fetch_buckets",
+            return_value={"g1": SplitBucket.TRAIN},
+        ),
+    ):
+        split = registry.split_datums(
+            datums,  # type: ignore[arg-type]
+            assign_if_missing=False,
+            compute_disagree_frac=False,
+        )
+
+    ensure.assert_not_called()
+    assert len(split.train) == 1
+
+
 def test_fetch_game_ids_for_bucket_uses_version_and_bucket() -> None:
     db = MagicMock()
     registry = SplitRegistry(db, split_version="baseline-v1")

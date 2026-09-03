@@ -1,10 +1,10 @@
 # ML training roadmap — baseline + personalized bots
 
-**Status:** Phase 1 + 1b on `develop`. Game-split **assignment** runs in the daily user `PipelineRunner` after preprocess (not train/promote). Phase 2a **tools + `DEFAULT_EPOCHS=20`** (justified pick, not a plateau). Phases 2b–3 offline; production train/promote unchanged until Phase 4.
+**Status:** Phase 1 + 1b on `develop`. Game-split **assignment** runs in the daily user `PipelineRunner` after preprocess (not train/promote). Phase 2a **tools + `DEFAULT_EPOCHS=20`**. Phase 2b **tools + first 10k experiments** (keep `128/64`; feat v4 skipped). Production train/promote unchanged until Phase 4.
 
 **Audience:** humans and coding agents working on `src/chess_teacher/pipelines/neural_network/`
 
-**Last updated:** 2026-09-02 (rev: `DEFAULT_EPOCHS=20` justified pick; 2a sweep 3–20)
+**Last updated:** 2026-09-03 (rev: 2b experiment outcome tables; merge-ready)
 
 ---
 
@@ -120,18 +120,18 @@ Use **registry val** + stratified metrics unless noted. Primary success metric f
 
 | # | Question | How we know |
 |---|----------|-------------|
-| E6 | As user diversity in DB grows, does **disagree_t1 plateau** at current capacity? | Track over time; flat disagree + rising data → capacity hypothesis |
-| E7 | Does **wider/deeper** trunk improve val **disagree** more than agree? | Arch sweep 128 vs 256; same feats, same val |
-| E8 | Are **missing position cues** (not capacity) the bottleneck? | Feat investigation (below); phase-stratified val metrics |
-| E9 | Does incremental replay (catch-up shape) keep val stable or improving? | Offline catch-up sibling: val curve per batch round |
+| E6 | As user diversity in DB grows, does **disagree_t1 plateau** at current capacity? | First 10k arch sweep: **256-wide lost** on disagree vs 128. Capacity not the bottleneck on this sample. Revisit when val games >> 32. |
+| E7 | Does **wider/deeper** trunk improve val **disagree** more than agree? | **No on this grid.** 128/128 `disagree_t1=0.2653` vs 128/64 `0.2639` (noise). 256/128 `0.2553`, 256/64 `0.2454`. Keep **`DEFAULT_HIDDEN=128` / `DEFAULT_SCORE_HIDDEN=64`**. |
+| E8 | Are **missing position cues** (not capacity) the bottleneck? | Arch: width did not help. Phase slice: **opening** is weakest `disagree_t1` (0.22), **endgame strongest** (0.37). Do **not** ship endgame-only feat v4 from this sample. |
+| E9 | Does incremental replay (catch-up shape) keep val stable or improving? | 3 rounds `--val-limit 10000` `--epochs 20` `--max-rounds 3` (exit 3 = more data left, ~361k eligible). Frozen val 32 games. `disagree_t1`: 0.2525 → 0.2611 → 0.2454. **Wiggles, not monotone.** Sibling works; do not treat as a lock that replay always helps. |
 
 ### Baseline — feature investigation (Phase 2b, before feat v4)
 
 | # | Question | How we know |
 |---|----------|-------------|
-| E10 | Which **game-phase slices** hurt most today? | Val metrics by `is_opening` / `is_middle_game` / `is_end_game` (extend `eval_metrics` or offline report) |
-| E11 | Do candidate features (e.g. **passed pawns**, rook on 7th, king activity) correlate with errors in endgame disagree positions? | Notebook / script: error analysis on val endgame subset |
-| E12 | Does adding a small feat set improve **endgame disagree_t1** without hurting opening/middle? | A/B offline train feat v4 candidate vs v3; cold-start both |
+| E10 | Which **game-phase slices** hurt most today? | Catch-up round-2 model, same 10k val slice: opening `disagree_t1=0.2186` (n=384), middle `0.2552` (n=523), endgame `0.3675` (n=257). **Opening weakest; endgame strongest.** |
+| E11 | Do candidate features (e.g. **passed pawns**, rook on 7th, king activity) correlate with errors in endgame disagree positions? | Shortlist of 30 endgame SF-disagree top1-miss FENs exists (rook endings / pawn races / N vs pawns). **Not enough to justify feat v4:** endgame is already the best slice. |
+| E12 | Does adding a small feat set improve **endgame disagree_t1** without hurting opening/middle? | **Skipped.** Investigation did not support an endgame-cue bump. Revisit if targeting **opening** disagree, on a larger val. |
 
 **Feat investigation process (lightweight):**
 
@@ -147,7 +147,7 @@ Use **registry val** + stratified metrics unless noted. Primary success metric f
 |---|----------|-------------|
 | E13 | Does user finetune beat baseline on **that user's val disagree**? | `offline_user_finetune_eval.py` |
 | E14 | Does recency weighting improve recent-opening / recent-style positions? | Ablate λ; optional opening-family slice |
-| E15 | Is a **wider baseline parent** required for user lift? | Compare user finetune lift after Phase 2b arch winner vs 128-wide parent |
+| E15 | Is a **wider baseline parent** required for user lift? | 2b 10k: **no** (keep 128/64). User finetune vs that parent first; only re-open width if user lift saturates. |
 
 ### Production readiness (Phase 4)
 
@@ -178,7 +178,7 @@ Same capabilities should be reachable from three places — **one library, many 
 |--------------------|----------------------------------|-------|
 | `scripts/entrypoints/baseline_training.py` | `scripts/tools/offline_baseline_train_eval.py` ✅ | 1 |
 | `scripts/entrypoints/baseline_promotion.py` | `scripts/ops/offline_baseline_promotion.py` ✅ | **2a** |
-| `scripts/ops/baseline_train_until_caught_up.py` | `scripts/ops/offline_baseline_catch_up.py` (proposed) | **2b** |
+| `scripts/ops/baseline_train_until_caught_up.py` | `scripts/ops/offline_baseline_catch_up.py` ✅ | **2b** |
 
 Siblings use **registry val** + **stratified metrics**; exclude val/test from train. They do **not** replace entrypoints until Phase 4 merges the same eval/split logic inward.
 
@@ -392,7 +392,7 @@ Split into **2a** (compare / tune on fixed val) then **2b** (incremental replay)
 |------|------|-------|
 | Epoch sweep | Upgrade `experiment_baseline_epochs.py` | Registry split + stratified val (not move-level 80/20) ✅ |
 | **Promotion sibling** | `scripts/ops/offline_baseline_promotion.py` | Mimics `baseline_promotion.py`: score model A vs B on **registry val**; stratified metrics; **no** `ApplyPromotionStep` / no DB promote ✅ |
-| Arch sweep (optional) | `scripts/tools/offline_baseline_arch_sweep.py` | hidden 128 vs 256, score_hidden 64 vs 128 — **Phase 2b** |
+| Arch sweep | `scripts/tools/offline_baseline_arch_sweep.py` | hidden 128 vs 256, score_hidden 64 vs 128 — **Phase 2b** ✅ keep 128/64 |
 | Notebook | `training_develop.ipynb` | Cells: val compare two URIs ✅; sweep via CLI |
 
 **Promotion sibling behaviour (sketch):**
@@ -414,12 +414,12 @@ Split into **2a** (compare / tune on fixed val) then **2b** (incremental replay)
 
 | Item | Path | Notes |
 |------|------|-------|
-| **Catch-up sibling** | `scripts/ops/offline_baseline_catch_up.py` | Mimics `baseline_train_until_caught_up.py`: replay `fetch_since` batches, finetune parent each round, **exclude registry val/test**, eval **same fixed val** after each round; optional `--max-rounds` |
-| **Arch sweep** | `scripts/tools/offline_baseline_arch_sweep.py` | hidden 128 vs 256, score_hidden 64 vs 128 — answers **E6/E7** |
-| **Feat investigation** | notebook + optional `scripts/tools/analyze_val_errors_by_phase.py` | Error analysis **E10–E11**; shortlist phase-specific cues (passed pawns, etc.) |
-| **Feat v4 A/B** (only if investigation positive) | `candidate_eval.py` + version bump | Answers **E12**; cold-start; do not combine with arch change |
+| **Catch-up sibling** | `scripts/ops/offline_baseline_catch_up.py` | ✅ Replay `fetch_since`, exclude registry val/test, frozen val each round. `--max-rounds 3` first run: exit 3 (more eligible). |
+| **Arch sweep** | `scripts/tools/offline_baseline_arch_sweep.py` | ✅ Keep **128/64**. 256 lost on `disagree_t1`. |
+| **Feat investigation** | notebook + `scripts/tools/analyze_val_errors_by_phase.py` | ✅ E10–E11: opening weakest disagree, not endgame. |
+| **Feat v4 A/B** (only if investigation positive) | `candidate_eval.py` + version bump | **Not this PR.** Opening-weak, not endgame-weak. |
 | Recency in batch (optional) | `ply_weights.py` | Light baseline batch recency — tune on val disagree |
-| Phase-stratified eval (optional) | extend `eval_metrics.py` | Report top1 by opening/middle/endgame slice |
+| Phase-stratified eval (optional) | extend `eval_metrics.py` | ✅ `phase_from_features` / `slice_datums_by_phase` |
 | Notebook | `training_develop.ipynb` | Cells: 2–3 batch replay + val curve; feat error analysis |
 
 **Capacity vs features (design principle):** grow baseline **capacity** as platform user diversity grows so per-user finetune has a rich shared trunk. **Input dims** are for better **cues** (e.g. endgame structure) — investigate separately; do not use feat expansion as a substitute for capacity.
@@ -428,16 +428,53 @@ Split into **2a** (compare / tune on fixed val) then **2b** (incremental replay)
 
 | Tier | `hidden` / `score_hidden` | ~Params | Role |
 |------|---------------------------|---------|------|
-| **Today** | 128 / 64 | ~30–40k | POC baseline; small vs task complexity |
-| **First target (2b sweep)** | **256 / 128** | ~100–150k | Default candidate if val disagree improves |
-| **Second target** | 512 / 256 | ~400k–1M | If 256 plateaus with more users/data |
+| **Today (keep)** | 128 / 64 | ~31k | 2b 10k sweep: best disagree among sizes that beat 256; 128/128 +0.0014 = noise |
+| **Rejected (this sample)** | **256 / 128** | ~111k | Worse `disagree_t1` (0.255 vs 0.264). Do not promote. |
+| **Second target** | 512 / 256 | ~400k–1M | Only if 128 plateaus with **more val games**, not this 32-game slice |
 | **Beyond** | attention over candidates, etc. | 1M+ | Only if wide MLP plateaus on registry val |
 
-Context: this model **ranks ~128 legal moves** with SF + hand-crafted feats — not a raw-board Leela-scale net (10⁷+ params). Still, ~30k is likely too small as platform style diversity grows; arch sweep picks the smallest size that wins on **`top1_sf_disagree`**.
+Context: this model **ranks ~128 legal moves** with SF + hand-crafted feats — not a raw-board Leela-scale net (10⁷+ params). The 10k / 32-game 2b sweep did **not** support a width bump; revisit capacity when val is larger.
 
 Log `hidden`, `score_hidden`, and approximate param count in every offline run and MLflow (Phase 2+).
 
-**Exit criteria (2b):** Val metrics stable or improving across replay rounds; documented decision on arch defaults; feat v4 either rejected or promoted with phase-slice evidence — ready to port eval + exclusion into Phase 4 entrypoints.
+**Exit criteria (2b):** Catch-up sibling exists; 3-round replay val **wiggles** (not monotone). Arch default **kept 128/64** (256 lost). Feat v4 **not** promoted (opening is the weak slice). Ready to port eval + exclusion into Phase 4 when you choose; larger val still needed before locking HPs.
+
+### Phase 2b experiment outcomes (2026-09-03)
+
+All runs: `--limit` / `--val-limit 10000`, `epochs=20`, `feat_version=3`, registry `baseline-v1`. **Val = 32 games / 1164 moves** (official registry val ~1311 games). Relative ranks only; not locked HPs.
+
+**Arch sweep** (cold start each cell, same split):
+
+| hidden / score_hidden | params | val disagree_t1 | val top1 |
+|-----------------------|--------|-----------------|----------|
+| 128 / 128 | 42881 | 0.2653 | 0.4373 |
+| **128 / 64 (keep)** | 31041 | 0.2639 | 0.4313 |
+| 256 / 128 | 111233 | 0.2553 | 0.4364 |
+| 256 / 64 | 91201 | 0.2454 | 0.4313 |
+
+Decision: keep `DEFAULT_HIDDEN=128` / `DEFAULT_SCORE_HIDDEN=64`. 128/128 +0.0014 is cold-start noise. 256 lost on disagree.
+
+**Catch-up replay** (`--max-rounds 3`, exclude holdout, frozen val; exit 3 = more eligible, ~361k left, batches still 2021):
+
+| round | cutoff | train_n | disagree_t1 | top1 |
+|-------|--------|---------|-------------|------|
+| 1 cold | 2021-08-25 | 10032 | 0.2525 | 0.4510 |
+| 2 finetune | 2021-11-23 | 10032 | 0.2611 | 0.4381 |
+| 3 finetune | 2021-12-29 | 10022 | 0.2454 | 0.4424 |
+
+Decision: sibling works. Val **wiggles**, not monotone. Do not treat replay as a free win.
+
+**Phase errors** (round-2 keras, same val slice):
+
+| slice | n | disagree_t1 | top1 |
+|-------|---|-------------|------|
+| opening | 384 | 0.2186 (weakest) | 0.3906 |
+| middle | 523 | 0.2552 | 0.4168 |
+| endgame | 257 | 0.3675 (strongest) | 0.5525 |
+
+Decision: **no feat v4**. Opening is the weak disagree slice, not endgame. If cues later, target opening.
+
+**2a leftover (same sample, for the record):** `DEFAULT_EPOCHS=20` justified (grid 3-20 still climbing). Cheap inline@20 vs POC v50: `disagree_t1 +0.057` informational, not a gate.
 
 ---
 
@@ -580,11 +617,11 @@ Test set: manual / release-tag evaluation only — never promotion or epoch tuni
 | 4a | Upgrade `experiment_baseline_epochs.py` | tools | No | done |
 | 4b | `offline_baseline_promotion.py` | **ops** | No | done |
 | 4c | Notebook: registry val compare | notebook | No | done |
-| 5a | `offline_baseline_catch_up.py` | **ops** | No | |
-| 5b | `offline_baseline_arch_sweep.py` | tools | No | |
-| 5b2 | Feat investigation (phase slices, passed pawn shortlist) | notebook + tools | No | |
-| 5b3 | Feat v4 A/B (if investigation positive) | library | No | |
-| 5c | Phase-stratified eval (optional) | library | No | |
+| 5a | `offline_baseline_catch_up.py` | **ops** | No | done |
+| 5b | `offline_baseline_arch_sweep.py` | tools | No | done |
+| 5b2 | Feat investigation (phase slices, passed pawn shortlist) | notebook + tools | No | done (opening weakest; no feat v4) |
+| 5b3 | Feat v4 A/B (if investigation positive) | library | No | skipped |
+| 5c | Phase-stratified eval (optional) | library | No | done |
 | 5d | Notebook: batch replay + feat error analysis | notebook | No | |
 | 6 | Recency weights (+ optional baseline batch) | library | No | |
 | 7a | `user_splits.py` + `offline_user_finetune_eval.py` | library + tools | No | |
@@ -619,7 +656,7 @@ When asked to implement part of this roadmap:
 
 1. **Terminal-only** — `backfill_game_splits.py` then `offline_baseline_train_eval.py` ✅
 2. **Phase 2a** — epoch sweep + promotion sibling + `DEFAULT_EPOCHS=20` (justified pick) ✅
-3. **Phase 2b** — catch-up sibling + arch sweep + feat investigation
+3. **Phase 2b** — tools + 10k experiments ✅ (keep 128/64; feat v4 skipped). Next: Phase 3 or larger-val HP revisit.
 4. **Phase 3** — user tools + user ops siblings + notebook user section
 5. **Phase 4** — merge into entrypoints; **consolidate** NN pipelines (≤2); fold split assign into preprocess; **orchestrated** train / promote / catch-up
 6. **Phase 5** — product polish

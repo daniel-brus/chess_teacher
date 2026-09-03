@@ -21,6 +21,11 @@ from chess_teacher.pipelines.neural_network.ply_weights import (
     user_not_sf_best_mask,
 )
 
+PHASE_OPENING = "opening"
+PHASE_MIDDLE = "middle"
+PHASE_ENDGAME = "endgame"
+GAME_PHASES: tuple[str, ...] = (PHASE_OPENING, PHASE_MIDDLE, PHASE_ENDGAME)
+
 
 @dataclass(frozen=True)
 class EvalMetrics:
@@ -59,6 +64,37 @@ class EvalMetrics:
         if self.top3_sf_disagree is not None:
             out["top3_sf_disagree"] = self.top3_sf_disagree
         return out
+
+
+@dataclass(frozen=True)
+class DatumEvalDetail:
+    """Per-kept-datum eval flags for phase error shortlists (E10-E11)."""
+
+    game_id: str
+    ply: int
+    fen_before: str
+    phase: str | None
+    top1_hit: bool
+    sf_disagree: bool
+
+
+def phase_from_features(features: dict[str, Any]) -> str | None:
+    """Map state flags to opening / middle / endgame. First match wins."""
+    if features.get("is_opening"):
+        return PHASE_OPENING
+    if features.get("is_middle_game"):
+        return PHASE_MIDDLE
+    if features.get("is_end_game"):
+        return PHASE_ENDGAME
+    return None
+
+
+def slice_datums_by_phase(
+    datums: list[TrainingDatum],
+    phase: str,
+) -> list[TrainingDatum]:
+    """Return datums whose features match ``phase`` (see ``phase_from_features``)."""
+    return [d for d in datums if phase_from_features(d.features) == phase]
 
 
 def _topk_hits(
@@ -215,8 +251,122 @@ def format_eval_metrics(name: str, metrics: EvalMetrics) -> str:
         f"{metrics.top1_sf_disagree:.4f}" if metrics.top1_sf_disagree is not None else "n/a"
     )
     return (
-        f"{name:5s} top1={metrics.top1_overall:.4f} top3={metrics.top3_overall:.4f} "
+        f"{name} top1={metrics.top1_overall:.4f} top3={metrics.top3_overall:.4f} "
         f"agree_t1={agree_t1} disagree_t1={disagree_t1} "
         f"n={metrics.n_eval} dropped={metrics.n_dropped} "
         f"disagree_frac={metrics.sf_disagree_frac:.3f}"
+    )
+
+
+def format_phase_eval_rows(metrics_by_name: dict[str, EvalMetrics | None]) -> str:
+    """Printable overall + phase rows. ``None`` means the slice was empty."""
+    lines: list[str] = []
+    for name, metrics in metrics_by_name.items():
+        if metrics is None:
+            lines.append(f"{name} (no datums)")
+        else:
+            lines.append(format_eval_metrics(name, metrics))
+    return "\n".join(lines)
+
+
+def details_from_packed(
+    *,
+    logits: np.ndarray,
+    mask: np.ndarray,
+    labels: np.ndarray,
+    move_feats: np.ndarray,
+    kept_datums: list[TrainingDatum],
+    max_candidates: int = MAX_CANDIDATES,
+) -> list[DatumEvalDetail]:
+    """Per-datum top1 / SF-disagree flags from packed tensors (no model)."""
+    top1, _top3 = _topk_hits(logits, mask, labels, max_candidates=max_candidates)
+    disagree = user_not_sf_best_mask(move_feats, labels)
+    rows: list[DatumEvalDetail] = []
+    for i, datum in enumerate(kept_datums):
+        rows.append(
+            DatumEvalDetail(
+                game_id=datum.game_id,
+                ply=int(datum.ply),
+                fen_before=datum.fen_before,
+                phase=phase_from_features(datum.features),
+                top1_hit=bool(top1[i]),
+                sf_disagree=bool(disagree[i]),
+            )
+        )
+    return rows
+
+
+def format_error_shortlist(
+    details: list[DatumEvalDetail],
+    *,
+    phase: str = PHASE_ENDGAME,
+    require_sf_disagree: bool = True,
+    require_top1_miss: bool = True,
+    error_limit: int,
+) -> str:
+    """Text-only shortlist of phase errors (FEN, ply, game_id)."""
+    picked: list[DatumEvalDetail] = []
+    for row in details:
+        if phase is not None and row.phase != phase:
+            continue
+        if require_sf_disagree and not row.sf_disagree:
+            continue
+        if require_top1_miss and row.top1_hit:
+            continue
+        picked.append(row)
+        if len(picked) >= error_limit:
+            break
+    if not picked:
+        return f"shortlist phase={phase} (none; cap={error_limit})"
+    lines = [
+        f"shortlist phase={phase} sf_disagree={require_sf_disagree} "
+        f"top1_miss={require_top1_miss} n={len(picked)} cap={error_limit}"
+    ]
+    for row in picked:
+        lines.append(f"  game_id={row.game_id} ply={row.ply} fen={row.fen_before}")
+    return "\n".join(lines)
+
+
+def format_phase_error_report(
+    model: Any,
+    datums: list[TrainingDatum],
+    *,
+    error_limit: int,
+    max_candidates: int = MAX_CANDIDATES,
+) -> str:
+    """Overall + 3 phase slices via ``evaluate_datums``, plus endgame error shortlist."""
+    overall = evaluate_datums(model, datums, max_candidates=max_candidates)
+    by_name: dict[str, EvalMetrics | None] = {"all": overall}
+    for phase in GAME_PHASES:
+        sliced = slice_datums_by_phase(datums, phase)
+        if not sliced:
+            by_name[phase] = None
+            continue
+        try:
+            by_name[phase] = evaluate_datums(model, sliced, max_candidates=max_candidates)
+        except ValueError:
+            by_name[phase] = None
+
+    batch = TrainingBatch(datums)
+    feats, mask, labels, kept = batch.candidate_style_targets()
+    if not kept:
+        return format_phase_eval_rows(by_name)
+    kept_datums = [datums[i] for i in kept]
+    x_state = TrainingBatch(kept_datums).state_matrix()
+    logits = np.asarray(
+        model.predict({"state": x_state, "move_feats": feats}, verbose=0),
+        dtype=np.float64,
+    )
+    details = details_from_packed(
+        logits=logits,
+        mask=mask,
+        labels=labels,
+        move_feats=feats,
+        kept_datums=kept_datums,
+        max_candidates=max_candidates,
+    )
+    return (
+        format_phase_eval_rows(by_name)
+        + "\n"
+        + format_error_shortlist(details, error_limit=error_limit)
     )
