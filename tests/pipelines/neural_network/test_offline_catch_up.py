@@ -183,6 +183,8 @@ def test_one_round_then_floor(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -
     monkeypatch.setattr(offline_catch_up, "get_split_registry", lambda _db, split_version: registry)
     monkeypatch.setattr(offline_catch_up, "load_registry_val_datums", val_loader)
     monkeypatch.setattr(offline_catch_up, "evaluate_datums", eval_fn)
+    training_state = MagicMock()
+    monkeypatch.setattr(offline_catch_up, "TrainingState", training_state)
 
     assert _run(output_dir=tmp_path, max_rounds=5) == 0
     assert trainer.fit.call_count == 1
@@ -198,6 +200,8 @@ def test_one_round_then_floor(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -
     assert fetch_kwargs["extra_where"] == "NOT EXISTS (holdout)"
     assert fetch_kwargs["limit"] == 100
     assert registry.split_datums.call_args.kwargs["assign_if_missing"] is False
+    training_state.for_baseline.assert_not_called()
+    training_state.save_to_db.assert_not_called()
 
 
 def test_stall_when_cutoff_and_count_unchanged(

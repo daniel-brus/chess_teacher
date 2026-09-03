@@ -4,7 +4,7 @@
 
 **Audience:** humans and coding agents working on `src/chess_teacher/pipelines/neural_network/`
 
-**Last updated:** 2026-09-03 (rev: 2b experiments; keep 128/64; skip feat v4)
+**Last updated:** 2026-09-03 (rev: 2b experiment outcome tables; merge-ready)
 
 ---
 
@@ -147,7 +147,7 @@ Use **registry val** + stratified metrics unless noted. Primary success metric f
 |---|----------|-------------|
 | E13 | Does user finetune beat baseline on **that user's val disagree**? | `offline_user_finetune_eval.py` |
 | E14 | Does recency weighting improve recent-opening / recent-style positions? | Ablate λ; optional opening-family slice |
-| E15 | Is a **wider baseline parent** required for user lift? | Compare user finetune lift after Phase 2b arch winner vs 128-wide parent |
+| E15 | Is a **wider baseline parent** required for user lift? | 2b 10k: **no** (keep 128/64). User finetune vs that parent first; only re-open width if user lift saturates. |
 
 ### Production readiness (Phase 4)
 
@@ -438,6 +438,43 @@ Context: this model **ranks ~128 legal moves** with SF + hand-crafted feats — 
 Log `hidden`, `score_hidden`, and approximate param count in every offline run and MLflow (Phase 2+).
 
 **Exit criteria (2b):** Catch-up sibling exists; 3-round replay val **wiggles** (not monotone). Arch default **kept 128/64** (256 lost). Feat v4 **not** promoted (opening is the weak slice). Ready to port eval + exclusion into Phase 4 when you choose; larger val still needed before locking HPs.
+
+### Phase 2b experiment outcomes (2026-09-03)
+
+All runs: `--limit` / `--val-limit 10000`, `epochs=20`, `feat_version=3`, registry `baseline-v1`. **Val = 32 games / 1164 moves** (official registry val ~1311 games). Relative ranks only; not locked HPs.
+
+**Arch sweep** (cold start each cell, same split):
+
+| hidden / score_hidden | params | val disagree_t1 | val top1 |
+|-----------------------|--------|-----------------|----------|
+| 128 / 128 | 42881 | 0.2653 | 0.4373 |
+| **128 / 64 (keep)** | 31041 | 0.2639 | 0.4313 |
+| 256 / 128 | 111233 | 0.2553 | 0.4364 |
+| 256 / 64 | 91201 | 0.2454 | 0.4313 |
+
+Decision: keep `DEFAULT_HIDDEN=128` / `DEFAULT_SCORE_HIDDEN=64`. 128/128 +0.0014 is cold-start noise. 256 lost on disagree.
+
+**Catch-up replay** (`--max-rounds 3`, exclude holdout, frozen val; exit 3 = more eligible, ~361k left, batches still 2021):
+
+| round | cutoff | train_n | disagree_t1 | top1 |
+|-------|--------|---------|-------------|------|
+| 1 cold | 2021-08-25 | 10032 | 0.2525 | 0.4510 |
+| 2 finetune | 2021-11-23 | 10032 | 0.2611 | 0.4381 |
+| 3 finetune | 2021-12-29 | 10022 | 0.2454 | 0.4424 |
+
+Decision: sibling works. Val **wiggles**, not monotone. Do not treat replay as a free win.
+
+**Phase errors** (round-2 keras, same val slice):
+
+| slice | n | disagree_t1 | top1 |
+|-------|---|-------------|------|
+| opening | 384 | 0.2186 (weakest) | 0.3906 |
+| middle | 523 | 0.2552 | 0.4168 |
+| endgame | 257 | 0.3675 (strongest) | 0.5525 |
+
+Decision: **no feat v4**. Opening is the weak disagree slice, not endgame. If cues later, target opening.
+
+**2a leftover (same sample, for the record):** `DEFAULT_EPOCHS=20` justified (grid 3-20 still climbing). Cheap inline@20 vs POC v50: `disagree_t1 +0.057` informational, not a gate.
 
 ---
 
