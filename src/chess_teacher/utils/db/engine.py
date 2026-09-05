@@ -1,6 +1,7 @@
 import re
 from typing import Any
 
+from psycopg.types.json import Jsonb
 from sqlalchemy import Connection, create_engine, text
 from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.engine import URL, Engine
@@ -14,6 +15,17 @@ logger = get_logger()
 
 _ALLOWED_SESSION_SETTINGS = frozenset({"max_parallel_workers_per_gather"})
 _SESSION_SETTING_VALUE_RE = re.compile(r"^[0-9]+$")
+
+
+def _adapt_copy_value(value: Any) -> Any:
+    """Wrap JSON-like values so psycopg can COPY them into ``json``/``jsonb`` columns.
+
+    The inline MERGE path serialises dict/list values with ``json.dumps``; the COPY
+    staging path must do the equivalent or psycopg raises "cannot adapt type 'dict'".
+    """
+    if isinstance(value, (dict, list)):
+        return Jsonb(value)
+    return value
 
 
 class EnrichedEngine(Engine):
@@ -100,7 +112,9 @@ class EnrichedEngine(Engine):
             with raw_conn.cursor() as cursor:
                 with cursor.copy(copy_sql) as copy:
                     for record in records:
-                        copy.write_row(tuple(record.get(c) for c in col_names))
+                        copy.write_row(
+                            tuple(_adapt_copy_value(record.get(c)) for c in col_names)
+                        )
         except Exception as e:
             self._logger.log_and_raise(
                 DatabaseError(f"Error copying records into {quoted_table}: {e}")
