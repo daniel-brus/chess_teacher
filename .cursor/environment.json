@@ -1,0 +1,16 @@
+{
+  "name": "Chess Teacher",
+  "user": "ubuntu",
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
+  "install": "bash .cursor/install.sh",
+  "start": "bash .cursor/start-services.sh",
+  "terminals": [
+    {
+      "name": "streamlit",
+      "command": "bash .cursor/run-streamlit.sh"
+    }
+  ],
+  "ports": [8502, 9001]
+}

@@ -1,6 +1,12 @@
 # ZELF TOEGEVOEGD
 .vscode/
-.cursor/
+# Ignore local Cursor state but keep the committed Cloud Agent environment config.
+.cursor/*
+!.cursor/environment.json
+!.cursor/Dockerfile
+!.cursor/install.sh
+!.cursor/start-services.sh
+!.cursor/run-streamlit.sh
 storage/
 .streamlit/secrets.toml
 testnotebook.ipynb
