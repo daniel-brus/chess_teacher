@@ -367,7 +367,7 @@ game_split_assignments:
 
 **Assign rule:** same as `game_split_bucket()` — registry is the persistence layer, not a new policy.
 
-**Production assignment (user pipeline):** after `EnrichMoveCharacteristicsStep`, `PipelineRunner` runs `game_split_assignment` for that account. New eligible games enter the registry on the next user-pipeline run (cron / Streamlit; typically ≤1 day). `--full-val` is the official frozen val set plus that lag. One-shot `backfill_game_splits.py` remains for empty environments.
+**Production assignment (user pipeline):** after cheap + expensive move-characteristics enrichment, `PipelineRunner` runs `game_split_assignment` for that account. New eligible games enter the registry on the next user-pipeline run (cron / Streamlit; typically ≤1 day). `--full-val` is the official frozen val set plus that lag. One-shot `backfill_game_splits.py` remains for empty environments.
 
 **Phase 1b does not wire production training or promotion** — no `fetch_since` exclusion, no registry eval in `baseline_promotion`. Phase 4 adds those.
 

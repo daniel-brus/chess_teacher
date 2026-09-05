@@ -6,7 +6,7 @@ All legal moves are scored with **one MultiPV search** on ``fen_before`` via
 ``Stockfish.get_top_moves(n_legal, num_nodes=...)`` (white POV). Prefer a fixed
 ``num_nodes`` budget so train/backfill/play stay aligned. SF scores are backfilled into ``candidate_evaluations`` during preprocessing
 (:class:`~chess_teacher.pipelines.preprocessing.move_characteristics.candidate_evaluations.CandidateEvaluationsTransformation`
-in :class:`~chess_teacher.pipelines.preprocessing.pipeline_steps.EnrichMoveCharacteristicsStep`)
+in :class:`~chess_teacher.pipelines.preprocessing.pipeline_steps.EnrichExpensiveMoveCharacteristicsStep`)
 or ``scripts/ops/backfill_candidate_evals.py`` for one-off historical fills.
 
 Non-SF candidate features (train + live must match)

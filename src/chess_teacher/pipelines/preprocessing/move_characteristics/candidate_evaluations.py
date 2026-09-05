@@ -1,6 +1,6 @@
 """MultiPV-all-legal candidate evaluations for ``move_characteristics``.
 
-Last transform in :class:`~chess_teacher.pipelines.preprocessing.pipeline_steps.EnrichMoveCharacteristicsStep`
+Last transform in :class:`~chess_teacher.pipelines.preprocessing.pipeline_steps.EnrichExpensiveMoveCharacteristicsStep`
 (after played-move Stockfish eval). Kept separate from
 :class:`~chess_teacher.pipelines.preprocessing.move_characteristics.stockfish_evaluation.StockfishEvaluationTransformation`:
 that scores ``fen_before`` / ``fen_after`` at fixed depth; this runs MultiPV on

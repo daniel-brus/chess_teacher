@@ -28,13 +28,13 @@ from chess_teacher.utils.logging import get_logger
 
 logger = get_logger()
 
-# Same eligibility as TrainingDataStore (moves with SF candidate evals + end_time).
-_ELIGIBLE_GAMES_SQL = """
+# Same eligibility as TrainingDataStore (moves with complete expensive SF cols + end_time).
+_ELIGIBLE_GAMES_SQL = f"""
             FROM games.moves m
             INNER JOIN games.games g ON g.game_id = m.game_id
             INNER JOIN games.move_characteristics mc ON mc.move_id = m.move_id
             WHERE g.end_time IS NOT NULL
-              AND mc.candidate_evaluations IS NOT NULL
+              AND {MoveCharacteristics.sql_expensive_complete("mc")}
 """
 
 _MOVES_QUERY_SESSION_SETTINGS = {"max_parallel_workers_per_gather": "0"}
