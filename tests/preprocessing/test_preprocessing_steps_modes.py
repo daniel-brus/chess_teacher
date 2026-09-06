@@ -48,10 +48,15 @@ _INGESTED_AT = datetime(2024, 1, 1, 12, 0, tzinfo=UTC)
 
 @pytest.fixture(autouse=True)
 def _mock_join_db_client(monkeypatch: pytest.MonkeyPatch) -> None:
-    """RawGamesToGames joins call get_db_client() at construction (no Postgres in CI)."""
+    """Avoid real Postgres when constructing/running RawGamesToGames in CI."""
     monkeypatch.setattr(
         "chess_teacher.utils.pipeline_utils.transformations.get_db_client",
         lambda: MagicMock(),
+    )
+    # Bound name in transformations.py, not chess_com_openings module attribute.
+    monkeypatch.setattr(
+        "chess_teacher.pipelines.preprocessing.transformations.load_slug_title_lookup",
+        lambda: {},
     )
 
 
@@ -496,15 +501,6 @@ def test_raw_games_to_games_modes(
     expected_game_ids: list[str],
     expected_colors: list[str],
 ) -> None:
-    monkeypatch.setattr(
-        "chess_teacher.utils.pipeline_utils.transformations.get_db_client",
-        lambda: MagicMock(),
-    )
-    monkeypatch.setattr(
-        "chess_teacher.pipelines.preprocessing.chess_com_openings.load_slug_title_lookup",
-        lambda: {},
-    )
-
     step = RawGamesToGamesStep(mode=mode)
     captured = _capture_run(
         monkeypatch,
@@ -533,10 +529,6 @@ def test_raw_games_to_games_modes(
 def test_raw_games_incremental_all_existing_skips_save(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(
-        "chess_teacher.utils.pipeline_utils.transformations.get_db_client",
-        lambda: MagicMock(),
-    )
     step = RawGamesToGamesStep(mode=PipelineMode.INCREMENTAL)
     captured = _capture_run(
         monkeypatch,
@@ -549,14 +541,6 @@ def test_raw_games_incremental_all_existing_skips_save(
 
 
 def test_raw_games_only_no_pgn_rows_skips_save(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        "chess_teacher.utils.pipeline_utils.transformations.get_db_client",
-        lambda: MagicMock(),
-    )
-    monkeypatch.setattr(
-        "chess_teacher.pipelines.preprocessing.chess_com_openings.load_slug_title_lookup",
-        lambda: {},
-    )
     step = RawGamesToGamesStep(mode=PipelineMode.INCREMENTAL)
     source = _raw_games_source(game_ids=["game-only"])
     # Force the single row to be the no-PGN payload
