@@ -9,6 +9,7 @@ from chess_teacher.pipelines.preprocessing.main import run_preprocessing_pipelin
 from chess_teacher.platform.account import Account
 from chess_teacher.platform.user import User
 from chess_teacher.utils.db.client import DatabaseClient
+from chess_teacher.utils.env_utils import get_optional_env_variable
 from chess_teacher.utils.logging import get_logger
 from chess_teacher.utils.pipeline_utils.pipeline_helpers import (
     PipelineRunResult,
@@ -17,7 +18,25 @@ from chess_teacher.utils.pipeline_utils.pipeline_helpers import (
 
 logger = get_logger()
 
-_DEFAULT_MAX_ACCOUNT_WORKERS = 4
+# Cap account-level ThreadPool concurrency (small VPS / OOM-prone hosts).
+_DEFAULT_MAX_ACCOUNT_WORKERS = 2
+_ENV_MAX_ACCOUNT_WORKERS = "MAX_ACCOUNT_WORKERS"
+
+
+def resolve_max_account_workers(
+    *,
+    explicit: int | None = None,
+    env_value: str | None = None,
+) -> int:
+    """Resolve account-worker count: explicit arg > ``MAX_ACCOUNT_WORKERS`` env > default 2."""
+    if explicit is not None:
+        return max(1, int(explicit))
+    raw = (
+        env_value if env_value is not None else get_optional_env_variable(_ENV_MAX_ACCOUNT_WORKERS)
+    )
+    if raw.strip():
+        return max(1, int(raw.strip()))
+    return _DEFAULT_MAX_ACCOUNT_WORKERS
 
 
 class PipelineRunner:
@@ -28,13 +47,13 @@ class PipelineRunner:
         user: User,
         db_client: DatabaseClient,
         *,
-        max_account_workers: int = _DEFAULT_MAX_ACCOUNT_WORKERS,
+        max_account_workers: int | None = None,
         mode: PipelineMode = PipelineMode.INCREMENTAL,
         progress_window: ProgressWindow | None = None,
     ) -> None:
         self.user = user
         self.db_client = db_client
-        self.max_account_workers = max_account_workers
+        self.max_account_workers = resolve_max_account_workers(explicit=max_account_workers)
         self.mode = mode
         self.progress_window = progress_window
 
@@ -123,6 +142,12 @@ class PipelineRunner:
 
     def _run_accounts_parallel(self, accounts: list[Account]) -> list[PipelineRunResult]:
         workers = min(self.max_account_workers, len(accounts))
+        logger.info(
+            "Running %s account(s) with max_account_workers=%s (pool=%s).",
+            len(accounts),
+            self.max_account_workers,
+            workers,
+        )
         with ThreadPoolExecutor(max_workers=workers) as executor:
             nested = list(executor.map(self._run_account, accounts))
         return [result for account_results in nested for result in account_results]
@@ -132,7 +157,7 @@ def run_pipeline(
     user: User,
     db_client: DatabaseClient,
     *,
-    max_account_workers: int = _DEFAULT_MAX_ACCOUNT_WORKERS,
+    max_account_workers: int | None = None,
     mode: PipelineMode = PipelineMode.INCREMENTAL,
     progress_window: ProgressWindow | None = None,
 ) -> list[PipelineRunResult]:

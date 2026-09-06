@@ -126,7 +126,7 @@ $secretArgs = @(
     "-n", "chess-teacher",
     "--dry-run=client", "-o", "yaml"
 )
-foreach ($optionalKey in @("LOG_SHIP_ENABLED", "STOCKFISH_WORKERS", "STOCKFISH_THREADS_PER_ENGINE", "STOCKFISH_HASH_MB")) {
+foreach ($optionalKey in @("LOG_SHIP_ENABLED", "STOCKFISH_WORKERS", "STOCKFISH_THREADS_PER_ENGINE", "STOCKFISH_HASH_MB", "MAX_ACCOUNT_WORKERS")) {
     $optionalValue = Get-OptionalEnv $optionalKey
     if ($null -ne $optionalValue) {
         $secretArgs += "--from-literal=${optionalKey}=$optionalValue"
