@@ -46,6 +46,15 @@ _SAMPLE_PGN = "1. e4 e5 2. Nf3 Nc6 3. d3"
 _INGESTED_AT = datetime(2024, 1, 1, 12, 0, tzinfo=UTC)
 
 
+@pytest.fixture(autouse=True)
+def _mock_join_db_client(monkeypatch: pytest.MonkeyPatch) -> None:
+    """RawGamesToGames joins call get_db_client() at construction (no Postgres in CI)."""
+    monkeypatch.setattr(
+        "chess_teacher.utils.pipeline_utils.transformations.get_db_client",
+        lambda: MagicMock(),
+    )
+
+
 @dataclass(frozen=True)
 class CapturedSave:
     df: pl.DataFrame | None

@@ -27,6 +27,15 @@ _USER = "TestPlayer"
 _INGESTION_TS = datetime(2024, 6, 1, 12, 0, tzinfo=UTC)
 
 
+@pytest.fixture(autouse=True)
+def _mock_join_db_client(monkeypatch: pytest.MonkeyPatch) -> None:
+    """JoinWithTableTransformation calls get_db_client() at construction (no Postgres in CI)."""
+    monkeypatch.setattr(
+        "chess_teacher.utils.pipeline_utils.transformations.get_db_client",
+        lambda: MagicMock(),
+    )
+
+
 def _account() -> Account:
     return Account(
         account_id=_ACCOUNT_ID,
