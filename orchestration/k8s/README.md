@@ -14,11 +14,12 @@ No separate Doppler config — **`dev_local` only**. Host routing overrides live
 ## Bring-up
 
 ```powershell
-make dev_k3d_up         # infra (wait healthy) + k3d + apply Streamlit/CronJobs
-make streamlit_k3d      # port-forward only → http://localhost:8501
+make streamlit_k3d      # infra + k3d + apply + port-forward → http://localhost:8501
 ```
 
-`streamlit_k3d` does **not** start Streamlit — the pod is already deployed by `dev_k3d_up`. It only tunnels cluster port 8501 to localhost.
+`make streamlit_k3d` runs: **`dev_bootstrap`** (Compose infra healthy) → **`k8s_ensure`** (k3d cluster) → **apply manifests** → **port-forward** to localhost:8501.
+
+`make dev_k3d_up` is the same deploy step without opening the tunnel (e.g. refresh CronJobs only).
 
 ## What gets deployed
 

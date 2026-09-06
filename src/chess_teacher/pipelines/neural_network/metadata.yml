@@ -72,3 +72,31 @@ tables:
         data_type: timestamptz
         nullable: true
         comment: Last time the min-data gate was evaluated
+
+  game_split_assignments:
+    schema: ml
+    table: game_split_assignments
+    comment: Persistent train/val/test bucket per game for a split_version (salt)
+    primary_key:
+      - split_version
+      - game_id
+    indexes:
+      - name: idx_game_split_assignments_bucket
+        columns: [split_version, bucket]
+    columns:
+      - name: split_version
+        data_type: text
+        nullable: false
+        comment: Split policy label (e.g. baseline-v1); same as splits.DEFAULT_SPLIT_SALT
+      - name: game_id
+        data_type: text
+        nullable: false
+        comment: games.games primary key
+      - name: bucket
+        data_type: text
+        nullable: false
+        comment: train | val | test
+      - name: assigned_at
+        data_type: timestamptz
+        nullable: false
+        comment: When this assignment was first written

@@ -44,7 +44,7 @@ Object storage has **keys**, not directories. Keys look like POSIX paths (`inges
 - Always pass **`--json`** when running the script (output is JSON either way; flag kept for parity with the DB skill).
 - Run from **repository root** with `.venv` activated. Do not use `uv`.
 - Keys are **relative to `STORAGE_ROOT`** (from `.env`), not the full S3 bucket key. The backend adds `STORAGE_ROOT` as a prefix in S3 automatically.
-- Do not run `pytest` / `mypy`; ask the user to run those manually.
+- `pytest` / `mypy` / `ruff` are allowed via the python-environment rule (venv), but not as part of this inspection skill unless the user asked.
 
 ## Agent workflow
 

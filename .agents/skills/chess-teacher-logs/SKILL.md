@@ -74,7 +74,7 @@ For **live prod pod stdout** (not buffered JSON files), use **chess-teacher-vps*
 
 - **Read-only only.** Local file reads + S3 `read_bytes` / `list_keys`. No writes, no `LogShipper.scan_once`, no deleting segments.
 - Always **`--json`**. Repository root, `.venv` activated. No `uv`.
-- Do not run `pytest` / `mypy`; ask the user manually.
+- `pytest` / `mypy` / `ruff` are allowed via the python-environment rule (venv), but not as part of this inspection skill unless the user asked.
 - Summarize log matches; avoid dumping huge tracebacks unless asked.
 
 ## Agent workflow

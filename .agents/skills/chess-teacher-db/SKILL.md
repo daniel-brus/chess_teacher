@@ -43,7 +43,7 @@ The script loads `.env` when present; prefer **`doppler run --config … --`** s
 - **Never** run raw `psql` or ad-hoc write SQL.
 - Always pass **`--json`** when running the script.
 - Run from **repository root** with `.venv` activated. Do not use `uv`.
-- Do not run `pytest` / `mypy`; ask the user to run those manually.
+- `pytest` / `mypy` / `ruff` are allowed via the python-environment rule (venv), but not as part of this inspection skill unless the user asked.
 
 ## Agent workflow
 

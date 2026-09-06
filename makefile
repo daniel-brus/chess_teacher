@@ -59,6 +59,6 @@ k8s_ensure: k8s_check
 dev_k3d_up: dev_bootstrap k8s_ensure
 	$(DOPPLER_RUN_LOCAL) powershell -ExecutionPolicy Bypass -File orchestration/k8s/apply-k3d-local.ps1
 
-# Port-forward only — Streamlit pod must already be running (after make dev_k3d_up).
-streamlit_k3d: k8s_check
+# Local k3d Streamlit: healthy Compose infra + k3d cluster + apply manifests + port-forward.
+streamlit_k3d: dev_k3d_up
 	powershell -ExecutionPolicy Bypass -File scripts/dev/streamlit_k3d.ps1

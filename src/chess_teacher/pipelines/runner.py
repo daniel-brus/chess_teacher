@@ -4,10 +4,12 @@ from concurrent.futures import ThreadPoolExecutor
 
 from chess_teacher.pipelines.ingestion.main import run_ingestion_pipeline
 from chess_teacher.pipelines.modes import PipelineMode
+from chess_teacher.pipelines.neural_network.main import run_assign_game_splits_pipeline
 from chess_teacher.pipelines.preprocessing.main import run_preprocessing_pipeline
 from chess_teacher.platform.account import Account
 from chess_teacher.platform.user import User
 from chess_teacher.utils.db.client import DatabaseClient
+from chess_teacher.utils.env_utils import get_optional_env_variable
 from chess_teacher.utils.logging import get_logger
 from chess_teacher.utils.pipeline_utils.pipeline_helpers import (
     PipelineRunResult,
@@ -16,24 +18,42 @@ from chess_teacher.utils.pipeline_utils.pipeline_helpers import (
 
 logger = get_logger()
 
-_DEFAULT_MAX_ACCOUNT_WORKERS = 4
+# Cap account-level ThreadPool concurrency (small VPS / OOM-prone hosts).
+_DEFAULT_MAX_ACCOUNT_WORKERS = 2
+_ENV_MAX_ACCOUNT_WORKERS = "MAX_ACCOUNT_WORKERS"
+
+
+def resolve_max_account_workers(
+    *,
+    explicit: int | None = None,
+    env_value: str | None = None,
+) -> int:
+    """Resolve account-worker count: explicit arg > ``MAX_ACCOUNT_WORKERS`` env > default 2."""
+    if explicit is not None:
+        return max(1, int(explicit))
+    raw = (
+        env_value if env_value is not None else get_optional_env_variable(_ENV_MAX_ACCOUNT_WORKERS)
+    )
+    if raw.strip():
+        return max(1, int(raw.strip()))
+    return _DEFAULT_MAX_ACCOUNT_WORKERS
 
 
 class PipelineRunner:
-    """Top-level orchestrator that runs ingestion then preprocessing per account."""
+    """Top-level orchestrator: ingestion → preprocessing → game-split assignment per account."""
 
     def __init__(
         self,
         user: User,
         db_client: DatabaseClient,
         *,
-        max_account_workers: int = _DEFAULT_MAX_ACCOUNT_WORKERS,
+        max_account_workers: int | None = None,
         mode: PipelineMode = PipelineMode.INCREMENTAL,
         progress_window: ProgressWindow | None = None,
     ) -> None:
         self.user = user
         self.db_client = db_client
-        self.max_account_workers = max_account_workers
+        self.max_account_workers = resolve_max_account_workers(explicit=max_account_workers)
         self.mode = mode
         self.progress_window = progress_window
 
@@ -89,8 +109,26 @@ class PipelineRunner:
             account.account_id,
             preprocessing_result.result.value,
         )
+
+        logger.info(
+            "Starting game-split assignment for user=%s account=%s (%s).",
+            self.user.user_id,
+            account.account_id,
+            account.format_label(),
+        )
+        split_result = run_assign_game_splits_pipeline(
+            self.user.user_id,
+            account,
+            progress_window=self.progress_window,
+        )
+        logger.info(
+            "Finished game-split assignment for user=%s account=%s with result=%s.",
+            self.user.user_id,
+            account.account_id,
+            split_result.result.value,
+        )
         # Follow-up: run_user_finetune_pipeline(self.user.user_id) after baseline exists.
-        return [ingestion_result, preprocessing_result]
+        return [ingestion_result, preprocessing_result, split_result]
 
     def _run_accounts_sequential(self, accounts: list[Account]) -> list[PipelineRunResult]:
         results: list[PipelineRunResult] = []
@@ -104,6 +142,12 @@ class PipelineRunner:
 
     def _run_accounts_parallel(self, accounts: list[Account]) -> list[PipelineRunResult]:
         workers = min(self.max_account_workers, len(accounts))
+        logger.info(
+            "Running %s account(s) with max_account_workers=%s (pool=%s).",
+            len(accounts),
+            self.max_account_workers,
+            workers,
+        )
         with ThreadPoolExecutor(max_workers=workers) as executor:
             nested = list(executor.map(self._run_account, accounts))
         return [result for account_results in nested for result in account_results]
@@ -113,11 +157,11 @@ def run_pipeline(
     user: User,
     db_client: DatabaseClient,
     *,
-    max_account_workers: int = _DEFAULT_MAX_ACCOUNT_WORKERS,
+    max_account_workers: int | None = None,
     mode: PipelineMode = PipelineMode.INCREMENTAL,
     progress_window: ProgressWindow | None = None,
 ) -> list[PipelineRunResult]:
-    """Run ingestion then preprocessing for every linked account."""
+    """Run ingestion, preprocessing, then game-split assignment for every linked account."""
     return PipelineRunner(
         user,
         db_client,
