@@ -23,13 +23,13 @@ from chess_teacher.utils.logging import get_logger
 
 logger = get_logger()
 
-# Shared FROM/WHERE for moves that have characteristics + candidate SF evals + known end_time.
-_SQL_MOVES_WITH_CHARS = """
+# Shared FROM/WHERE for moves that have complete expensive characteristics + known end_time.
+_SQL_MOVES_WITH_CHARS = f"""
             FROM games.moves m
             INNER JOIN games.games g ON g.game_id = m.game_id
             INNER JOIN games.move_characteristics mc ON mc.move_id = m.move_id
             WHERE g.end_time IS NOT NULL
-              AND mc.candidate_evaluations IS NOT NULL
+              AND {MoveCharacteristics.sql_expensive_complete("mc")}
 """
 
 # Large move_characteristics JSONB + parallel hash join can OOM Postgres workers on

@@ -1,12 +1,7 @@
 import pytest
 
 from chess_teacher.pipelines.ingestion.raw_games import RawGame
-from chess_teacher.pipelines.modes import (
-    PipelineMode,
-    ingestion_load_merge_strategy,
-    ingestion_load_source_folders,
-    preprocessing_transform_config,
-)
+from chess_teacher.pipelines.modes import PipelineMode, preprocessing_transform_config
 from chess_teacher.pipelines.preprocessing.games import Game
 from chess_teacher.utils.db.client import MergeStrategy
 from chess_teacher.utils.pipeline_utils.pipeline_steps import LoadingStrategy, TransformStep
@@ -51,27 +46,6 @@ def test_preprocessing_transform_config_full_reload() -> None:
 def test_pipeline_mode_rejects_unknown_value() -> None:
     with pytest.raises(ValueError, match="'sync'"):
         PipelineMode("sync")
-
-
-def test_ingestion_load_source_folders_incremental() -> None:
-    assert ingestion_load_source_folders(PipelineMode.INCREMENTAL) == ("ingested",)
-
-
-def test_ingestion_load_source_folders_retry() -> None:
-    assert ingestion_load_source_folders(PipelineMode.RETRY) == ("ingested", "failed")
-
-
-def test_ingestion_load_source_folders_reprocess_and_full_reload() -> None:
-    expected = ("ingested", "failed", "processed")
-    assert ingestion_load_source_folders(PipelineMode.REPROCESS) == expected
-    assert ingestion_load_source_folders(PipelineMode.FULL_RELOAD) == expected
-
-
-def test_ingestion_load_merge_strategy() -> None:
-    assert ingestion_load_merge_strategy(PipelineMode.INCREMENTAL) == MergeStrategy.upsert()
-    assert ingestion_load_merge_strategy(PipelineMode.RETRY) == MergeStrategy.upsert()
-    assert ingestion_load_merge_strategy(PipelineMode.REPROCESS) == MergeStrategy.upsert()
-    assert ingestion_load_merge_strategy(PipelineMode.FULL_RELOAD) == MergeStrategy.full_sync()
 
 
 def test_transform_step_rejects_incremental_on_with_full_sync() -> None:

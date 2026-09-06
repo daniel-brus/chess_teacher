@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 from chess_teacher.utils.logging import get_logger
 from chess_teacher.utils.table_data_class import TableDataClass
@@ -110,6 +110,34 @@ class MoveCharacteristics(TableDataClass):
     @classmethod
     def get_id_hash_columns(cls) -> tuple[str, ...]:
         return ()
+
+    # Stockfish-backed columns filled by EnrichExpensiveMoveCharacteristicsStep.
+    _EXPENSIVE_NULLABLE_COLUMNS: ClassVar[tuple[str, ...]] = (
+        "evaluation_after",
+        "candidate_evaluations",
+    )
+
+    @classmethod
+    def sql_expensive_complete(cls, alias: str = "mc") -> str:
+        """SQL fragment: row has all expensive Stockfish columns filled."""
+        prefix = f"{alias}." if alias else ""
+        return " AND ".join(
+            f"{prefix}{column} IS NOT NULL" for column in cls._EXPENSIVE_NULLABLE_COLUMNS
+        )
+
+    @classmethod
+    def sql_expensive_incomplete(cls, alias: str = "mc") -> str:
+        """SQL fragment: row still missing at least one expensive Stockfish column."""
+        prefix = f"{alias}." if alias else ""
+        return (
+            "("
+            + " OR ".join(f"{prefix}{column} IS NULL" for column in cls._EXPENSIVE_NULLABLE_COLUMNS)
+            + ")"
+        )
+
+    def is_expensive_complete(self) -> bool:
+        """True when Stockfish evaluation and candidate_evaluations are both present."""
+        return self.evaluation_after is not None and self.candidate_evaluations is not None
 
     @classmethod
     def _coerce_field_value(cls, field_name: str, value: Any) -> Any:
