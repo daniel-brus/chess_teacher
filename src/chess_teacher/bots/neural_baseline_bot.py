@@ -25,6 +25,7 @@ from chess_teacher.pipelines.neural_network.mlflow_utils import MLflowTracker
 from chess_teacher.pipelines.neural_network.train import load_candidate_style_from_uri
 from chess_teacher.utils.chess_utils import StockfishEngine
 from chess_teacher.utils.logging import get_logger
+from chess_teacher.utils.process_utils import snapshot_host_pressure
 
 logger = get_logger()
 
@@ -178,7 +179,7 @@ class NeuralBaselineBot(ChessBot):
         t_end = time.perf_counter()
         logger.info(
             "Baseline choose_move version=%s nodes=%s n_cand=%s "
-            "sf_s=%.2f state_s=%.2f feats_s=%.2f predict_s=%.2f total_s=%.2f pick=%s",
+            "sf_s=%.2f state_s=%.2f feats_s=%.2f predict_s=%.2f total_s=%.2f pick=%s %s",
             self.version,
             self.candidate_nodes,
             n,
@@ -188,6 +189,7 @@ class NeuralBaselineBot(ChessBot):
             t_end - t_feats,
             t_end - t0,
             move.uci(),
+            snapshot_host_pressure().format_fields(),
         )
         return move
 

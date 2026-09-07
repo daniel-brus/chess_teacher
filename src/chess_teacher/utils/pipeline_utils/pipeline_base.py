@@ -34,6 +34,7 @@ from chess_teacher.utils.pipeline_utils.pipeline_helpers import (
     ProgressWindow,
     StepResult,
 )
+from chess_teacher.utils.process_utils import snapshot_host_pressure
 
 # Sentinel value for finished_at column to signal an active (locked) run.
 _LOCK_EPOCH: datetime = datetime(1970, 1, 1, tzinfo=UTC)
@@ -125,7 +126,8 @@ class PipelineStep(ABC):
         Run this step with retry handling.
         Called by Pipeline.run() — not directly.
         """
-        self.logger.info(f"[{self.name}] Starting step.")
+        started_pressure = snapshot_host_pressure()
+        self.logger.info(f"[{self.name}] Starting step. {started_pressure.format_fields()}")
         context.progress_next(f"Starting {self.name}...")
         started_at = get_current_datetime()
 
@@ -150,7 +152,12 @@ class PipelineStep(ABC):
                 self.run(db_client, context)
                 finished_at = get_current_datetime()
                 duration_s = (finished_at - started_at).total_seconds()
-                self.logger.info(f"[{self.name}] Completed in {duration_s:.2f}s.")
+                ended_pressure = snapshot_host_pressure()
+                self.logger.info(
+                    f"[{self.name}] Completed in {duration_s:.2f}s. "
+                    f"delta_rss_mb={ended_pressure.rss_mb - started_pressure.rss_mb:.1f} "
+                    f"{ended_pressure.format_fields()}"
+                )
                 context.progress_pop()
                 context.progress_success(f"{self.name} finished ({duration_s:.1f}s).")
                 return StepResult(
@@ -171,7 +178,12 @@ class PipelineStep(ABC):
 
         # All attempts exhausted (or non-retryable error hit).
         finished_at = get_current_datetime()
-        self.logger.error(f"[{self.name}] Failed after {attempt} attempt(s): {last_error}.")
+        duration_s = (finished_at - started_at).total_seconds()
+        ended_pressure = snapshot_host_pressure()
+        self.logger.error(
+            f"[{self.name}] Failed after {attempt} attempt(s): {last_error}. "
+            f"duration_s={duration_s:.2f} {ended_pressure.format_fields()}"
+        )
         context.progress_pop()
         context.progress_error(f"{self.name} failed: {last_error}")
         return StepResult(
@@ -228,9 +240,10 @@ class Pipeline:
         self._run_id: str | None = None
 
     def run(self) -> PipelineRunResult:
+        started_pressure = snapshot_host_pressure()
         self.logger.info(
             f"[Pipeline:{self.name}] Starting for user {self.context.user_id} "
-            f"account {self.context.account_id}."
+            f"account {self.context.account_id}. {started_pressure.format_fields()}"
         )
         started_at = get_current_datetime()
         step_results: tuple[StepResult, ...] = ()
@@ -319,9 +332,12 @@ class Pipeline:
             )
         else:
             duration_s = run_result.duration_seconds
+            ended_pressure = snapshot_host_pressure()
             self.logger.info(
                 f"[Pipeline:{self.name}] Finished with result={pipeline_result} "
-                f"in {duration_s:.2f}s."
+                f"in {duration_s:.2f}s. "
+                f"delta_rss_mb={ended_pressure.rss_mb - started_pressure.rss_mb:.1f} "
+                f"{ended_pressure.format_fields()}"
             )
             self.context.progress_pop(2)
             if pipeline_result == PipelineResult.SUCCESS:

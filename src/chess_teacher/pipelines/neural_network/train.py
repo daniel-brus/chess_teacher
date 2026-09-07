@@ -7,6 +7,7 @@ Replaces the fixed-vocab policy head. Parent weights load only when compatible w
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -31,6 +32,7 @@ from chess_teacher.pipelines.neural_network.ply_weights import (
 )
 from chess_teacher.pipelines.neural_network.tf_runtime import ensure_tensorflow_logging
 from chess_teacher.utils.logging import get_logger
+from chess_teacher.utils.process_utils import snapshot_host_pressure
 
 logger = get_logger()
 
@@ -361,9 +363,10 @@ class BaselineTrainer:
 
         logger.info(
             "Building candidate move features for %s datums "
-            "(SF evals from DB + on-the-fly geometry/material/openness; feat_dim=%s)…",
+            "(SF evals from DB + on-the-fly geometry/material/openness; feat_dim=%s). %s",
             len(datums),
             self.move_feat_dim,
+            snapshot_host_pressure().format_fields(),
         )
         batch = TrainingBatch(datums)
         feats, mask, labels, kept = batch.candidate_style_targets()
@@ -396,10 +399,11 @@ class BaselineTrainer:
             input_dim=int(x_state.shape[1]),
             weights_path=weights_path,
         )
+        fit_started = snapshot_host_pressure()
         logger.info(
             "Starting Keras fit samples=%s epochs=%s batch_size=%s "
             "style_disagree_boost=%s scale_pawns=%s disagree_frac=%.3f "
-            "mean_strength=%.3f…",
+            "mean_strength=%.3f %s",
             len(kept_datums),
             self.epochs,
             min(self.batch_size, len(kept_datums)),
@@ -407,6 +411,7 @@ class BaselineTrainer:
             self.style_disagree_scale,
             disagree_frac,
             mean_strength,
+            fit_started.format_fields(),
         )
         total_epochs = self.epochs
         from tensorflow.keras.callbacks import Callback  # type: ignore[import-untyped]
@@ -420,6 +425,7 @@ class BaselineTrainer:
                     {k: round(float(v), 6) for k, v in (logs or {}).items()},
                 )
 
+        fit_t0 = time.monotonic()
         # Prefer our logger over Keras STDERR progress bars.
         history = model.fit(
             {"state": x_state, "move_feats": feats},
@@ -445,6 +451,14 @@ class BaselineTrainer:
         metrics["sf_disagree_frac"] = disagree_frac
         metrics["sf_disagree_mean_strength"] = mean_strength
         metrics["epochs"] = float(self.epochs)
+        fit_ended = snapshot_host_pressure()
+        logger.info(
+            "Keras fit finished duration_s=%.2f delta_rss_mb=%.1f n_samples=%s %s",
+            time.monotonic() - fit_t0,
+            fit_ended.rss_mb - fit_started.rss_mb,
+            len(kept_datums),
+            fit_ended.format_fields(),
+        )
         return model, metrics
 
     @staticmethod
