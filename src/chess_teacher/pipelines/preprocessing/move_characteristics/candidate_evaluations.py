@@ -10,6 +10,7 @@ that scores ``fen_before`` / ``fen_after`` at fixed depth; this runs MultiPV on
 from __future__ import annotations
 
 import os
+import time
 from collections import defaultdict
 from collections.abc import Callable, Mapping
 from concurrent.futures import Future, ProcessPoolExecutor
@@ -38,7 +39,11 @@ from chess_teacher.utils.chess_utils import StockfishEngine
 from chess_teacher.utils.db.client import DatabaseClient
 from chess_teacher.utils.metadata_utils import TableMetadata
 from chess_teacher.utils.pipeline_utils.dataframe_transformation import DataFrameTransformation
-from chess_teacher.utils.process_utils import WorkerSafeLogger, is_parent_process
+from chess_teacher.utils.process_utils import (
+    WorkerSafeLogger,
+    is_parent_process,
+    snapshot_host_pressure,
+)
 
 _logger = WorkerSafeLogger(__name__)
 
@@ -296,7 +301,25 @@ class CandidateEvaluationsTransformation(DataFrameTransformation):
         self._checkpointed_fens = set()
 
         unique_fens = list(fen_to_moves.keys())
+        started = snapshot_host_pressure()
+        t0 = time.monotonic()
+        _logger.info(
+            "%s: evaluating %d unique FEN(s) from %d row(s). %s",
+            type(self).__name__,
+            len(unique_fens),
+            df.height,
+            started.format_fields(),
+        )
         fen_payloads = self._evaluate_unique_fens(unique_fens)
+        ended = snapshot_host_pressure()
+        _logger.info(
+            "%s: candidate eval finished unique_fens=%d duration_s=%.2f delta_rss_mb=%.1f %s",
+            type(self).__name__,
+            len(unique_fens),
+            time.monotonic() - t0,
+            ended.rss_mb - started.rss_mb,
+            ended.format_fields(),
+        )
 
         candidate_evaluations = [fen_payloads.get(fen) for fen in fens_before]
         return df.with_columns(

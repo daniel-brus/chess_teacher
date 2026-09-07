@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from enum import StrEnum
 from typing import ClassVar
@@ -28,6 +29,7 @@ from chess_teacher.utils.pipeline_utils.transformations import (
     FilterColumnsTransformation,
     IncrementalFilterTransformation,
 )
+from chess_teacher.utils.process_utils import snapshot_host_pressure
 from chess_teacher.utils.table_data_class import TableDataClass
 
 
@@ -133,10 +135,16 @@ class LoadToDatabaseStep(PipelineStep):
             context.progress_update(
                 f"Transformation {index}/{transform_total}: {transform_name}..."
             )
+            transform_started = snapshot_host_pressure()
+            transform_t0 = time.monotonic()
             df = transformation.transform(df)
+            transform_ended = snapshot_host_pressure()
             self.logger.info(
                 f"[{self.name}] Transformation {index}/{len(self.transformations)} "
-                f"({transform_name}): {before_rows} -> {df.height} rows."
+                f"({transform_name}): {before_rows} -> {df.height} rows "
+                f"duration_s={time.monotonic() - transform_t0:.2f} "
+                f"delta_rss_mb={transform_ended.rss_mb - transform_started.rss_mb:.1f} "
+                f"{transform_ended.format_fields()}"
             )
             if df.height == 0:
                 self.logger.info(
@@ -155,11 +163,12 @@ class LoadToDatabaseStep(PipelineStep):
         context.progress_update(
             f"Saving {df.height} record{'s' if df.height != 1 else ''} to {table}..."
         )
+        save_t0 = time.monotonic()
         result = self._save_records(db_client, self.table_metadata, df)
         self.logger.info(
             f"[{self.name}] Saved to {table}: "
             f"inserted={result.rows_inserted}, updated={result.rows_updated}, "
-            f"deleted={result.rows_deleted}."
+            f"deleted={result.rows_deleted} duration_s={time.monotonic() - save_t0:.2f}."
         )
         context.progress_pop()
         context.progress_success(

@@ -1,5 +1,6 @@
 import calendar
 import json
+import time
 from abc import ABC, abstractmethod
 from datetime import UTC, datetime, timedelta
 from typing import Literal
@@ -37,6 +38,7 @@ class Adapter(ABC):
         """Shared GET request with error handling and timeout."""
         try:
             self.logger.info(f"Getting response from {url}.")
+            request_t0 = time.monotonic()
             response = requests.get(
                 url=url,
                 headers=self._get_headers(),
@@ -44,7 +46,10 @@ class Adapter(ABC):
                 timeout=30,
                 stream=stream,
             )
-            self.logger.info(f"Response status: {response.status_code}.")
+            self.logger.info(
+                f"Response status: {response.status_code} "
+                f"duration_s={time.monotonic() - request_t0:.2f}."
+            )
             response.raise_for_status()
         except requests.HTTPError as e:
             status = e.response.status_code if e.response is not None else None
@@ -118,13 +123,26 @@ class ChessComAdapter(Adapter):
         records = []
 
         since_ts = _to_unix(since, unit="s") if since else 0
-        for year, month in _get_months_since(since or self._try_get_joined_date()):
+        fetch_t0 = time.monotonic()
+        months = list(_get_months_since(since or self._try_get_joined_date()))
+        self.logger.info(
+            "Chess.com fetch starting months=%s username=%s.",
+            len(months),
+            self.account.username,
+        )
+        for year, month in months:
             response = self._get_response(url=self._get_base_url(year=year, month=month))
             data = response.json()
             # filter out the games before the since date since these are already ingested
             games = [game for game in data.get("games", []) if game.get("end_time", 0) >= since_ts]
             if games:
                 records.extend(games)
+        self.logger.info(
+            "Chess.com fetch finished months=%s records=%s duration_s=%.2f.",
+            len(months),
+            len(records),
+            time.monotonic() - fetch_t0,
+        )
         return records
 
 
@@ -159,11 +177,16 @@ class LichessAdapter(Adapter):
         records = []
         try:
             self.logger.info(f"Parsing NDJSON response from {response.url}.")
+            parse_t0 = time.monotonic()
             for line in response.iter_lines():
                 if line:
                     records.append(json.loads(line))
         except Exception as e:
             self.logger.log_and_raise(AdapterError(f"Error parsing NDJSON response: {e}"))
+        self.logger.info(
+            f"Parsed {len(records)} NDJSON lines from {response.url} "
+            f"duration_s={time.monotonic() - parse_t0:.2f}."
+        )
         return records
 
     def get_records(self, since: datetime | None = None) -> list[dict]:
@@ -182,7 +205,7 @@ class LichessAdapter(Adapter):
 
         response = self._get_response(url=self._get_base_url(), params=params, stream=True)
         result = self._parse_ndjson(response)
-        self.logger.info(f"Parsed {len(result)} records from {response.url}.")
+        self.logger.info(f"Loaded {len(result)} records from {response.url}.")
         return result
 
 

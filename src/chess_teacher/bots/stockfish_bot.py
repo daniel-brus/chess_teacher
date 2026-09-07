@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import time
+
 import chess
 
 from chess_teacher.bots.base import ChessBot
 from chess_teacher.utils.chess_utils import StockfishEngine
+from chess_teacher.utils.logging import get_logger
+
+logger = get_logger()
 
 
 class StockfishBot(ChessBot):
@@ -29,7 +34,15 @@ class StockfishBot(ChessBot):
         self._engine.__enter__()
 
     def choose_move(self, board: chess.Board) -> chess.Move:
-        return self._engine.choose_move(board)
+        t0 = time.monotonic()
+        move = self._engine.choose_move(board)
+        logger.info(
+            "Stockfish choose_move depth=%s duration_s=%.2f pick=%s",
+            self.depth,
+            time.monotonic() - t0,
+            move.uci(),
+        )
+        return move
 
     def close(self) -> None:
         self._engine.__exit__(None, None, None)

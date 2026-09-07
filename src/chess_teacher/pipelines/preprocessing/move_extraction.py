@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import time
 from io import StringIO
 from typing import Any
 
@@ -232,6 +233,11 @@ class ExtractUserMovesTransformation(DataFrameTransformation):
                 )
             return pl.DataFrame(schema=_MOVE_OUTPUT_SCHEMA)
 
+        logger.info(
+            "ExtractUserMovesTransformation: extracting moves from %d standard game(s).",
+            standard.height,
+        )
+        extract_t0 = time.monotonic()
         try:
             expanded = standard.with_columns(
                 pl
@@ -266,6 +272,18 @@ class ExtractUserMovesTransformation(DataFrameTransformation):
             .unnest("_moves")
         )
         if result.height == 0:
+            logger.info(
+                "ExtractUserMovesTransformation: extracted 0 move(s) from %d game(s) "
+                "duration_s=%.2f.",
+                standard.height,
+                time.monotonic() - extract_t0,
+            )
             return pl.DataFrame(schema=_MOVE_OUTPUT_SCHEMA)
 
+        logger.info(
+            "ExtractUserMovesTransformation: extracted %d move(s) from %d game(s) duration_s=%.2f.",
+            result.height,
+            standard.height,
+            time.monotonic() - extract_t0,
+        )
         return result.select(_MOVE_OUTPUT_SCHEMA.names()).cast(_MOVE_OUTPUT_SCHEMA)
