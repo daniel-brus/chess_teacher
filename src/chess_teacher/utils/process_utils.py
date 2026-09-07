@@ -9,6 +9,7 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from types import ModuleType
 from typing import TYPE_CHECKING, Any, NoReturn
 
 from chess_teacher.utils.env_utils import get_environment, get_hostname
@@ -16,10 +17,16 @@ from chess_teacher.utils.env_utils import get_environment, get_hostname
 if TYPE_CHECKING:
     from chess_teacher.utils.logging.logger import EnhancedLogger
 
-try:
-    import resource as _resource
-except ImportError:  # pragma: no cover - Windows
-    _resource = None
+
+def _load_resource_module() -> ModuleType | None:
+    try:
+        import resource
+    except ImportError:  # pragma: no cover - Windows
+        return None
+    return resource
+
+
+_resource = _load_resource_module()
 
 
 def is_parent_process() -> bool:
