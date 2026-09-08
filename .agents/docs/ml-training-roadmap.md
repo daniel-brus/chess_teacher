@@ -1,10 +1,10 @@
 # ML training roadmap — baseline + personalized bots
 
-**Status:** Phase 1 + 1b on `develop`. Game-split **assignment** runs in the daily user `PipelineRunner` after preprocess (not train/promote). Phase 2a **tools + `DEFAULT_EPOCHS=20`**. Phase 2b **tools + first 10k experiments** (keep `128/64`; feat v4 skipped). Production train/promote unchanged until Phase 4.
+**Status:** Phase 1 + 1b on `develop`. Phase 2a/2b tools + experiments done (keep `128/64`; feat v4 skipped). **Offline train-queue catch-up** (full registry val) shows early plateau ~0.47 overall — next lever is **Phase 2c** (board representation + training signal/metrics), not more MLP width/epochs. Production train/promote unchanged until Phase 4.
 
 **Audience:** humans and coding agents working on `src/chess_teacher/pipelines/neural_network/`
 
-**Last updated:** 2026-09-03 (rev: 2b experiment outcome tables; merge-ready)
+**Last updated:** 2026-09-08 (rev: Phase 2c greenfield; NN package marked POC/sunset)
 
 ---
 
@@ -44,8 +44,10 @@ These choices simplify the roadmap; revisit only if metrics or product needs cha
 | **Recency (baseline)** | Optional **sample weights** within each new batch can emphasize fresher moves; the cutoff loader already restricts each round to **new** data since last train. |
 | **Recency (user bots)** | Strong recency weights + time-ordered user val split (Phase 3). |
 | **Baseline capacity** | Shared trunk must grow as platform user diversity grows — enables effective per-user finetune later (wider/deeper ≠ per-user input dims). |
-| **Input features** | Separate hypothesis: richer **cues** per position (phase-specific structure, etc.) — investigate before feat version bump. |
+| **Input features** | 2b hand-cue feat v4 skipped. **Phase 2c:** board tensor / conv (or documented alternative) + richer sample weights / metrics — before another MLP HP grind. |
 | **Existing `baseline_models` (v50 / v51, ~2026-08)** | **POC only.** Deletable. Do **not** spend on `--full-val` or artifact archaeology vs those URIs. Optional cheap `--train-inline` vs production on the same `--limit` slice is nice-to-have, never a gate. New work is ranked on **registry val vs itself**. Phase 4 starts a **fresh** train/promote chain. |
+| **Greenfield baseline (Phase 2c+)** | **No backwards compatibility** with POC Keras / old flat-state layouts. Build improved net from scratch; **reuse** DB move characteristics + candidate SF evals. Cold-start OK after arch/feat changes. |
+| **Entire `pipelines/neural_network` package** | **POC.** Practically every class (trainers, promotion, offline tools, hybrid encoder, DB model rows) can be **safely removed or rewritten**. Keep preprocessing move characteristics / candidate SF evals. Flat-state `BaselineTrainer` marked **TO-BE-SUNSET** once a greenfield successor wins val; `HybridBoardTrainer` is the current successor *candidate* (also POC, not production-wired). |
 
 ---
 
@@ -133,7 +135,17 @@ Use **registry val** + stratified metrics unless noted. Primary success metric f
 | E11 | Do candidate features (e.g. **passed pawns**, rook on 7th, king activity) correlate with errors in endgame disagree positions? | Shortlist of 30 endgame SF-disagree top1-miss FENs exists (rook endings / pawn races / N vs pawns). **Not enough to justify feat v4:** endgame is already the best slice. |
 | E12 | Does adding a small feat set improve **endgame disagree_t1** without hurting opening/middle? | **Skipped.** Investigation did not support an endgame-cue bump. Revisit if targeting **opening** disagree, on a larger val. |
 
-**Feat investigation process (lightweight):**
+### Baseline — representation + training signal (Phase 2c)
+
+| # | Question | How we know |
+|---|----------|-------------|
+| E19 | Do published chess nets encode boards as **spatial tensors + conv/residual towers** (vs flat hand feats only)? | Short research note: AlphaZero/Leela/Maia-style planes; what we keep vs drop for *candidate ranking* |
+| E20 | Does a **board encoder** (before-FEN tensor ± after/delta/move planes) beat flat 55-d move feats on full registry val `disagree_t1` / overall? | A/B cold or catch-up sibling; same queue/val; hybrid OK (conv trunk + candidate head) |
+| E21 | Do better **sample weights** (disagree boost schedule, forced-move downweight via SF Δeval) raise disagree without tanking agree? | Ablate weights on fixed architecture; report agree + disagree |
+| E22 | Do better **targets/losses** (soft labels, SF-policy mix, sliced CE) beat one-hot CE for style? | Same encoder; loss/target ablations; primary = disagree or weighted product metric |
+| E23 | Are **eval metrics** (top-k, calibration, phase slices) actionable for promotion gates? | Document metric pack; optional gate change proposal for Phase 4 (not wired yet) |
+
+**2b feat investigation process (lightweight, done):**
 
 1. **Audit** — cues already in state/move feats (`is_end_game` in state today; no passed-pawn count yet). See `create_training_set.py`, `candidate_eval.py`, `fen_metrics.py`.
 2. **Error analysis** — on registry val, find failures where phase = endgame (middlegame if needed).
@@ -201,6 +213,7 @@ Root notebook for interactive baseline work on develop. Extend incrementally —
 | **1 / 1b** ✅ | Cells: backfill status, registry split summary, call `evaluate_datums` on a loaded model URI |
 | **2a** ✅ (local notebook; file is gitignored) | Promotion-style compare on registry val; epoch sweep via `experiment_baseline_epochs.py` |
 | **2b** | Mini catch-up replay (1–3 batches) with val curve plot; **feat error analysis** (E10–E11) on endgame val failures |
+| **2c** | Board-tensor viz / plane checklist; hybrid encoder A/B curves; weight/loss ablation table |
 | **3** | User section: pick `account_id`, time split, finetune, disagree metric vs baseline on user val |
 | **4+** | Optional cells mirroring production promotion gates (read-only inspect before wiring) |
 
@@ -258,6 +271,10 @@ Personalization quality is measured mainly on **SF-disagree** positions (user di
 | **Recency bias** | Recent games weighted higher in loss — strong for **user finetune**; optional/light within baseline batches |
 | **Split version (`salt`)** | Label for a frozen assignment policy, e.g. `baseline-v1` — bump when intentionally rotating val/test |
 | **Split registry** | DB table mapping `(split_version, game_id) → bucket` — auditable, excludable from training queries |
+| **Top-k** | Whether the **played move** ranks in the model’s top *k* scored candidates (among the masked legal/SF set). `top1` = exact hit; `top3` = played move in best 3. Not “engine top-k moves.” |
+| **Board tensor** | Fixed-shape spatial input (typically `8×8×C` planes: piece types, side-to-move, castling, optional attacks / history / move-from-to). Built from FEN(s), not the flat 55-d hand vector alone. |
+| **Conv tower** | Stack of convolutional (often residual) layers that map the board tensor → embedding. Shares weights across squares so local patterns transfer. |
+| **Forced move** | Position where SF best ≫ second-best (e.g. recapture). Sample weight uses continuous factor `exp((second-best)/scale)` → 0 as gap grows; little human choice signal. |
 
 ---
 
@@ -476,6 +493,42 @@ Decision: **no feat v4**. Opening is the weak disagree slice, not endgame. If cu
 
 **2a leftover (same sample, for the record):** `DEFAULT_EPOCHS=20` justified (grid 3-20 still climbing). Cheap inline@20 vs POC v50: `disagree_t1 +0.057` informational, not a gate.
 
+### Phase 2c — Board representation + training signal (offline)
+
+**Goal:** Raise the **ceiling** of the candidate-style baseline by (1) spatial board encoding / conv-style inductive bias and (2) better distributional training signal + metrics — without wiring production yet.
+
+**Why now (after 2b + queue catch-up):** Width did not help. Hand feat v4 skipped. Full-val train-queue catch-up (`64×20`, boost 1.0) plateaus ~**0.47 overall** by ~R7–R12; train top1 ≫ val top1 each round. Next lever is representation + objective, not another MLP HP grind. Park unfinished batch×epochs cells; re-run HP **after** 2c if needed.
+
+**Prerequisite:** Phase 1b registry val; offline catch-up sibling; frozen full val available.
+
+**Agent scope (one dedicated agent / branch):** research → design note → offline prototype → A/B on registry val. Stay in library + `scripts/tools|ops`. No Phase 4 entrypoint edits.
+
+| Track | Deliverable | Notes |
+|-------|-------------|-------|
+| **R1 Research** | `.agents/docs/ml-phase2c-board-encoder.md` | ✅ E19: AZ/Leela/Maia → candidate-rank transfer; plane set C=17; hybrid arch |
+| **R2 Board tensor** | `board_tensor.py` | ✅ `8×8×17` from fen_before; us-at-bottom; `BOARD_TENSOR_VERSION=1` |
+| **R3 Conv tower (hybrid)** | `board_encoder.py` | ✅ `HybridBoardTrainer`; conv→GAP→emb + candidate head; keep move feats |
+| **R4 Sample weights** | `ply_weights.py` | ✅ Continuous forced downweight helpers; default off. Ablation A/B still open |
+| **R5 Targets / loss** | docs | ✅ Proposals in research note (soft / SF-mix / sliced). Not coded yet |
+| **R6 Metrics pack** | `eval_metrics.py` | ✅ Stratified top1+top3 in `format_eval_metrics`; Phase 4 gate proposal in note |
+| **R7 Offline A/B** | `offline_baseline_encoder_ab.py` | ✅ Path ready; **full registry val run still required** for exit criterion 3 |
+
+**Design principles**
+
+- Hybrid first: board encoder + candidate head beats “throw away SF candidates and learn full move space” for this product.
+- One change family per experiment: encoder **or** weights/loss, not both in the first A/B.
+- Full registry val for decisions (not 32-game 2b slice).
+- Revisit `DEFAULT_EPOCHS=20` under the new encoder (2a pick may not hold).
+
+**Exit criteria (2c):**
+
+1. Research note with chosen plane set + hybrid arch (or explicit reject of conv with rationale).
+2. Working offline train/eval path that builds board tensors and runs a conv (or documented alternative) hybrid.
+3. At least one A/B vs current MLP on full registry val showing **clear** gain on primary metric (disagree or agreed weighted) **or** a documented negative result.
+4. Weight/loss/metric proposals written; production wiring deferred to Phase 4.
+
+**Out of scope for 2c:** user finetune (Phase 3); promoting to `ml.baseline_models` production; finishing parked HP cells unless used as control.
+
 ---
 
 ## Phase 3 — Personal bot experiments (offline)
@@ -623,6 +676,9 @@ Test set: manual / release-tag evaluation only — never promotion or epoch tuni
 | 5b3 | Feat v4 A/B (if investigation positive) | library | No | skipped |
 | 5c | Phase-stratified eval (optional) | library | No | done |
 | 5d | Notebook: batch replay + feat error analysis | notebook | No | |
+| **5e** | **Phase 2c:** research note (board/move conv practice) | docs | No | done (`.agents/docs/ml-phase2c-board-encoder.md`) |
+| **5f** | **Phase 2c:** board tensor + hybrid conv tower + offline A/B | library + tools | No | done (path); full-val A/B run pending |
+| **5g** | **Phase 2c:** forced/disagree weights + loss/metric pack | library | No | proposals + helpers; ablations pending |
 | 6 | Recency weights (+ optional baseline batch) | library | No | |
 | 7a | `user_splits.py` + `offline_user_finetune_eval.py` | library + tools | No | |
 | 7b | `offline_user_promotion.py` + `offline_user_catch_up.py` | **ops** | No | |
@@ -643,25 +699,28 @@ When asked to implement part of this roadmap:
 3. Reuse `BaselineTrainer`, `TrainingBatch`, `candidate_style_sample_weights`, `offline_eval` helpers, promotion scorers where possible
 4. Split by **`game_id`**, not by move index; prefer **registry** for platform baseline
 5. User bots: **time split per account** in Phase 3 — not platform hash registry
-6. Report **stratified** metrics (overall / SF-agree / SF-disagree) in every eval script and notebook cell
+6. Report **stratified** metrics (overall / SF-agree / SF-disagree) in every eval script and notebook cell; for Phase 2c also report top-k (and phase slices if used)
 7. **Ops siblings** mimic `scripts/entrypoints/` and `scripts/ops/` shape but stay split-based and non-promoting until Phase 4
 8. **Notebook:** add cells that call the same library functions as scripts — no notebook-only training logic
 9. Run `pytest` / `mypy` / `ruff` via the venv when changing NN code (project rule).
-10. Serious offline runs: `--limit 10000+`; small limits are smoke tests only
-11. Treat current production/candidate Keras rows as **POC**. Do not plan `--full-val` or S3 archaeology vs v50/v51. Rank new models on registry val. Cheap `--train-inline` vs a still-present URI is optional.
+10. Serious offline runs: `--limit 10000+` or **full registry val** for 2c decisions; small limits are smoke tests only
+11. Treat current production/candidate Keras rows as **POC**. Do not plan `--full-val` or S3 archaeology vs v50/v51. Rank new models on registry val. Phase 2c+: **greenfield** baseline OK — no feat/arch backwards-compat with POC; reuse move characteristics / SF candidate evals.
+12. **Phase 2c:** research first; prefer **hybrid** board encoder + candidate head; one change family per A/B (encoder vs weights/loss); do not wire production gates
 
 ---
 
 ## Current workflow (you are here)
 
 1. **Terminal-only** — `backfill_game_splits.py` then `offline_baseline_train_eval.py` ✅
-2. **Phase 2a** — epoch sweep + promotion sibling + `DEFAULT_EPOCHS=20` (justified pick) ✅
-3. **Phase 2b** — tools + 10k experiments ✅ (keep 128/64; feat v4 skipped). Next: Phase 3 or larger-val HP revisit.
-4. **Phase 3** — user tools + user ops siblings + notebook user section
-5. **Phase 4** — merge into entrypoints; **consolidate** NN pipelines (≤2); fold split assign into preprocess; **orchestrated** train / promote / catch-up
-6. **Phase 5** — product polish
+2. **Phase 2a** — epoch sweep + promotion sibling + `DEFAULT_EPOCHS=20` (justified pick; revisit in 2c) ✅
+3. **Phase 2b** — tools + 10k experiments ✅ (keep 128/64; feat v4 skipped)
+4. **Train-queue catch-up (offline)** — full-val plateau ~0.47; park remaining batch×epochs cells ✅ / in progress
+5. **Phase 2c** — board representation + training signal/metrics ← research + hybrid offline path landed; run full-val encoder A/B next
+6. **Phase 3** — user tools + user ops siblings + notebook user section
+7. **Phase 4** — merge into entrypoints; **consolidate** NN pipelines (≤2); fold split assign into preprocess; **orchestrated** train / promote / catch-up
+8. **Phase 5** — product polish
 
-Each phase should close the **experimental questions** (E1–E18) listed above for that scope.
+Each phase should close the **experimental questions** (E1–E23) listed above for that scope.
 
 ---
 

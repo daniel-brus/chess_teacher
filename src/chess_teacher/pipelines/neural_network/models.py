@@ -1,4 +1,8 @@
-"""DB row classes for baseline models and training bookkeeping."""
+"""DB row classes for baseline models and training bookkeeping.
+
+POC: ``BaselineModel`` rows / URIs (incl. v50/v51) are disposable. Phase 4
+starts a fresh train/promote chain — do not archaeology these artifacts.
+"""
 
 from __future__ import annotations
 
@@ -246,6 +250,8 @@ class GameSplitAssignment(TableDataClass):
     game_id: str
     bucket: str
     assigned_at: datetime
+    already_processed_baseline: datetime | None = None
+    already_processed_personal: datetime | None = None
 
     @classmethod
     def get_yaml_path(cls) -> Path:

@@ -173,6 +173,80 @@ def user_not_sf_best_mask(
     return _labeled_delta_feat(move_feats, labels) < -float(eps)
 
 
+# Forced-move weights (E21) — continuous in best-vs-second gap; default unused.
+# delta_second_vs_best = eval(second) - eval(best) ≤ 0 (user POV among masked).
+# More negative delta → more forced → weight factor → 0.
+# factor = exp(delta / scale) = exp(-gap / scale), gap = best - second ≥ 0.
+# Forcedness is a training weight only — do not add a forced-move eval metric slice.
+DEFAULT_FORCED_SCALE_PAWNS = 1.5
+_EVAL_AFTER_KEY = "evaluation_after_user_pov"
+
+
+def best_vs_second_gap_pawns(
+    move_feats: np.ndarray,
+    mask: np.ndarray,
+    *,
+    tanh_scale: float = _EVAL_FEAT_TANH_SCALE,
+) -> np.ndarray:
+    """Per-row ``best - second_best`` in pawns (user POV eval among masked) ≥ 0.
+
+    Rows with fewer than two legal candidates return ``0``.
+    """
+    return -second_vs_best_delta_pawns(move_feats, mask, tanh_scale=tanh_scale)
+
+
+def second_vs_best_delta_pawns(
+    move_feats: np.ndarray,
+    mask: np.ndarray,
+    *,
+    tanh_scale: float = _EVAL_FEAT_TANH_SCALE,
+) -> np.ndarray:
+    """Per-row ``second_best - best`` in pawns (≤ 0). More negative = more forced.
+
+    Rows with fewer than two legal candidates return ``0`` (no downweight).
+    """
+    feats = np.asarray(move_feats, dtype=np.float64)
+    m = np.asarray(mask, dtype=np.float64)
+    if feats.ndim != 3:
+        raise ValueError(f"move_feats expected (N, MAX, F), got {feats.shape}")
+    if m.shape[:2] != feats.shape[:2]:
+        raise ValueError(f"mask shape {m.shape} incompatible with feats {feats.shape}")
+    try:
+        eval_i = CANDIDATE_MOVE_FEAT_KEYS.index(_EVAL_AFTER_KEY)
+    except ValueError as exc:
+        raise ValueError(f"missing feat key {_EVAL_AFTER_KEY!r}") from exc
+
+    packed = feats[:, :, eval_i]
+    clipped = np.clip(packed, -_ATANH_CLIP, _ATANH_CLIP)
+    evals = float(tanh_scale) * np.arctanh(clipped)
+    legal = m > 0.5
+    evals = np.where(legal, evals, -np.inf)
+    ordered = np.sort(evals, axis=1)[:, ::-1]
+    n_legal = np.sum(legal, axis=1)
+    best = ordered[:, 0]
+    second = ordered[:, 1]
+    delta = second - best
+    return np.where(n_legal >= 2, delta, 0.0).astype(np.float64)
+
+
+def forced_move_downweight_factor(
+    move_feats: np.ndarray,
+    mask: np.ndarray,
+    *,
+    scale_pawns: float = DEFAULT_FORCED_SCALE_PAWNS,
+) -> np.ndarray:
+    """Continuous per-row multiplier in ``(0, 1]`` from second-vs-best delta.
+
+    ``factor = exp(delta / scale)`` with ``delta = second - best ≤ 0``.
+    Equal top-two (delta=0) → 1.0; large forced gap → approaches 0.
+    """
+    scale = float(scale_pawns)
+    if scale <= 0:
+        raise ValueError(f"scale_pawns must be > 0, got {scale}")
+    delta = second_vs_best_delta_pawns(move_feats, mask)
+    return np.exp(delta / scale).astype(np.float64)
+
+
 def candidate_style_sample_weights(
     plies: list[int] | np.ndarray,
     move_feats: np.ndarray,
@@ -182,11 +256,17 @@ def candidate_style_sample_weights(
     style_disagree_scale: float | None = None,
     lam: float = DEFAULT_PLY_WEIGHT_LAMBDA,
     clip: tuple[float, float] | None = DEFAULT_PLY_WEIGHT_CLIP,
+    candidate_mask: np.ndarray | None = None,
+    forced_scale_pawns: float | None = None,
 ) -> np.ndarray:
     """Ply weights * continuous style boost; mean-normalized (clip).
 
     ``style_disagree_boost`` / ``style_disagree_scale`` ``None`` -> env / defaults.
     Boost ``1.0`` disables the style term (ply only).
+
+    Forced-move downweight (E21): pass ``candidate_mask`` and ``forced_scale_pawns``
+    (>0). Multiplies by ``exp((second-best)/scale)`` continuously. Default off so
+    encoder A/B stays one change family.
     """
     boost = (
         style_disagree_boost_from_env()
@@ -202,4 +282,12 @@ def candidate_style_sample_weights(
     if boost != 1.0:
         strength = user_sf_disagree_strength(move_feats, labels, scale_pawns=scale)
         raw = raw * (1.0 + (boost - 1.0) * strength)
+    if forced_scale_pawns is not None:
+        if candidate_mask is None:
+            raise ValueError("forced_scale_pawns requires candidate_mask")
+        raw = raw * forced_move_downweight_factor(
+            move_feats,
+            candidate_mask,
+            scale_pawns=float(forced_scale_pawns),
+        )
     return normalize_sample_weights(raw, clip=clip)
