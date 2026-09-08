@@ -109,9 +109,11 @@ def _capture_run(
         saved.append(data)
         return WriteResult(strategy=WriteStrategy.MERGE, rows_inserted=data.height)
 
-    monkeypatch.setattr(step, "_load_records", lambda _db, _ctx: source_df.clone())
+    monkeypatch.setattr(step, "_load_records", lambda _db, _ctx, **_kwargs: source_df.clone())
     monkeypatch.setattr(step, "_save_records", capture_save)
 
+    # Tests feed one mocked page; disable keyset batching to avoid an endless loop.
+    step.batch_size = None
     step.run(db, PipelineContext(user_id="u1", account_id=_ACCOUNT_ID))
 
     return CapturedSave(

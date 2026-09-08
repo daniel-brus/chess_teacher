@@ -70,6 +70,8 @@ make k8s_ensure
 make dev_k3d_up
 ```
 
+**Login works then `failed to resolve host 'host.k3d.internal'`:** OAuth succeeded; CoreDNS lost k3d's host alias after a cluster/Docker restart. `make k8s_ensure` re-injects it (`scripts/dev/repair-k3d-host-dns.ps1`).
+
 **Postgres preflight fails:** run `make dev_bootstrap` first.
 
 **Manual dispatcher tick:**

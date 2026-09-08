@@ -141,7 +141,8 @@ class S3ObjectStorage(ObjectStorage):
                 upload_mode = "put_object"
         except ClientError as e:
             self.logger.log_and_raise(FileError(f"Could not write {key}: {e}"))
-        self.logger.debug(
+        log_fn = self.logger.info if upload_mode == "multipart" else self.logger.debug
+        log_fn(
             "S3 PUT bucket=%s key=%s bytes=%s mode=%s overwrite=%s",
             self.bucket,
             key,

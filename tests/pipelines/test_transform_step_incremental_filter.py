@@ -133,6 +133,7 @@ def test_transform_step_skips_save_when_incremental_filter_removes_all_rows(
     db_client = _mock_db_client(target_game_ids=["game-1", "game-2", "game-3"])
 
     step = RawGamesToGamesStep()
+    step.batch_size = None  # single-shot mock load; avoid keyset loop
     step._incremental_filter.db_client = db_client
 
     saved_frames: list[pl.DataFrame] = []
@@ -145,7 +146,7 @@ def test_transform_step_skips_save_when_incremental_filter_removes_all_rows(
         saved_frames.append(data)
         return WriteResult(strategy=WriteStrategy.MERGE, rows_inserted=data.height)
 
-    monkeypatch.setattr(step, "_load_records", lambda _db, _ctx: source_df)
+    monkeypatch.setattr(step, "_load_records", lambda _db, _ctx, **_kwargs: source_df)
     monkeypatch.setattr(step, "_save_records", capture_save)
 
     step.run(db_client, PipelineContext(account_id=_ACCOUNT_ID))

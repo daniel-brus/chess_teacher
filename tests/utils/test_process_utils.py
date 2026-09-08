@@ -8,9 +8,13 @@ import pytest
 
 from chess_teacher.utils.process_utils import (
     WORKER_NO_OP_LOGGER,
+    HostPressure,
     WorkerSafeLogger,
     is_parent_process,
+    log_heavy_operation,
+    log_script_runtime_context,
     run_script_main,
+    snapshot_host_pressure,
 )
 
 
@@ -77,3 +81,49 @@ def test_worker_safe_logger_uses_no_op_in_worker(monkeypatch: pytest.MonkeyPatch
     )
     logger = WorkerSafeLogger("chess_teacher.tests.worker_safe_logger")
     assert logger._get() is WORKER_NO_OP_LOGGER
+
+
+def test_snapshot_host_pressure_reports_process_rss() -> None:
+    pressure = snapshot_host_pressure()
+    assert isinstance(pressure, HostPressure)
+    assert pressure.rss_mb >= 0
+    assert pressure.cpu_count >= 1
+    fields = pressure.format_fields()
+    assert "rss_mb=" in fields
+    assert "cpu_count=" in fields
+
+
+def test_log_script_runtime_context_includes_host_pressure() -> None:
+    logger = MagicMock()
+    log_script_runtime_context(logger, script="pipeline")
+    logger.info.assert_called_once()
+    message = logger.info.call_args.args[0]
+    formatted = message % logger.info.call_args.args[1:]
+    assert formatted.startswith("pipeline runtime context")
+    assert "rss_mb=" in formatted
+    assert "cpu_count=" in formatted
+
+
+def test_log_heavy_operation_logs_start_and_finish() -> None:
+    logger = MagicMock()
+    with log_heavy_operation(logger, "fen eval", unique_fens=12, workers=2):
+        pass
+    assert logger.info.call_count == 2
+    start_msg = logger.info.call_args_list[0].args[0] % logger.info.call_args_list[0].args[1:]
+    finish_msg = logger.info.call_args_list[1].args[0] % logger.info.call_args_list[1].args[1:]
+    assert start_msg.startswith("fen eval unique_fens=12 workers=2 started")
+    assert "rss_mb=" in start_msg
+    assert finish_msg.startswith("fen eval unique_fens=12 workers=2 finished")
+    assert "duration_s=" in finish_msg
+    assert "delta_rss_mb=" in finish_msg
+
+
+def test_log_heavy_operation_logs_failure() -> None:
+    logger = MagicMock()
+    with pytest.raises(RuntimeError, match="boom"):
+        with log_heavy_operation(logger, "keras fit"):
+            raise RuntimeError("boom")
+    assert logger.info.call_count == 2
+    finish_msg = logger.info.call_args_list[1].args[0] % logger.info.call_args_list[1].args[1:]
+    assert "keras fit failed" in finish_msg
+    assert "duration_s=" in finish_msg

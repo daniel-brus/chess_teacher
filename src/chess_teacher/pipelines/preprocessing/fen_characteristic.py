@@ -28,7 +28,11 @@ from chess_teacher.utils.env_utils import get_optional_env_variable
 from chess_teacher.utils.exception_utils import TransformationError
 from chess_teacher.utils.metadata_utils import TableMetadata
 from chess_teacher.utils.pipeline_utils.dataframe_transformation import DataFrameTransformation
-from chess_teacher.utils.process_utils import WorkerSafeLogger, is_parent_process
+from chess_teacher.utils.process_utils import (
+    WorkerSafeLogger,
+    is_parent_process,
+    snapshot_host_pressure,
+)
 
 _MIN_PARALLEL_FENS = 100
 _DEFAULT_LOG_PROGRESS_PERCENT = 5
@@ -286,7 +290,9 @@ class FenCharacteristicTransformation(DataFrameTransformation, ABC):
 
     def _evaluate_fens_serial(self, unique_fens: list[str]) -> dict[str, float]:
         on_batch = self._maybe_checkpoint_fen_batch if self._checkpoint_enabled() else None
-        return self._evaluate_fens_serial_with(unique_fens, self._score_fen, on_scores_batch=on_batch)
+        return self._evaluate_fens_serial_with(
+            unique_fens, self._score_fen, on_scores_batch=on_batch
+        )
 
     def _evaluate_fens_serial_with(
         self,
@@ -349,14 +355,17 @@ class FenCharacteristicTransformation(DataFrameTransformation, ABC):
             progress_shm.unlink()
             raise RuntimeError("Shared memory progress buffer is unavailable.")
         progress_buf: memoryview = progress_shm.buf
+        pool_started = snapshot_host_pressure()
+        pool_t0 = time.monotonic()
 
         _logger.info(
             "%s: starting ProcessPoolExecutor with %d worker(s) for %d unique FEN(s) "
-            "(%d FENs per chunk).",
+            "(%d FENs per chunk). %s",
             type(self).__name__,
             n_chunks,
             len(unique_fens),
             chunk_size,
+            pool_started.format_fields(),
         )
 
         try:
@@ -402,10 +411,15 @@ class FenCharacteristicTransformation(DataFrameTransformation, ABC):
                         )
                         last_heartbeat = now
 
+            pool_ended = snapshot_host_pressure()
             _logger.info(
-                "%s: ProcessPoolExecutor finished (%d unique FEN scores).",
+                "%s: ProcessPoolExecutor finished (%d unique FEN scores, "
+                "duration_s=%.2f, delta_rss_mb=%.1f). %s",
                 type(self).__name__,
                 len(scores),
+                time.monotonic() - pool_t0,
+                pool_ended.rss_mb - pool_started.rss_mb,
+                pool_ended.format_fields(),
             )
             return scores
         finally:
@@ -441,24 +455,40 @@ class FenCharacteristicTransformation(DataFrameTransformation, ABC):
         on_batch = self._maybe_checkpoint_fen_batch if self._checkpoint_enabled() else None
         total_fens = len(unique_fens)
         use_parallel = self.n_workers > 1 and total_fens >= _MIN_PARALLEL_FENS
+        started = snapshot_host_pressure()
+        t0 = time.monotonic()
 
         if use_parallel:
             _logger.info(
                 "%s: using parallel evaluation (%d unique FEN(s), %d ProcessPool worker(s), "
-                "heartbeat every 60s).",
+                "heartbeat every 60s). %s",
                 type(self).__name__,
                 total_fens,
                 self.n_workers,
+                started.format_fields(),
             )
-            return self._evaluate_fens_parallel(unique_fens, on_scores_batch=on_batch)
+            scores = self._evaluate_fens_parallel(unique_fens, on_scores_batch=on_batch)
+        else:
+            _logger.info(
+                "%s: using serial evaluation (%d unique FEN(s), progress every %s%%). %s",
+                type(self).__name__,
+                total_fens,
+                self.log_progress_percent if self.log_progress_percent is not None else "off",
+                started.format_fields(),
+            )
+            scores = self._evaluate_fens_serial(unique_fens)
 
+        ended = snapshot_host_pressure()
         _logger.info(
-            "%s: using serial evaluation (%d unique FEN(s), progress every %s%%).",
+            "%s: evaluation finished unique_fens=%d scores=%d duration_s=%.2f delta_rss_mb=%.1f %s",
             type(self).__name__,
             total_fens,
-            self.log_progress_percent if self.log_progress_percent is not None else "off",
+            len(scores),
+            time.monotonic() - t0,
+            ended.rss_mb - started.rss_mb,
+            ended.format_fields(),
         )
-        return self._evaluate_fens_serial(unique_fens)
+        return scores
 
     def transform(self, df: pl.DataFrame) -> pl.DataFrame:
         missing = [column for column in ("fen_before", "fen_after") if column not in df.columns]
@@ -563,24 +593,40 @@ class DualSidedFenCharacteristicTransformation(FenCharacteristicTransformation):
     def _evaluate_unique_fens_sides(self, unique_fens: list[str]) -> dict[str, tuple[float, float]]:
         total_fens = len(unique_fens)
         use_parallel = self.n_workers > 1 and total_fens >= _MIN_PARALLEL_FENS
+        started = snapshot_host_pressure()
+        t0 = time.monotonic()
 
         if use_parallel:
             _logger.info(
                 "%s: using parallel evaluation (%d unique FEN(s), %d ProcessPool worker(s), "
-                "heartbeat every 60s).",
+                "heartbeat every 60s). %s",
                 type(self).__name__,
                 total_fens,
                 self.n_workers,
+                started.format_fields(),
             )
-            return self._evaluate_fens_parallel_sides(unique_fens)
+            scores = self._evaluate_fens_parallel_sides(unique_fens)
+        else:
+            _logger.info(
+                "%s: using serial evaluation (%d unique FEN(s), progress every %s%%). %s",
+                type(self).__name__,
+                total_fens,
+                self.log_progress_percent if self.log_progress_percent is not None else "off",
+                started.format_fields(),
+            )
+            scores = self._evaluate_fens_serial_with(unique_fens, self._score_fen_sides)
 
+        ended = snapshot_host_pressure()
         _logger.info(
-            "%s: using serial evaluation (%d unique FEN(s), progress every %s%%).",
+            "%s: evaluation finished unique_fens=%d scores=%d duration_s=%.2f delta_rss_mb=%.1f %s",
             type(self).__name__,
             total_fens,
-            self.log_progress_percent if self.log_progress_percent is not None else "off",
+            len(scores),
+            time.monotonic() - t0,
+            ended.rss_mb - started.rss_mb,
+            ended.format_fields(),
         )
-        return self._evaluate_fens_serial_with(unique_fens, self._score_fen_sides)
+        return scores
 
     def transform(self, df: pl.DataFrame) -> pl.DataFrame:
         missing = [column for column in ("fen_before", "fen_after") if column not in df.columns]

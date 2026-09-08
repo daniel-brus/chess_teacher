@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from enum import StrEnum
 from typing import ClassVar
@@ -15,6 +16,7 @@ from chess_teacher.utils.general_utils import (
     generate_ident_is_literal,
     get_current_datetime,
     quote_ident,
+    quote_literal,
 )
 from chess_teacher.utils.metadata_utils import TableMetadata
 from chess_teacher.utils.object_storage.base import ObjectStorage
@@ -28,6 +30,7 @@ from chess_teacher.utils.pipeline_utils.transformations import (
     FilterColumnsTransformation,
     IncrementalFilterTransformation,
 )
+from chess_teacher.utils.process_utils import snapshot_host_pressure
 from chess_teacher.utils.table_data_class import TableDataClass
 
 
@@ -102,8 +105,17 @@ class LoadToDatabaseStep(PipelineStep):
 
         db_client.ensure_metadata(self.table_metadata)
 
-        # Load records from specified source
         df = self._load_records(db_client, context)
+        self._process_loaded_frame(db_client, context, df)
+
+    def _process_loaded_frame(
+        self,
+        db_client: DatabaseClient,
+        context: PipelineContext,
+        df: pl.DataFrame,
+    ) -> None:
+        """Transform ``df`` and save it (or no-op on empty)."""
+        table = self.table_metadata.qualified_name_sql()
         self.logger.info(f"[{self.name}] Loaded {df.height} rows, {df.width} columns.")
         context.progress_update(f"Loaded {df.height} record{'s' if df.height != 1 else ''}.")
 
@@ -117,7 +129,7 @@ class LoadToDatabaseStep(PipelineStep):
                 )
             else:
                 self.logger.info(f"[{self.name}] Nothing to load; skipping.")
-                return
+            return
 
         for transformation in self.transformations:
             transformation.bind_checkpoint(
@@ -125,7 +137,6 @@ class LoadToDatabaseStep(PipelineStep):
                 table_metadata=self.table_metadata,
             )
 
-        # Apply transformations to the loaded data
         transform_total = len(self.transformations)
         for index, transformation in enumerate(self.transformations, start=1):
             before_rows = df.height
@@ -133,10 +144,16 @@ class LoadToDatabaseStep(PipelineStep):
             context.progress_update(
                 f"Transformation {index}/{transform_total}: {transform_name}..."
             )
+            transform_started = snapshot_host_pressure()
+            transform_t0 = time.monotonic()
             df = transformation.transform(df)
+            transform_ended = snapshot_host_pressure()
             self.logger.info(
                 f"[{self.name}] Transformation {index}/{len(self.transformations)} "
-                f"({transform_name}): {before_rows} -> {df.height} rows."
+                f"({transform_name}): {before_rows} -> {df.height} rows "
+                f"duration_s={time.monotonic() - transform_t0:.2f} "
+                f"delta_rss_mb={transform_ended.rss_mb - transform_started.rss_mb:.1f} "
+                f"{transform_ended.format_fields()}"
             )
             if df.height == 0:
                 self.logger.info(
@@ -151,15 +168,15 @@ class LoadToDatabaseStep(PipelineStep):
             context.progress_success(f"No records to save to {table}.")
             return
 
-        # Save the transformed data to the target table
         context.progress_update(
             f"Saving {df.height} record{'s' if df.height != 1 else ''} to {table}..."
         )
+        save_t0 = time.monotonic()
         result = self._save_records(db_client, self.table_metadata, df)
         self.logger.info(
             f"[{self.name}] Saved to {table}: "
             f"inserted={result.rows_inserted}, updated={result.rows_updated}, "
-            f"deleted={result.rows_deleted}."
+            f"deleted={result.rows_deleted} duration_s={time.monotonic() - save_t0:.2f}."
         )
         context.progress_pop()
         context.progress_success(
@@ -213,7 +230,13 @@ class LoadToDatabaseStep(PipelineStep):
 
 
 class TransformStep(LoadToDatabaseStep):
-    """Load data from a table, transform it and save it to another table."""
+    """Load data from a table, transform it and save it to another table.
+
+    When ``batch_size`` is set, source rows are processed in keyset pages
+    (``ORDER BY`` + ``LIMIT``), saving after each page so a large backlog cannot
+    OOM the whole step. Pages advance even when a batch transforms to zero rows
+    (e.g. all PGNs filtered), so bad source rows cannot stall the loop.
+    """
 
     def __init__(
         self,
@@ -229,6 +252,7 @@ class TransformStep(LoadToDatabaseStep):
         cascade: bool | None = None,
         match_condition: str | None = None,
         source_columns: list[str] | None = None,
+        batch_size: int | None = None,
     ) -> None:
         resolved_merge = merge_strategy or MergeStrategy.upsert()
         if on is not None and resolved_merge.when_not_matched_by_source == "delete":
@@ -236,6 +260,8 @@ class TransformStep(LoadToDatabaseStep):
                 "TransformStep cannot combine an incremental filter (on=...) with "
                 "full_sync merge strategy; use on=None for full_reload mode."
             )
+        if batch_size is not None and batch_size <= 0:
+            raise ValueError(f"batch_size must be a positive int, got {batch_size!r}")
 
         self._incremental_filter = IncrementalFilterTransformation(
             target_data_class=target_data_class,
@@ -255,6 +281,7 @@ class TransformStep(LoadToDatabaseStep):
         self.source_columns = source_columns
         self.on = on
         self.source_column = source_column if source_column is not None else on
+        self.batch_size = batch_size
 
     def run(self, db_client: DatabaseClient, context: PipelineContext) -> None:
         db_client.ensure_metadata(self.source_table_metadata)
@@ -266,7 +293,67 @@ class TransformStep(LoadToDatabaseStep):
             and self.merge_strategy.when_not_matched_by_source == "delete"
         ):
             self.match_condition = scope_where
-        super().run(db_client, context)
+
+        if self.batch_size is None:
+            super().run(db_client, context)
+            return
+
+        table = self.table_metadata.qualified_name_sql()
+        self.logger.info(
+            f"[{self.name}] Loading into {table} (strategy={self.loading_strategy.value}, "
+            f"batch_size={self.batch_size})."
+        )
+        if self.loading_strategy == LoadingStrategy.MERGE:
+            merge_label = self.merge_strategy
+            self.logger.info(
+                f"[{self.name}] Merge strategy: "
+                f"matched={merge_label.when_matched}, "
+                f"not_matched_by_target={merge_label.when_not_matched_by_target}, "
+                f"not_matched_by_source={merge_label.when_not_matched_by_source}."
+            )
+        db_client.ensure_metadata(self.table_metadata)
+
+        after_key: str | None = None
+        batch_idx = 0
+        any_loaded = False
+        while True:
+            batch_idx += 1
+            df = self._load_records(db_client, context, after_key=after_key)
+            if df.height == 0:
+                if not any_loaded:
+                    self._process_loaded_frame(db_client, context, df)
+                else:
+                    self.logger.info(
+                        f"[{self.name}] Batched load finished after {batch_idx - 1} batch(es)."
+                    )
+                return
+
+            any_loaded = True
+            order_column = self._batch_order_column()
+            if order_column not in df.columns:
+                raise PipelineError(
+                    f"[{self.name}] Batch order column {order_column!r} missing from "
+                    f"loaded frame columns={df.columns}."
+                )
+            # Advance keyset from the source page before transforms drop rows.
+            after_key = str(df.sort(order_column)[order_column][-1])
+            self.logger.info(
+                f"[{self.name}] Batch {batch_idx}: {df.height} source row(s) "
+                f"(through {order_column}={after_key!r})."
+            )
+            self._process_loaded_frame(db_client, context, df)
+
+    def _batch_order_column(self) -> str:
+        """Stable keyset column for batched reads."""
+        if self.source_column is not None:
+            return self.source_column
+        primary_key = self.source_table_metadata.primary_key
+        if primary_key:
+            return primary_key[0]
+        raise PipelineError(
+            f"[{self.name}] batch_size requires source_column or a source primary key "
+            "for keyset pagination."
+        )
 
     @staticmethod
     def _optional_scope_where_clause(
@@ -309,7 +396,13 @@ class TransformStep(LoadToDatabaseStep):
 
         return None
 
-    def _load_records(self, db_client: DatabaseClient, context: PipelineContext) -> pl.DataFrame:
+    def _load_records(
+        self,
+        db_client: DatabaseClient,
+        context: PipelineContext,
+        *,
+        after_key: str | None = None,
+    ) -> pl.DataFrame:
         """Load records from the source table into a Polars DataFrame."""
         source = self.source_table_metadata.qualified_name_sql()
         if not db_client.table_exists(self.source_table_metadata):
@@ -320,10 +413,23 @@ class TransformStep(LoadToDatabaseStep):
         context.progress_update(f"Reading records from {source}...")
         where = self._context_where_clause(self.source_table_metadata, context)
         where = self._with_incremental_anti_join(where)
+
+        order_by: str | None = None
+        limit: int | None = None
+        if self.batch_size is not None:
+            order_column = self._batch_order_column()
+            order_by = quote_ident(order_column)
+            limit = self.batch_size
+            if after_key is not None:
+                key_clause = f"{quote_ident(order_column)} > {quote_literal(after_key)}"
+                where = f"({where}) AND {key_clause}" if where else key_clause
+
         return db_client.read(
             self.source_table_metadata,
             columns=self.source_columns,
             where=where,
+            order_by=order_by,
+            limit=limit,
             as_polars=True,
         )
 

@@ -4,6 +4,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import date, datetime, time
 from enum import StrEnum
+from time import monotonic
 from typing import Any, Literal, overload
 from uuid import uuid4
 
@@ -594,6 +595,7 @@ class DatabaseClient:
 
         use_staging = use_copy or len(records) > MERGE_COPY_THRESHOLD
         source_mode = "copy" if use_staging else "inline"
+        merge_t0 = monotonic()
 
         try:
             if use_staging:
@@ -634,14 +636,17 @@ class DatabaseClient:
         rows_inserted = non_matched_count if strategy.when_not_matched_by_target == "insert" else 0
         rows_updated = matched_count if strategy.when_matched == "update" else 0
 
-        self.logger.debug(
-            "merge → %s: inserted=%d, updated=%d, deleted=%d (source=%d records, mode=%s)",
+        log_fn = self.logger.info if use_staging else self.logger.debug
+        log_fn(
+            "merge → %s: inserted=%d, updated=%d, deleted=%d "
+            "(source=%d records, mode=%s, duration_s=%.2f)",
             table.qualified_name_sql(),
             rows_inserted,
             rows_updated,
             deleted_count,
             len(records),
             source_mode,
+            monotonic() - merge_t0,
         )
         return WriteResult(
             strategy=WriteStrategy.MERGE,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from datetime import datetime
@@ -20,6 +21,7 @@ from chess_teacher.utils.chess_utils import Color
 from chess_teacher.utils.db.client import DatabaseClient, get_db_client
 from chess_teacher.utils.general_utils import generate_ident_is_literal, quote_literal
 from chess_teacher.utils.logging import get_logger
+from chess_teacher.utils.process_utils import snapshot_host_pressure
 
 logger = get_logger()
 
@@ -921,6 +923,7 @@ class TrainingBatch:
         )
 
         n = len(self.datums)
+        pack_t0 = time.monotonic()
         logger.info(
             "Packing candidate-style targets for %s datums (feat_dim=%s, max_candidates=%s)…",
             n,
@@ -950,12 +953,23 @@ class TrainingBatch:
                     len(kept),
                 )
         if not feats_list:
+            logger.info(
+                "Packed candidate-style targets kept=0 dropped=%s duration_s=%.2f",
+                n,
+                time.monotonic() - pack_t0,
+            )
             return (
                 np.zeros((0, MAX_CANDIDATES, MOVE_FEAT_DIM), dtype=np.float32),
                 np.zeros((0, MAX_CANDIDATES), dtype=np.float32),
                 np.zeros((0,), dtype=np.int32),
                 [],
             )
+        logger.info(
+            "Packed candidate-style targets kept=%s dropped=%s duration_s=%.2f",
+            len(kept),
+            n - len(kept),
+            time.monotonic() - pack_t0,
+        )
         return (
             np.stack(feats_list, axis=0),
             np.stack(mask_list, axis=0),
@@ -1015,6 +1029,7 @@ class TrainingDataStore:
     def _datums_from_moves(self, moves: list[Move]) -> list[TrainingDatum]:
         if not moves:
             return []
+        hydrate_t0 = time.monotonic()
         self._ensure_training_tables()
         game_ids = sorted({m.game_id for m in moves})
         move_ids = [m.move_id for m in moves]
@@ -1055,6 +1070,13 @@ class TrainingDataStore:
                 )
             except ValueError:
                 continue
+        logger.info(
+            "Hydrated TrainingDatum rows=%s from moves=%s duration_s=%.2f %s",
+            len(datums),
+            len(moves),
+            time.monotonic() - hydrate_t0,
+            snapshot_host_pressure().format_fields(),
+        )
         return datums
 
     def _datums_for_move_ids(self, move_ids: list[str]) -> list[TrainingDatum]:
@@ -1129,8 +1151,17 @@ class TrainingDataStore:
             sql += " AND g.end_time > :cutoff"
             params["cutoff"] = cutoff
         sql = _with_extra_where(sql, extra_where)
+        count_t0 = time.monotonic()
         rows = self._query_moves_sql(sql, params)
-        return int(rows[0]["n"]) if rows else 0
+        n = int(rows[0]["n"]) if rows else 0
+        logger.info(
+            "count_since cutoff=%s extra_where=%s n=%s duration_s=%.2f",
+            cutoff,
+            extra_where or "-",
+            n,
+            time.monotonic() - count_t0,
+        )
+        return n
 
     def fetch_since(
         self,
@@ -1168,8 +1199,13 @@ class TrainingDataStore:
             cutoff,
             limit,
         )
+        fetch_t0 = time.monotonic()
         rows = self._query_moves_sql(sql, params)
         if not rows:
+            logger.info(
+                "Querying training move ids found 0 rows duration_s=%.2f",
+                time.monotonic() - fetch_t0,
+            )
             return [], None
 
         # LIMIT may cut inside a shared end_time group - finish that group.
@@ -1188,6 +1224,11 @@ class TrainingDataStore:
         move_ids = [str(r["move_id"]) for r in rows]
         end_times = [r["end_time"] for r in rows if r["end_time"] is not None]
         max_end_time = max(end_times) if end_times else None
+        logger.info(
+            "Fetched training move ids=%s duration_s=%.2f; hydrating…",
+            len(move_ids),
+            time.monotonic() - fetch_t0,
+        )
         return self._datums_for_move_ids(move_ids), max_end_time
 
     def fetch_random(
