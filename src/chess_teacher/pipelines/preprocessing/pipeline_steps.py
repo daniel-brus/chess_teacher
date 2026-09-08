@@ -49,6 +49,9 @@ from chess_teacher.utils.pipeline_utils.transformations import (
     RenameColumnsTransformation,
 )
 
+# Cap peak RAM for fat raw_response / PGN frames on small VPS nodes.
+_PREPROCESS_GAME_BATCH_SIZE = 500
+
 
 class RawGamesToGamesStep(TransformStep):
     """Transform raw_games rows into enriched games rows for the current account."""
@@ -83,6 +86,7 @@ class RawGamesToGamesStep(TransformStep):
             ],
             loading_strategy=LoadingStrategy.MERGE,
             merge_strategy=merge_strategy,
+            batch_size=_PREPROCESS_GAME_BATCH_SIZE,
         )
 
 
@@ -103,6 +107,7 @@ class ExtractUserMovesStep(TransformStep):
             ],
             loading_strategy=LoadingStrategy.MERGE,
             merge_strategy=merge_strategy,
+            batch_size=_PREPROCESS_GAME_BATCH_SIZE,
         )
 
 
