@@ -269,7 +269,14 @@ class AggregateLogLevelHourlyStep(TransformStep):
             merge_strategy=MergeStrategy.upsert(),
         )
 
-    def _load_records(self, db_client: DatabaseClient, context: PipelineContext) -> pl.DataFrame:
+    def _load_records(
+        self,
+        db_client: DatabaseClient,
+        context: PipelineContext,
+        *,
+        after_key: str | None = None,
+    ) -> pl.DataFrame:
+        del after_key
         source = self.source_table_metadata.qualified_name_sql()
         if not db_client.table_exists(self.source_table_metadata):
             self.logger.warning(
@@ -301,7 +308,14 @@ class AggregateExceptionHourlyStep(TransformStep):
             merge_strategy=MergeStrategy.upsert(),
         )
 
-    def _load_records(self, db_client: DatabaseClient, context: PipelineContext) -> pl.DataFrame:
+    def _load_records(
+        self,
+        db_client: DatabaseClient,
+        context: PipelineContext,
+        *,
+        after_key: str | None = None,
+    ) -> pl.DataFrame:
+        del after_key
         source = self.source_table_metadata.qualified_name_sql()
         if not db_client.table_exists(self.source_table_metadata):
             self.logger.warning(

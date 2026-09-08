@@ -49,6 +49,9 @@ from chess_teacher.utils.pipeline_utils.transformations import (
     RenameColumnsTransformation,
 )
 
+# Cap peak RAM for fat raw_response / PGN frames on small VPS nodes.
+_PREPROCESS_GAME_BATCH_SIZE = 500
+
 
 class RawGamesToGamesStep(TransformStep):
     """Transform raw_games rows into enriched games rows for the current account."""
@@ -83,6 +86,7 @@ class RawGamesToGamesStep(TransformStep):
             ],
             loading_strategy=LoadingStrategy.MERGE,
             merge_strategy=merge_strategy,
+            batch_size=_PREPROCESS_GAME_BATCH_SIZE,
         )
 
 
@@ -103,6 +107,7 @@ class ExtractUserMovesStep(TransformStep):
             ],
             loading_strategy=LoadingStrategy.MERGE,
             merge_strategy=merge_strategy,
+            batch_size=_PREPROCESS_GAME_BATCH_SIZE,
         )
 
 
@@ -187,8 +192,15 @@ class EnrichExpensiveMoveCharacteristicsStep(TransformStep):
             merge_strategy=MergeStrategy.upsert(),
         )
 
-    def _load_records(self, db_client: DatabaseClient, context: PipelineContext) -> pl.DataFrame:
+    def _load_records(
+        self,
+        db_client: DatabaseClient,
+        context: PipelineContext,
+        *,
+        after_key: str | None = None,
+    ) -> pl.DataFrame:
         """Load moves joined to incomplete (or all) move_characteristics rows."""
+        del after_key
         moves_meta = Move.get_metadata()
         mc_meta = MoveCharacteristics.get_metadata()
         moves_sql = moves_meta.qualified_name_sql()
