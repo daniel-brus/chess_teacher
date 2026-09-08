@@ -192,8 +192,15 @@ class EnrichExpensiveMoveCharacteristicsStep(TransformStep):
             merge_strategy=MergeStrategy.upsert(),
         )
 
-    def _load_records(self, db_client: DatabaseClient, context: PipelineContext) -> pl.DataFrame:
+    def _load_records(
+        self,
+        db_client: DatabaseClient,
+        context: PipelineContext,
+        *,
+        after_key: str | None = None,
+    ) -> pl.DataFrame:
         """Load moves joined to incomplete (or all) move_characteristics rows."""
+        del after_key
         moves_meta = Move.get_metadata()
         mc_meta = MoveCharacteristics.get_metadata()
         moves_sql = moves_meta.qualified_name_sql()

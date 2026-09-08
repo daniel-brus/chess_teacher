@@ -30,7 +30,11 @@ def _raw_row(game_id: str) -> dict[str, object]:
     }
 
 
-def test_raw_games_to_games_step_enables_batch_size() -> None:
+def test_raw_games_to_games_step_enables_batch_size(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "chess_teacher.utils.pipeline_utils.transformations.get_db_client",
+        lambda: MagicMock(),
+    )
     step = RawGamesToGamesStep()
     assert step.batch_size == 500
 
