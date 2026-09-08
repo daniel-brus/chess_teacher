@@ -7,15 +7,20 @@ from zoneinfo import available_timezones
 import streamlit as st
 from streamlit.runtime.uploaded_file_manager import UploadedFile
 
-from chess_teacher.platform.account import Account
+from chess_teacher.platform.account import (
+    PLATFORM_USERNAME_MAX_LEN,
+    Account,
+)
 from chess_teacher.platform.profile_picture import (
     clear_upload_image_cache,
     profile_pictures,
 )
 from chess_teacher.platform.user import (
+    MAX_DISPLAY_NAME_LENGTH,
     cron_time_option_index,
     dispatch_cron_time_options,
     format_cron_time_label,
+    normalize_display_name,
 )
 from chess_teacher.utils.db.client import get_db_client
 from chess_teacher.utils.general_utils import assert_valid_timezone
@@ -202,11 +207,12 @@ def _profile_picture_dialog(upload: UploadedFile | None = None) -> None:
                 try:
                     _apply_profile_picture_choice(choice, upload=upload)
                 except ValueError as e:
-                    logger.log_and_raise(e, "Failed to save profile picture")
-                _clear_profile_picture_dialog()
-                if choice.get("kind") == "upload":
-                    _clear_profile_picture_uploader()
-                st.rerun()
+                    st.error(str(e))
+                else:
+                    _clear_profile_picture_dialog()
+                    if choice.get("kind") == "upload":
+                        _clear_profile_picture_uploader()
+                    st.rerun()
     with cancel_col:
         _cancel_pad_left, cancel_btn_col, _cancel_pad_right = st.columns([1, 1.4, 1])
         with cancel_btn_col:
@@ -257,15 +263,23 @@ def _show_logo_profile_preset(variant: Literal["black", "white"]) -> None:
 
 def _show_profile_tab() -> None:
     with st.form("profile_name_form"):
-        display_name = st.text_input("Display name", value=user.name or "")
+        display_name = st.text_input(
+            "Display name",
+            value=user.name or "",
+            max_chars=MAX_DISPLAY_NAME_LENGTH,
+        )
         if st.form_submit_button("Save display name"):
-            name_value = display_name.strip() or None
-            if name_value != user.name:
-                updated_user = user.update_name(db_client, name_value)
-                set_current_user(updated_user)
-                log_user_action("Display name updated", updated_user, name=name_value)
-            st.success("Display name saved.")
-            st.rerun()
+            try:
+                name_value = normalize_display_name(display_name)
+            except ValueError as e:
+                st.error(str(e))
+            else:
+                if name_value != user.name:
+                    updated_user = user.update_name(db_client, name_value)
+                    set_current_user(updated_user)
+                    log_user_action("Display name updated", updated_user, name=name_value)
+                st.success("Display name saved.")
+                st.rerun()
 
     st.divider()
     st.caption("Your current avatar is shown in the sidebar.")
@@ -318,7 +332,7 @@ st.title("Personal Settings")
 def _show_add_account_form() -> None:
     with st.form("add_platform_account"):
         platform = pick_platform(key_prefix="settings_add_platform")
-        username = st.text_input("Username")
+        username = st.text_input("Username", max_chars=PLATFORM_USERNAME_MAX_LEN)
         submitted = st.form_submit_button("Add account")
 
     if not submitted:
@@ -329,7 +343,11 @@ def _show_add_account_form() -> None:
         st.warning("Enter a username.")
         return
 
-    account = Account.from_username_and_platform(username=username, platform=platform)
+    try:
+        account = Account.from_username_and_platform(username=username, platform=platform)
+    except ValueError as e:
+        st.error(str(e))
+        return
     added = user.link_account(db_client, account)
     if added:
         log_user_action(

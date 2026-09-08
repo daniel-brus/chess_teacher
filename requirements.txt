@@ -5,6 +5,7 @@ requests
 sqlite-utils
 apscheduler
 streamlit[auth]
+pillow
 pyyaml
 python-dotenv
 sqlalchemy

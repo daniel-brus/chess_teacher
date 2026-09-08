@@ -44,9 +44,9 @@ def test_home_page_renders_welcome(
     patch_streamlit_page_deps: User,
 ) -> None:
     at = _run_page("home.py")
-    assert any("Welcome to the Chess Teacher app" in title for title in _title_values(at))
+    assert any("Welcome to Chess Teacher" in title for title in _title_values(at))
     assert any("Smoke Tester" in title for title in _title_values(at))
-    assert any(md.strip() == "todo" for md in _markdown_values(at))
+    assert any("linking a chess.com or lichess account" in info.lower() for info in _info_values(at))
 
 
 def test_pipeline_page_renders_empty_accounts_state(
@@ -100,3 +100,19 @@ def test_admin_page_renders_empty_aggregates_state(
     at = _run_page("admin.py")
     assert "Logging dashboard" in _title_values(at)
     assert any("no log aggregates yet" in info.lower() for info in _info_values(at))
+
+
+def test_privacy_page_renders() -> None:
+    at = _run_page("privacy.py")
+    assert "Privacy policy" in _title_values(at)
+    markdown = "\n".join(_markdown_values(at))
+    assert "strictly necessary" in markdown.lower()
+    assert "google" in markdown.lower()
+
+
+def test_terms_page_renders() -> None:
+    at = _run_page("terms.py")
+    assert "Terms of use" in _title_values(at)
+    markdown = "\n".join(_markdown_values(at))
+    assert "as is" in markdown.lower()
+    assert "google" in markdown.lower()
