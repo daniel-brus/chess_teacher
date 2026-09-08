@@ -54,6 +54,7 @@ k8s_check:
 
 k8s_ensure: k8s_check
 	powershell -ExecutionPolicy Bypass -File orchestration/k8s/ensure-cluster.ps1
+	powershell -ExecutionPolicy Bypass -File scripts/dev/repair-k3d-host-dns.ps1
 
 # Local prod-like staging: healthy Compose infra + k3d cluster + Streamlit/CronJobs (:develop).
 dev_k3d_up: dev_bootstrap k8s_ensure
