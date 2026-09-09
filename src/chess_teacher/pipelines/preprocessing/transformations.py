@@ -120,9 +120,47 @@ class ExpandRawResponseTransformation(DataFrameTransformation):
             rows.append(merged)
 
         try:
-            return pl.DataFrame(rows)
+            # Scan every row: default infer_schema_length=100 misses late type
+            # changes (e.g. Lichess initialFen absent/int-like then FEN string).
+            return pl.from_dicts(rows, infer_schema_length=None)
         except Exception as e:
-            logger.log_and_raise(TransformationError(f"Failed to expand raw_response: {e}"))
+            try:
+                return pl.from_dicts(
+                    _stringify_mixed_type_fields(rows),
+                    infer_schema_length=None,
+                )
+            except Exception:
+                logger.log_and_raise(TransformationError(f"Failed to expand raw_response: {e}"))
+            raise  # pragma: no cover — log_and_raise always raises
+
+
+def _stringify_mixed_type_fields(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Coerce columns with heterogeneous Python types to strings so Polars can build."""
+    keys: set[str] = set()
+    for row in rows:
+        keys.update(row)
+    type_sets: dict[str, set[type]] = {key: set() for key in keys}
+    for row in rows:
+        for key in keys:
+            value = row.get(key)
+            if value is not None:
+                type_sets[key].add(type(value))
+    mixed = {key for key, types in type_sets.items() if len(types) > 1}
+    if not mixed:
+        return rows
+    normalized: list[dict[str, Any]] = []
+    for row in rows:
+        out = dict(row)
+        for key in mixed:
+            value = out.get(key)
+            if value is None:
+                continue
+            if isinstance(value, (dict, list)):
+                out[key] = json.dumps(value, ensure_ascii=False)
+            else:
+                out[key] = str(value)
+        normalized.append(out)
+    return normalized
 
 
 class FilterGamesWithPGNTransformation(DataFrameTransformation):
