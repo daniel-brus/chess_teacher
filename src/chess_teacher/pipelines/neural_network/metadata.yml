@@ -56,7 +56,7 @@ tables:
   training_state:
     schema: ml
     table: training_state
-    comment: Per-chain bookkeeping (min-data check time)
+    comment: Per-chain bookkeeping for incremental training cutoffs
     primary_key:
       - scope
     columns:
@@ -64,6 +64,10 @@ tables:
         data_type: text
         nullable: false
         comment: baseline or user:{user_id}
+      - name: last_trained_data_cutoff
+        data_type: timestamptz
+        nullable: true
+        comment: Last games.end_time consumed by training
       - name: last_min_data_check_at
         data_type: timestamptz
         nullable: true
@@ -79,8 +83,6 @@ tables:
     indexes:
       - name: idx_game_split_assignments_bucket
         columns: [split_version, bucket]
-      - name: idx_game_split_assignments_baseline_queue
-        columns: [split_version, bucket, already_processed_baseline]
     columns:
       - name: split_version
         data_type: text
@@ -98,11 +100,3 @@ tables:
         data_type: timestamptz
         nullable: false
         comment: When this assignment was first written
-      - name: already_processed_baseline
-        data_type: timestamptz
-        nullable: true
-        comment: NULL = unprocessed for the platform baseline train queue; set to now() after a successful baseline fit
-      - name: already_processed_personal
-        data_type: timestamptz
-        nullable: true
-        comment: NULL = unprocessed for this user's current personal train chain; set to now() after a successful personal fit
