@@ -1,4 +1,4 @@
-"""Smoke tests for hybrid board+state encoder build + predict path."""
+"""Smoke tests for hybrid board encoder build + predict path."""
 
 from __future__ import annotations
 
@@ -15,9 +15,8 @@ from chess_teacher.pipelines.neural_network.tf_runtime import ensure_tensorflow_
 
 def test_hybrid_build_shapes_and_compat() -> None:
     ensure_tensorflow_logging()
-    trainer = HybridBoardTrainer(epochs=1, batch_size=4, hidden=32, score_hidden=16, conv_filters=16)
-    state_dim = 20
-    model = trainer.build(state_dim=state_dim)
+    trainer = HybridBoardTrainer(epochs=1, batch_size=4, hidden=32, score_hidden=16, conv_filters=8)
+    model = trainer.build()
     assert model_is_hybrid_board_compatible(
         model,
         max_candidates=MAX_CANDIDATES,
@@ -26,11 +25,6 @@ def test_hybrid_build_shapes_and_compat() -> None:
     )
     n = 3
     board = np.zeros((n, 8, 8, BOARD_TENSOR_CHANNELS), dtype=np.float32)
-    state = np.zeros((n, state_dim), dtype=np.float32)
     feats = np.zeros((n, MAX_CANDIDATES, MOVE_FEAT_DIM), dtype=np.float32)
-    out = model.predict({"board": board, "state": state, "move_feats": feats}, verbose=0)
+    out = model.predict({"board": board, "move_feats": feats}, verbose=0)
     assert out.shape == (n, MAX_CANDIDATES)
-
-
-def test_default_conv_filters_bumped() -> None:
-    assert HybridBoardTrainer.DEFAULT_CONV_FILTERS == 64

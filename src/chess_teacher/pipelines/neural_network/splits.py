@@ -9,7 +9,7 @@ See ``.agents/docs/ml-training-roadmap.md`` Phase 1.
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING
@@ -72,49 +72,15 @@ def format_split_summary(split: GameSplitResult, *, heading: str | None = None) 
     lines = [f"=== {title} ===", f"split_version={split.salt!r}"]
     for counts in split.counts:
         disagree = (
-            f"{counts.sf_disagree_frac:.3f}" if counts.sf_disagree_frac is not None else "n/a"
+            f"{counts.sf_disagree_frac:.3f}"
+            if counts.sf_disagree_frac is not None
+            else "n/a"
         )
         lines.append(
             f"  {counts.bucket.value:5s} games={counts.n_games:5d} "
             f"moves={counts.n_moves:6d} sf_disagree_frac={disagree}"
         )
     return "\n".join(lines)
-
-
-def game_split_result(
-    train: Sequence[TrainingDatum],
-    val: Sequence[TrainingDatum],
-    test: Sequence[TrainingDatum] = (),
-    *,
-    salt: str = DEFAULT_SPLIT_SALT,
-) -> GameSplitResult:
-    """Build a ``GameSplitResult`` from already-bucketed datums."""
-    train_ids = list(dict.fromkeys(d.game_id for d in train if d.game_id))
-    val_ids = list(dict.fromkeys(d.game_id for d in val if d.game_id))
-    test_ids = list(dict.fromkeys(d.game_id for d in test if d.game_id))
-    return GameSplitResult(
-        train=tuple(train),
-        val=tuple(val),
-        test=tuple(test),
-        salt=salt,
-        counts=(
-            SplitCounts(
-                bucket=SplitBucket.TRAIN,
-                n_games=len(train_ids),
-                n_moves=len(train),
-            ),
-            SplitCounts(
-                bucket=SplitBucket.VAL,
-                n_games=len(val_ids),
-                n_moves=len(val),
-            ),
-            SplitCounts(
-                bucket=SplitBucket.TEST,
-                n_games=len(test_ids),
-                n_moves=len(test),
-            ),
-        ),
-    )
 
 
 def game_split_bucket(game_id: str, *, salt: str = DEFAULT_SPLIT_SALT) -> SplitBucket:
@@ -151,10 +117,8 @@ def split_datums_by_game(
 ) -> GameSplitResult:
     """Partition datums by ``game_id``; every move from a game stays in one bucket."""
     if bucket_for_game is None:
-
         def bucket_for_game(gid: str) -> SplitBucket:
             return game_split_bucket(gid, salt=salt)
-
     return _partition_datums(
         datums,
         bucket_for_game=bucket_for_game,

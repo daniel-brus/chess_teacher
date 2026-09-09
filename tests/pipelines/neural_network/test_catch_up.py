@@ -75,7 +75,7 @@ def test_loop_already_caught_up_returns_zero(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setattr(
         catch_up,
         "_eligible_count",
-        lambda: MIN_NEW_MOVES_BASELINE - 1,
+        lambda: (MIN_NEW_MOVES_BASELINE - 1, None),
     )
     train = MagicMock()
     promote = MagicMock()
@@ -88,8 +88,14 @@ def test_loop_already_caught_up_returns_zero(monkeypatch: pytest.MonkeyPatch) ->
 
 
 def test_loop_trains_and_promotes_until_floor(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Round1: 2500 -> train -> 1500; Round2: 1500 -> train -> 500; then 500 -> done.
-    seq = iter([2500, 1500, 1500, 500, 500])
+    # Round1: 2500 → train → 1500; Round2: 1500 → train → 500; then 500 → done.
+    seq = iter([
+        (2500, None),
+        (1500, "c1"),
+        (1500, "c1"),
+        (500, "c2"),
+        (500, "c2"),
+    ])
     monkeypatch.setattr(catch_up, "_eligible_count", lambda: next(seq))
     train = MagicMock(return_value=_ok_result())
     promote = MagicMock(return_value=_ok_result(name="baseline_promotion"))
@@ -102,7 +108,11 @@ def test_loop_trains_and_promotes_until_floor(monkeypatch: pytest.MonkeyPatch) -
 
 
 def test_loop_no_promote_skips_promotion(monkeypatch: pytest.MonkeyPatch) -> None:
-    seq = iter([2000, 500, 500])
+    seq = iter([
+        (2000, None),
+        (500, "c1"),
+        (500, "c1"),
+    ])
     monkeypatch.setattr(catch_up, "_eligible_count", lambda: next(seq))
     train = MagicMock(return_value=_ok_result())
     promote = MagicMock()
@@ -115,7 +125,7 @@ def test_loop_no_promote_skips_promotion(monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 def test_loop_train_failure_returns_one(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(catch_up, "_eligible_count", lambda: 5000)
+    monkeypatch.setattr(catch_up, "_eligible_count", lambda: (5000, None))
     monkeypatch.setattr(
         catch_up,
         "run_baseline_training_pipeline",
@@ -131,7 +141,7 @@ def test_loop_train_failure_returns_one(monkeypatch: pytest.MonkeyPatch) -> None
 def test_loop_stall_when_count_unchanged_returns_two(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(catch_up, "_eligible_count", lambda: 5000)
+    monkeypatch.setattr(catch_up, "_eligible_count", lambda: (5000, "same"))
     monkeypatch.setattr(
         catch_up,
         "run_baseline_training_pipeline",
@@ -147,8 +157,8 @@ def test_loop_stall_when_count_unchanged_returns_two(
 def test_loop_max_rounds_returns_three(monkeypatch: pytest.MonkeyPatch) -> None:
     n = {"v": 10_000}
 
-    def eligible() -> int:
-        return n["v"]
+    def eligible() -> tuple[int, object]:
+        return n["v"], f"c{n['v']}"
 
     def train() -> PipelineRunResult:
         n["v"] -= 1
@@ -164,7 +174,7 @@ def test_loop_max_rounds_returns_three(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_loop_promote_failure_returns_one(monkeypatch: pytest.MonkeyPatch) -> None:
-    seq = iter([3000, 1000])
+    seq = iter([(3000, None), (1000, "c1")])
     monkeypatch.setattr(catch_up, "_eligible_count", lambda: next(seq))
     monkeypatch.setattr(
         catch_up,
@@ -184,6 +194,6 @@ def test_max_rounds_clamped_to_at_least_one(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setattr(
         catch_up,
         "_eligible_count",
-        lambda: MIN_NEW_MOVES_BASELINE - 1,
+        lambda: (MIN_NEW_MOVES_BASELINE - 1, None),
     )
     assert catch_up.loop_until_caught_up(promote=False, max_rounds=0) == 0

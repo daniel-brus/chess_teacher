@@ -1,10 +1,10 @@
 """Offline baseline train + game-level val/test eval (Phase 1 / 1b).
 
-Loads a lowest-``game_id`` prefix of each registry bucket (complete games),
-trains on train only, reports stratified val metrics.
+Loads a fixed sample from Postgres, assigns splits via **persistent registry**
+(``ml.game_split_assignments``), trains on train only, reports stratified val metrics.
 Does **not** touch production baseline pipelines.
 
-Run backfill once per environment::
+Run backfill once per environment (or rely on assign-on-read during this script)::
 
     doppler run --project chess-teacher --config dev_local -- ^
       .venv\\Scripts\\python.exe scripts/tools/backfill_game_splits.py
@@ -33,7 +33,7 @@ from chess_teacher.pipelines.neural_network.eval_metrics import (
     evaluate_datums,
     format_eval_metrics,
 )
-from chess_teacher.pipelines.neural_network.offline_eval import load_registry_prefix_split
+from chess_teacher.pipelines.neural_network.offline_eval import load_registry_split
 from chess_teacher.pipelines.neural_network.splits import DEFAULT_SPLIT_SALT, format_split_summary
 from chess_teacher.pipelines.neural_network.train import BaselineTrainer
 from chess_teacher.utils.db.client import get_db_client
@@ -53,13 +53,8 @@ def run_offline_train_eval(
     style_disagree_scale: float,
 ) -> int:
     db = get_db_client()
-    logger.info("Loading registry game_id prefixes limit=%s/bucket salt=%s…", limit, salt)
-    split = load_registry_prefix_split(
-        db,
-        limit=limit,
-        split_version=salt,
-        include_test=eval_test,
-    )
+    logger.info("Loading datums limit=%s (cutoff=None for offline sample)…", limit)
+    split = load_registry_split(db, limit=limit, split_version=salt)
     n_datums = sum(c.n_moves for c in split.counts)
     if n_datums < 50:
         logger.error("Need more datums; got %s", n_datums)
@@ -90,9 +85,7 @@ def run_offline_train_eval(
     t0 = time.perf_counter()
     model, train_metrics = trainer.fit(train)
     fit_s = time.perf_counter() - t0
-    logger.info(
-        "Train fit done in %.1fs train_top1=%.4f", fit_s, train_metrics.get("masked_cand_top1", 0)
-    )
+    logger.info("Train fit done in %.1fs train_top1=%.4f", fit_s, train_metrics.get("masked_cand_top1", 0))
 
     print("\n=== eval metrics (stratified) ===")
     val_metrics = evaluate_datums(model, val)

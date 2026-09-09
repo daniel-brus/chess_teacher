@@ -1,14 +1,21 @@
 """Keras baseline trainer — candidate-aware style scorer (SF eval features per move).
 
-Replaces the fixed-vocab policy head. Parent weights load only when compatible with
-``head=candidate_style`` (state tower + per-candidate scorer). See
-``candidate_eval.py`` for delta convention.
+POC / TO-BE-SUNSET
+------------------
+``BaselineTrainer`` (flat ``state`` MLP + move feats) is the Phase 2c A/B
+*control* and today's production-wired trainer. Prefer sunsetting it once a
+greenfield successor (e.g. ``HybridBoardTrainer``) wins registry-val — do not
+treat this class as a long-lived API. Entire ``neural_network`` package is POC.
+
+Parent weights load only when compatible with ``head=candidate_style``
+(state tower + per-candidate scorer). See ``candidate_eval.py`` for delta
+convention.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
-from datetime import datetime
+import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -24,18 +31,15 @@ from chess_teacher.pipelines.neural_network.create_training_set import (
     TrainingDatum,
 )
 from chess_teacher.pipelines.neural_network.ply_weights import (
-    DEFAULT_RECENCY_BOOST,
-    baseline_disagree_strength,
     candidate_style_sample_weights,
     style_disagree_boost_from_env,
     style_disagree_scale_from_env,
-    user_finetune_sample_weights,
     user_not_sf_best_mask,
     user_sf_disagree_strength,
 )
 from chess_teacher.pipelines.neural_network.tf_runtime import ensure_tensorflow_logging
-from chess_teacher.utils.general_utils import get_current_datetime
 from chess_teacher.utils.logging import get_logger
+from chess_teacher.utils.process_utils import snapshot_host_pressure
 
 logger = get_logger()
 
@@ -222,11 +226,10 @@ class BaselineTrainer:
     """Shared state tower + per-candidate MLP scorer; listwise masked CE.
 
     Inputs: ``state`` (D,), ``move_feats`` (MAX, F). Output: logits (MAX,).
-    Sample weights: ply * SF-style, optional recency and baseline-disagree
-    (see ``ply_weights``). ``baseline_disagree_boost`` defaults to 1.0 so
-    platform baseline catch-up is unchanged. When boost is on, predict the
-    mask from ``baseline_weights_path`` (frozen production baseline) and
-    resume ``fit`` from ``weights_path`` (last personal checkpoint).
+    Sample weights: ply * continuous SF-disagree style boost (see ``ply_weights``).
+
+    POC / TO-BE-SUNSET: flat-state control. Greenfield path is
+    ``board_encoder.HybridBoardTrainer`` (or whatever beats it on val).
     """
 
     # Justified 2a pick: 10k registry-val sweep still climbing at 20; peak
@@ -248,8 +251,6 @@ class BaselineTrainer:
         move_feat_dim: int = MOVE_FEAT_DIM,
         style_disagree_boost: float | None = None,
         style_disagree_scale: float | None = None,
-        baseline_disagree_boost: float = 1.0,
-        recency_boost: float = DEFAULT_RECENCY_BOOST,
     ) -> None:
         self.epochs = epochs
         self.batch_size = batch_size
@@ -267,8 +268,6 @@ class BaselineTrainer:
             if style_disagree_scale is None
             else float(style_disagree_scale)
         )
-        self.baseline_disagree_boost = float(baseline_disagree_boost)
-        self.recency_boost = float(recency_boost)
 
     def build(self, input_dim: int) -> Any:
         keras = _import_keras()
@@ -314,47 +313,7 @@ class BaselineTrainer:
         *,
         input_dim: int,
         weights_path: Path | None = None,
-        require_compatible_parent: bool = False,
     ) -> Any:
-        if require_compatible_parent:
-            if weights_path is None or not weights_path.is_file():
-                raise FileNotFoundError(
-                    "require_compatible_parent=True needs an existing Keras weights file"
-                )
-            logger.info("Loading required parent weights from %s", weights_path)
-            try:
-                model = load_candidate_style_keras(
-                    weights_path,
-                    max_candidates=self.max_candidates,
-                    compile_model=False,
-                )
-            except Exception as exc:
-                raise RuntimeError(
-                    f"Failed to load parent Keras weights from {weights_path}"
-                ) from exc
-            if not model_is_candidate_style_compatible(
-                model,
-                max_candidates=self.max_candidates,
-                move_feat_dim=self.move_feat_dim,
-            ):
-                raise RuntimeError(
-                    "Parent weights not candidate_style-compatible "
-                    f"(output_shape={getattr(model, 'output_shape', None)}, "
-                    f"want MAX={self.max_candidates} feat_dim={self.move_feat_dim} "
-                    f"/ version={CANDIDATE_MOVE_FEAT_VERSION})"
-                )
-            from tensorflow import keras  # type: ignore[import-untyped]
-
-            ensure_tensorflow_logging()
-            model.compile(
-                optimizer=keras.optimizers.Adam(1e-3),
-                loss=_masked_candidate_sparse_ce(self.max_candidates),
-                metrics=[
-                    _masked_candidate_top_k(1, self.max_candidates),
-                    _masked_candidate_top_k(3, self.max_candidates),
-                ],
-            )
-            return model
         if weights_path is not None and weights_path.is_file():
             logger.info("Loading baseline weights from %s", weights_path)
             try:
@@ -408,20 +367,16 @@ class BaselineTrainer:
         datums: list[TrainingDatum],
         *,
         weights_path: Path | None = None,
-        baseline_weights_path: Path | None = None,
-        recency_lambda: float | None = None,
-        end_time_by_game_id: Mapping[str, datetime] | None = None,
-        now: datetime | None = None,
-        require_parent_weights: bool = False,
     ) -> tuple[Any, dict[str, float]]:
         if not datums:
             raise ValueError("BaselineTrainer.fit requires a non-empty batch")
 
         logger.info(
             "Building candidate move features for %s datums "
-            "(SF evals from DB + on-the-fly geometry/material/openness; feat_dim=%s)…",
+            "(SF evals from DB + on-the-fly geometry/material/openness; feat_dim=%s). %s",
             len(datums),
             self.move_feat_dim,
+            snapshot_host_pressure().format_fields(),
         )
         batch = TrainingBatch(datums)
         feats, mask, labels, kept = batch.candidate_style_targets()
@@ -440,80 +395,25 @@ class BaselineTrainer:
         y = pack_candidate_targets(labels, mask)
         disagree_mask = user_not_sf_best_mask(feats, labels)
         strength = user_sf_disagree_strength(feats, labels, scale_pawns=self.style_disagree_scale)
-        plies = [d.ply for d in kept_datums]
-        mapping = end_time_by_game_id or {}
-        aligned: list[datetime | None] = []
-        missing = 0
-        for d in kept_datums:
-            end = mapping.get(d.game_id)
-            if end is None:
-                missing += 1
-                aligned.append(None)
-            else:
-                aligned.append(end)
-
-        use_baseline = self.baseline_disagree_boost != 1.0
-        use_recency = recency_lambda is not None
-        model = None
-        baseline_strength = None
-        if use_baseline:
-            if baseline_weights_path is None:
-                raise ValueError("baseline_disagree_boost != 1.0 requires baseline_weights_path")
-            baseline_model = self.load_or_build(
-                input_dim=int(x_state.shape[1]),
-                weights_path=baseline_weights_path,
-                require_compatible_parent=True,
-            )
-            logits = np.asarray(
-                baseline_model.predict({"state": x_state, "move_feats": feats}, verbose=0),
-                dtype=np.float64,
-            )
-            baseline_strength = baseline_disagree_strength(logits, mask, labels)
-            if weights_path is not None and weights_path == baseline_weights_path:
-                model = baseline_model
-
-        if use_recency or use_baseline:
-            if use_recency and missing:
-                logger.warning(
-                    "recency: %s/%s kept datums missing end_time; strength=0",
-                    missing,
-                    len(kept_datums),
-                )
-            recency_now = now if now is not None else get_current_datetime()
-            sample_w = user_finetune_sample_weights(
-                plies,
-                feats,
-                labels,
-                aligned,
-                recency_lambda=float(recency_lambda) if use_recency else 0.0,
-                recency_boost=self.recency_boost if use_recency else 1.0,
-                style_disagree_boost=self.style_disagree_boost,
-                style_disagree_scale=self.style_disagree_scale,
-                baseline_disagree_strength=baseline_strength,
-                baseline_disagree_boost=self.baseline_disagree_boost,
-                now=recency_now,
-            )
-        else:
-            sample_w = candidate_style_sample_weights(
-                plies,
-                feats,
-                labels,
-                style_disagree_boost=self.style_disagree_boost,
-                style_disagree_scale=self.style_disagree_scale,
-            )
+        sample_w = candidate_style_sample_weights(
+            [d.ply for d in kept_datums],
+            feats,
+            labels,
+            style_disagree_boost=self.style_disagree_boost,
+            style_disagree_scale=self.style_disagree_scale,
+        )
         disagree_frac = float(np.mean(disagree_mask))
         mean_strength = float(np.mean(strength))
 
-        if model is None:
-            model = self.load_or_build(
-                input_dim=int(x_state.shape[1]),
-                weights_path=weights_path,
-                require_compatible_parent=require_parent_weights,
-            )
+        model = self.load_or_build(
+            input_dim=int(x_state.shape[1]),
+            weights_path=weights_path,
+        )
+        fit_started = snapshot_host_pressure()
         logger.info(
             "Starting Keras fit samples=%s epochs=%s batch_size=%s "
             "style_disagree_boost=%s scale_pawns=%s disagree_frac=%.3f "
-            "mean_strength=%.3f…",
+            "mean_strength=%.3f %s",
             len(kept_datums),
             self.epochs,
             min(self.batch_size, len(kept_datums)),
@@ -521,6 +421,7 @@ class BaselineTrainer:
             self.style_disagree_scale,
             disagree_frac,
             mean_strength,
+            fit_started.format_fields(),
         )
         total_epochs = self.epochs
         from tensorflow.keras.callbacks import Callback  # type: ignore[import-untyped]
@@ -534,6 +435,7 @@ class BaselineTrainer:
                     {k: round(float(v), 6) for k, v in (logs or {}).items()},
                 )
 
+        fit_t0 = time.monotonic()
         # Prefer our logger over Keras STDERR progress bars.
         history = model.fit(
             {"state": x_state, "move_feats": feats},
@@ -556,13 +458,17 @@ class BaselineTrainer:
         metrics["head_candidate_style"] = 1.0
         metrics["style_disagree_boost"] = float(self.style_disagree_boost)
         metrics["style_disagree_scale"] = float(self.style_disagree_scale)
-        metrics["baseline_disagree_boost"] = float(self.baseline_disagree_boost)
         metrics["sf_disagree_frac"] = disagree_frac
         metrics["sf_disagree_mean_strength"] = mean_strength
         metrics["epochs"] = float(self.epochs)
-        if recency_lambda is not None:
-            metrics["recency_lambda"] = float(recency_lambda)
-            metrics["recency_boost"] = float(self.recency_boost)
+        fit_ended = snapshot_host_pressure()
+        logger.info(
+            "Keras fit finished duration_s=%.2f delta_rss_mb=%.1f n_samples=%s %s",
+            time.monotonic() - fit_t0,
+            fit_ended.rss_mb - fit_started.rss_mb,
+            len(kept_datums),
+            fit_ended.format_fields(),
+        )
         return model, metrics
 
     @staticmethod

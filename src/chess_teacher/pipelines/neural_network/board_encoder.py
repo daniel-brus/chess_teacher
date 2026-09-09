@@ -1,7 +1,7 @@
-"""Hybrid board-encoder + flat state + candidate scorer (Phase 2c offline).
+"""Hybrid board-encoder + candidate scorer (Phase 2c offline).
 
-Board conv trunk is an **addition** to the baseline flat ``state`` tower (not a
-replacement). Both embeddings fuse before the shared candidate head.
+Conv trunk over ``board_tensor`` planes replaces the flat state MLP.
+Candidate head + move feats + masked CE stay the same as ``BaselineTrainer``.
 Does **not** wire production entrypoints.
 
 POC: intended *successor candidate* for ``BaselineTrainer`` if registry-val
@@ -44,7 +44,6 @@ from chess_teacher.pipelines.neural_network.train import (
     BaselineTrainer,
     _masked_candidate_sparse_ce,
     _masked_candidate_top_k,
-    candidate_style_custom_objects,
     pack_candidate_targets,
 )
 from chess_teacher.utils.logging import get_logger
@@ -62,20 +61,6 @@ def _import_keras():
     return keras
 
 
-def load_hybrid_board_keras(
-    path: Path,
-    *,
-    max_candidates: int = MAX_CANDIDATES,
-    compile_model: bool = False,
-) -> Any:
-    keras = _import_keras()
-    return keras.models.load_model(
-        path,
-        custom_objects=candidate_style_custom_objects(max_candidates),
-        compile=compile_model,
-    )
-
-
 def model_is_hybrid_board_compatible(
     model: Any,
     *,
@@ -83,7 +68,7 @@ def model_is_hybrid_board_compatible(
     move_feat_dim: int = MOVE_FEAT_DIM,
     board_channels: int = BOARD_TENSOR_CHANNELS,
 ) -> bool:
-    """True when inputs include board, state, and move_feats."""
+    """True when inputs include board ``(8,8,C)`` + move_feats ``(MAX, F)``."""
     try:
         shape = model.output_shape
         last = shape[-1] if not isinstance(shape[0], (list, tuple)) else shape[0][-1]
@@ -96,21 +81,18 @@ def model_is_hybrid_board_compatible(
         inputs = model.inputs
     except Exception:
         return False
-    if not inputs or len(inputs) < 3:
+    if not inputs or len(inputs) < 2:
         return False
 
     board_in = None
-    state_in = None
     feats_in = None
     for inp in inputs:
         name = (getattr(inp, "name", "") or "").split(":")[0]
-        if name == "board" or name.startswith("board"):
+        if name == "board" or "board" in name:
             board_in = inp
-        elif name == "state" or name.startswith("state"):
-            state_in = inp
-        elif name == "move_feats" or "move_feats" in name:
+        if name == "move_feats" or "move_feats" in name:
             feats_in = inp
-    if board_in is None or state_in is None or feats_in is None:
+    if board_in is None or feats_in is None:
         return False
     try:
         b_shape = tuple(board_in.shape)
@@ -127,12 +109,12 @@ def model_is_hybrid_board_compatible(
 
 
 class HybridBoardTrainer:
-    """Board conv + flat state tower fused, then candidate scorer (offline Phase 2c).
+    """Conv board trunk + TimeDistributed candidate scorer (offline Phase 2c).
 
-    State tower matches ``BaselineTrainer`` widths; conv trunk is additive.
-    ``DEFAULT_CONV_FILTERS`` bumped vs first A/B (32 → 64).
+    Defaults match ``BaselineTrainer`` hidden widths so encoder A/B isolates
+    representation, not capacity knobs.
 
-    POC / intended successor for flat-state-only ``BaselineTrainer`` if A/B wins.
+    POC / intended successor for flat-state ``BaselineTrainer`` if A/B wins.
     Still offline-only; package remains deletable until Phase 4 greenfield.
     """
 
@@ -140,7 +122,7 @@ class HybridBoardTrainer:
     DEFAULT_BATCH_SIZE = BaselineTrainer.DEFAULT_BATCH_SIZE
     DEFAULT_HIDDEN = BaselineTrainer.DEFAULT_HIDDEN
     DEFAULT_SCORE_HIDDEN = BaselineTrainer.DEFAULT_SCORE_HIDDEN
-    DEFAULT_CONV_FILTERS = 64
+    DEFAULT_CONV_FILTERS = 32
 
     def __init__(
         self,
@@ -173,18 +155,16 @@ class HybridBoardTrainer:
             else float(style_disagree_scale)
         )
 
-    def build(self, state_dim: int) -> Any:
+    def build(self) -> Any:
         keras = _import_keras()
         layers = keras.layers
 
         board_in = keras.Input(shape=BOARD_TENSOR_SHAPE, name="board")
-        state_in = keras.Input(shape=(state_dim,), name="state")
         feats_in = keras.Input(
             shape=(self.max_candidates, self.move_feat_dim),
             name="move_feats",
         )
 
-        # Spatial trunk (additive geometry).
         x = layers.Conv2D(
             self.conv_filters,
             3,
@@ -200,20 +180,13 @@ class HybridBoardTrainer:
             name="board_conv2",
         )(x)
         x = layers.GlobalAveragePooling2D(name="board_gap")(x)
-        board_emb = layers.Dense(self.hidden, activation="relu", name="board_emb")(x)
-
-        # Same flat-state tower as BaselineTrainer.
-        s = layers.Dense(self.hidden, activation="relu", name="state_h1")(state_in)
-        state_emb = layers.Dense(self.hidden, activation="relu", name="state_h2")(s)
-
-        fused = layers.Concatenate(axis=-1, name="board_state_concat")([board_emb, state_emb])
-        h = layers.Dense(self.hidden, activation="relu", name="fused_emb")(fused)
-        h_tile = layers.RepeatVector(self.max_candidates, name="fused_tile")(h)
-        scored_in = layers.Concatenate(axis=-1, name="fused_move_concat")([h_tile, feats_in])
+        h = layers.Dense(self.hidden, activation="relu", name="board_emb")(x)
+        h_tile = layers.RepeatVector(self.max_candidates, name="board_tile")(h)
+        fused = layers.Concatenate(axis=-1, name="board_move_concat")([h_tile, feats_in])
         scored = layers.TimeDistributed(
             layers.Dense(self.score_hidden, activation="relu"),
             name="score_h",
-        )(scored_in)
+        )(fused)
         scores = layers.TimeDistributed(
             layers.Dense(1, activation="linear"),
             name="score_out",
@@ -221,7 +194,7 @@ class HybridBoardTrainer:
         logits = layers.Reshape((self.max_candidates,), name="candidate_logits")(scores)
 
         model = keras.Model(
-            inputs=[board_in, state_in, feats_in],
+            inputs=[board_in, feats_in],
             outputs=logits,
             name="baseline_hybrid_board",
         )
@@ -235,56 +208,6 @@ class HybridBoardTrainer:
         )
         return model
 
-    def load_or_build(
-        self,
-        *,
-        state_dim: int,
-        weights_path: Path | None = None,
-    ) -> Any:
-        if weights_path is not None and weights_path.is_file():
-            logger.info("Loading hybrid board weights from %s", weights_path)
-            try:
-                model = load_hybrid_board_keras(
-                    weights_path,
-                    max_candidates=self.max_candidates,
-                    compile_model=False,
-                )
-            except Exception:
-                logger.exception(
-                    "Failed to load hybrid weights; cold-starting hybrid board+state model"
-                )
-                return self.build(state_dim)
-            if not model_is_hybrid_board_compatible(
-                model,
-                max_candidates=self.max_candidates,
-                move_feat_dim=self.move_feat_dim,
-            ):
-                logger.warning(
-                    "Parent weights not hybrid board+state compatible; cold-starting"
-                )
-                return self.build(state_dim)
-            from tensorflow import keras  # type: ignore[import-untyped]
-
-            ensure_tensorflow_logging()
-            model.compile(
-                optimizer=keras.optimizers.Adam(1e-3),
-                loss=_masked_candidate_sparse_ce(self.max_candidates),
-                metrics=[
-                    _masked_candidate_top_k(1, self.max_candidates),
-                    _masked_candidate_top_k(3, self.max_candidates),
-                ],
-            )
-            return model
-        logger.info(
-            "Cold-start hybrid board+state model state_dim=%s conv_filters=%s "
-            "max_candidates=%s feat_dim=%s",
-            state_dim,
-            self.conv_filters,
-            self.max_candidates,
-            self.move_feat_dim,
-        )
-        return self.build(state_dim)
-
     def fit(
         self,
         datums: list[TrainingDatum],
@@ -293,14 +216,19 @@ class HybridBoardTrainer:
     ) -> tuple[Any, dict[str, float]]:
         if not datums:
             raise ValueError("HybridBoardTrainer.fit requires a non-empty batch")
+        if weights_path is not None:
+            logger.warning(
+                "HybridBoardTrainer ignores weights_path=%s "
+                "(greenfield cold-start; no POC parent resume)",
+                weights_path,
+            )
 
         logger.info(
-            "Hybrid board+state encoder: packing candidates for %s datums "
-            "(board_tensor_version=%s C=%s conv_filters=%s). %s",
+            "Hybrid board encoder: packing candidates for %s datums "
+            "(board_tensor_version=%s C=%s). %s",
             len(datums),
             BOARD_TENSOR_VERSION,
             BOARD_TENSOR_CHANNELS,
-            self.conv_filters,
             snapshot_host_pressure().format_fields(),
         )
         batch = TrainingBatch(datums)
@@ -311,7 +239,6 @@ class HybridBoardTrainer:
             )
         kept_datums = [datums[i] for i in kept]
         x_board = pack_board_tensors(kept_datums)
-        x_state = TrainingBatch(kept_datums).state_matrix()
         y = pack_candidate_targets(labels, mask)
         disagree_mask = user_not_sf_best_mask(feats, labels)
         strength = user_sf_disagree_strength(feats, labels, scale_pawns=self.style_disagree_scale)
@@ -325,23 +252,17 @@ class HybridBoardTrainer:
         disagree_frac = float(np.mean(disagree_mask))
         mean_strength = float(np.mean(strength))
 
-        model = self.load_or_build(
-            state_dim=int(x_state.shape[1]),
-            weights_path=weights_path,
-        )
+        model = self.build()
         fit_started = snapshot_host_pressure()
         logger.info(
             "Starting hybrid Keras fit samples=%s epochs=%s batch_size=%s "
-            "conv_filters=%s hidden=%s state_dim=%s disagree_frac=%.3f "
-            "parent=%s %s",
+            "conv_filters=%s hidden=%s disagree_frac=%.3f %s",
             len(kept_datums),
             self.epochs,
             min(self.batch_size, len(kept_datums)),
             self.conv_filters,
             self.hidden,
-            int(x_state.shape[1]),
             disagree_frac,
-            weights_path,
             fit_started.format_fields(),
         )
         total_epochs = self.epochs
@@ -358,7 +279,7 @@ class HybridBoardTrainer:
 
         fit_t0 = time.monotonic()
         history = model.fit(
-            {"board": x_board, "state": x_state, "move_feats": feats},
+            {"board": x_board, "move_feats": feats},
             y,
             sample_weight=sample_w,
             epochs=self.epochs,
@@ -377,11 +298,8 @@ class HybridBoardTrainer:
         metrics["move_feat_version"] = float(CANDIDATE_MOVE_FEAT_VERSION)
         metrics["board_tensor_version"] = float(BOARD_TENSOR_VERSION)
         metrics["board_channels"] = float(BOARD_TENSOR_CHANNELS)
-        metrics["state_dim"] = float(x_state.shape[1])
-        metrics["conv_filters"] = float(self.conv_filters)
         metrics["head_candidate_style"] = 1.0
         metrics["encoder_hybrid_board"] = 1.0
-        metrics["encoder_fuses_state"] = 1.0
         metrics["style_disagree_boost"] = float(self.style_disagree_boost)
         metrics["style_disagree_scale"] = float(self.style_disagree_scale)
         metrics["sf_disagree_frac"] = disagree_frac

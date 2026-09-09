@@ -13,6 +13,8 @@ Optional::
     --max-rounds 50
     --min-new-moves 1000
     --batch-limit 10000
+    --start-cutoff 2026-01-01T00:00:00
+    --start-from-production-cutoff
     --parent-uri PATH_OR_URI
     --epochs 20
     --style-disagree-boost 2.0
