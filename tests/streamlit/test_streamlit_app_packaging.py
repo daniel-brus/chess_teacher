@@ -109,6 +109,32 @@ def test_streamlit_app_registers_existing_page_files(project_root: Path) -> None
     assert page_paths, "streamlit_app.py should register at least one st.Page(...)"
     missing = [path for path in page_paths if not (project_root / path).is_file()]
     assert not missing, f"st.Page paths missing on disk: {missing}"
+    assert "streamlit_pages/privacy.py" in page_paths
+    assert "streamlit_pages/terms.py" in page_paths
+
+
+def test_streamlit_sources_do_not_embed_oauth_secrets(project_root: Path) -> None:
+    forbidden = ("client_secret", "COOKIE_SECRET", "STREAMLIT_GOOGLE_CLIENT_SECRET")
+    roots = [
+        project_root / "streamlit_pages",
+        project_root / "streamlit_utils",
+        project_root / "streamlit_app.py",
+    ]
+    leaks: list[str] = []
+    for root in roots:
+        files = [root] if root.is_file() else sorted(root.rglob("*.py"))
+        for path in files:
+            text = path.read_text(encoding="utf-8")
+            for token in forbidden:
+                if token in text:
+                    leaks.append(f"{path.relative_to(project_root)}: {token}")
+    assert not leaks, f"OAuth secrets must stay in server secrets, not UI code: {leaks}"
+
+
+def test_favicon_asset_exists(project_root: Path) -> None:
+    favicon = project_root / "streamlit_utils" / "assets" / "favicon.png"
+    assert favicon.is_file()
+    assert favicon.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
 
 
 def test_dockerfile_copies_streamlit_runtime_packages(
