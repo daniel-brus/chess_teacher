@@ -1,4 +1,5 @@
 import json
+import logging
 
 import polars as pl
 import pytest
@@ -8,6 +9,20 @@ from chess_teacher.pipelines.preprocessing.transformations import (
     _stringify_mixed_type_fields,
 )
 from chess_teacher.utils.exception_utils import TransformationError
+
+_FEN = "nrnbkqbr/pppppppp/8/8/8/8/PPPPPPPP/NRNBKQBR w KQkq - 0 1"
+
+
+def _raw_df(payloads: list[dict]) -> pl.DataFrame:
+    n = len(payloads)
+    return pl.DataFrame({
+        "game_id": [f"g{i}" for i in range(n)],
+        "platform_game_id": [f"p{i}" for i in range(n)],
+        "account_id": ["acct"] * n,
+        "raw_response": [json.dumps(p) for p in payloads],
+        "source_file": ["ingested/x.jsonl"] * n,
+        "ingested_at": ["2024-01-01T12:00:00+00:00"] * n,
+    })
 
 
 def test_expand_raw_response_parses_json_and_preserves_identity_columns() -> None:
@@ -33,50 +48,82 @@ def test_expand_raw_response_parses_json_and_preserves_identity_columns() -> Non
 
 
 def test_expand_raw_response_handles_type_change_past_default_infer_window() -> None:
-    """Prod: Polars default infer_schema_length=100; late FEN string broke expand."""
-    fen = "nrnbkqbr/pppppppp/8/8/8/8/PPPPPPPP/NRNBKQBR w KQkq - 0 1"
+    """Full-scan infer: int then FEN string past Polars' default 100-row window."""
     payloads = [{"id": i, "initialFen": i} for i in range(100)]
-    payloads.append({"id": 100, "initialFen": fen})
-    df = pl.DataFrame({
-        "game_id": [f"g{i}" for i in range(101)],
-        "platform_game_id": [f"p{i}" for i in range(101)],
-        "account_id": ["acct"] * 101,
-        "raw_response": [json.dumps(p) for p in payloads],
-        "source_file": ["ingested/x.jsonl"] * 101,
-        "ingested_at": ["2024-01-01T12:00:00+00:00"] * 101,
-    })
+    payloads.append({"id": 100, "initialFen": _FEN})
 
-    result = ExpandRawResponseTransformation().transform(df)
+    result = ExpandRawResponseTransformation().transform(_raw_df(payloads))
 
     assert result.height == 101
-    assert result["initialFen"][-1] == fen
+    assert result["initialFen"][-1] == _FEN
 
 
-def test_expand_raw_response_stringifies_struct_vs_scalar_clash() -> None:
-    fen = "nrnbkqbr/pppppppp/8/8/8/8/PPPPPPPP/NRNBKQBR w KQkq - 0 1"
+def test_expand_raw_response_stringifies_struct_vs_scalar_clash(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Struct vs str cannot unify even with full-scan infer → stringify fallback."""
     payloads = [
         {"id": 1, "variant": {"key": "standard"}},
-        {"id": 2, "variant": fen},
+        {"id": 2, "variant": _FEN},
     ]
-    df = pl.DataFrame({
-        "game_id": ["g1", "g2"],
-        "platform_game_id": ["p1", "p2"],
-        "account_id": ["acct", "acct"],
-        "raw_response": [json.dumps(p) for p in payloads],
-        "source_file": ["ingested/x.jsonl", "ingested/x.jsonl"],
-        "ingested_at": ["2024-01-01T12:00:00+00:00"] * 2,
-    })
 
-    result = ExpandRawResponseTransformation().transform(df)
+    with caplog.at_level(logging.WARNING):
+        result = ExpandRawResponseTransformation().transform(_raw_df(payloads))
 
     assert result.height == 2
     assert isinstance(result["variant"][0], str)
-    assert fen in result["variant"][1]
+    assert json.loads(result["variant"][0]) == {"key": "standard"}
+    assert result["variant"][1] == _FEN
+    assert any(
+        "stringifying mixed columns" in record.message and "variant" in record.message
+        for record in caplog.records
+    )
+
+
+def test_expand_raw_response_keeps_nulls_when_other_rows_typed() -> None:
+    payloads = [
+        {"id": 1, "initialFen": None},
+        {"id": 2},  # key absent
+        {"id": 3, "initialFen": _FEN},
+    ]
+    result = ExpandRawResponseTransformation().transform(_raw_df(payloads))
+    assert result.height == 3
+    assert result["initialFen"][0] is None
+    assert result["initialFen"][2] == _FEN
+
+
+def test_expand_raw_response_bool_and_int_are_mixed_types() -> None:
+    """type(True) is bool, type(1) is int — must stringify, not treat as homogeneous."""
+    rows = [{"flag": True}, {"flag": 1}]
+    normalized, mixed = _stringify_mixed_type_fields(rows)
+    assert mixed == frozenset({"flag"})
+    assert normalized[0]["flag"] == "True"
+    assert normalized[1]["flag"] == "1"
+
+
+def test_expand_raw_response_list_vs_dict_json_dumps_both() -> None:
+    rows = [{"x": [1, 2]}, {"x": {"a": 1}}]
+    normalized, mixed = _stringify_mixed_type_fields(rows)
+    assert mixed == frozenset({"x"})
+    assert json.loads(normalized[0]["x"]) == [1, 2]
+    assert json.loads(normalized[1]["x"]) == {"a": 1}
 
 
 def test_stringify_mixed_type_fields_noop_when_homogeneous() -> None:
     rows = [{"a": 1}, {"a": 2}]
-    assert _stringify_mixed_type_fields(rows) is rows
+    out, mixed = _stringify_mixed_type_fields(rows)
+    assert out is rows
+    assert mixed == frozenset()
+
+
+def test_expand_raw_response_empty_frame() -> None:
+    df = pl.DataFrame({
+        "game_id": pl.Series([], dtype=pl.Utf8),
+        "raw_response": pl.Series([], dtype=pl.Utf8),
+    })
+    result = ExpandRawResponseTransformation().transform(df)
+    assert result.height == 0
+    assert result.columns == df.columns
 
 
 def test_expand_raw_response_rejects_non_object_json() -> None:
@@ -85,4 +132,16 @@ def test_expand_raw_response_rejects_non_object_json() -> None:
         "raw_response": [json.dumps([1, 2, 3])],
     })
     with pytest.raises(TransformationError, match="object"):
+        ExpandRawResponseTransformation().transform(df)
+
+
+def test_expand_raw_response_rejects_invalid_json() -> None:
+    df = pl.DataFrame({"game_id": ["g1"], "raw_response": ["not-json{"]})
+    with pytest.raises(TransformationError, match="parse"):
+        ExpandRawResponseTransformation().transform(df)
+
+
+def test_expand_raw_response_requires_column() -> None:
+    df = pl.DataFrame({"game_id": ["g1"]})
+    with pytest.raises(TransformationError, match="raw_response"):
         ExpandRawResponseTransformation().transform(df)

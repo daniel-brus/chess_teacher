@@ -35,6 +35,23 @@ def test_prepare_records_for_copy_json_dumps_dicts() -> None:
     assert isinstance(prepared[0]["candidate_evaluations"], str)
 
 
+def test_prepare_records_for_copy_json_dumps_lists() -> None:
+    records = [{"move_id": "m1", "candidate_evaluations": [1, {"a": 2}]}]
+    prepared = _prepare_records_for_copy(records, _jsonb_table())
+    assert json.loads(prepared[0]["candidate_evaluations"]) == [1, {"a": 2}]
+
+
+def test_prepare_records_for_copy_leaves_none_and_already_str() -> None:
+    already = '{"depth": 1}'
+    records = [
+        {"move_id": "m1", "candidate_evaluations": None},
+        {"move_id": "m2", "candidate_evaluations": already},
+    ]
+    prepared = _prepare_records_for_copy(records, _jsonb_table())
+    assert prepared[0]["candidate_evaluations"] is None
+    assert prepared[1]["candidate_evaluations"] is already
+
+
 def test_prepare_records_for_copy_leaves_non_json_alone() -> None:
     table = TableMetadata(
         schema_name="s",

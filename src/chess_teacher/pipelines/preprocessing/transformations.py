@@ -121,21 +121,32 @@ class ExpandRawResponseTransformation(DataFrameTransformation):
 
         try:
             # Scan every row: default infer_schema_length=100 misses late type
-            # changes (e.g. Lichess initialFen absent/int-like then FEN string).
+            # changes (e.g. int-like values in early rows, FEN string later).
             return pl.from_dicts(rows, infer_schema_length=None)
         except Exception as e:
+            normalized, mixed_columns = _stringify_mixed_type_fields(rows)
+            logger.warning(
+                "ExpandRawResponseTransformation: Polars rejected heterogeneous raw_response "
+                "rows (%s); stringifying mixed columns %s and retrying. original_error=%s",
+                type(e).__name__,
+                sorted(mixed_columns) if mixed_columns else [],
+                e,
+            )
             try:
-                return pl.from_dicts(
-                    _stringify_mixed_type_fields(rows),
-                    infer_schema_length=None,
-                )
+                return pl.from_dicts(normalized, infer_schema_length=None)
             except Exception:
                 logger.log_and_raise(TransformationError(f"Failed to expand raw_response: {e}"))
             raise  # pragma: no cover — log_and_raise always raises
 
 
-def _stringify_mixed_type_fields(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Coerce columns with heterogeneous Python types to strings so Polars can build."""
+def _stringify_mixed_type_fields(
+    rows: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], frozenset[str]]:
+    """Coerce columns with heterogeneous Python types to strings so Polars can build.
+
+    Returns ``(rows_or_normalized, mixed_column_names)``. When no column has mixed
+    non-null Python types, returns the input list unchanged.
+    """
     keys: set[str] = set()
     for row in rows:
         keys.update(row)
@@ -145,9 +156,9 @@ def _stringify_mixed_type_fields(rows: list[dict[str, Any]]) -> list[dict[str, A
             value = row.get(key)
             if value is not None:
                 type_sets[key].add(type(value))
-    mixed = {key for key, types in type_sets.items() if len(types) > 1}
+    mixed = frozenset(key for key, types in type_sets.items() if len(types) > 1)
     if not mixed:
-        return rows
+        return rows, mixed
     normalized: list[dict[str, Any]] = []
     for row in rows:
         out = dict(row)
@@ -160,7 +171,7 @@ def _stringify_mixed_type_fields(rows: list[dict[str, Any]]) -> list[dict[str, A
             else:
                 out[key] = str(value)
         normalized.append(out)
-    return normalized
+    return normalized, mixed
 
 
 class FilterGamesWithPGNTransformation(DataFrameTransformation):
