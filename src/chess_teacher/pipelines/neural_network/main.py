@@ -1,8 +1,5 @@
 """Baseline training + promotion pipeline entrypoints.
 
-POC — production-shaped, but models/eval behind these entrypoints are disposable
-until Phase 4 greenfield. Prefer rewrite over compat with current Keras rows.
-
 Roadmap: ``.agents/docs/ml-training-roadmap.md`` (Phase 4+ wires held-out eval here).
 
 Follow-ups (not wired here yet):

@@ -100,11 +100,3 @@ tables:
         data_type: timestamptz
         nullable: false
         comment: When this assignment was first written
-      - name: already_processed_baseline
-        data_type: timestamptz
-        nullable: true
-        comment: When this game was last consumed by baseline train-queue tooling (optional bookkeeping)
-      - name: already_processed_personal
-        data_type: timestamptz
-        nullable: true
-        comment: When this game was last consumed by personal/user train-queue tooling (optional bookkeeping)

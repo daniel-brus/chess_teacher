@@ -1,8 +1,7 @@
 """Stratified candidate-style eval metrics for offline experiments.
 
 Reports overall top-1 / top-3 plus SF-agree and SF-disagree subsets.
-Phase 2c: primary report surface is stratified top1/top3; see
-``.agents/docs/ml-phase2c-board-encoder.md`` (E23).
+See ``.agents/docs/ml-training-roadmap.md`` Phase 1.
 """
 
 from __future__ import annotations
@@ -160,37 +159,6 @@ def compute_candidate_style_metrics(
     )
 
 
-def _model_input_names(model: Any) -> set[str]:
-    names: set[str] = set()
-    try:
-        inputs = model.inputs
-    except Exception:
-        return names
-    if not inputs:
-        return names
-    for inp in inputs:
-        raw = getattr(inp, "name", "") or ""
-        names.add(raw.split(":")[0])
-    return names
-
-
-def predict_candidate_logits(
-    model: Any,
-    kept_datums: list[TrainingDatum],
-    move_feats: np.ndarray,
-) -> np.ndarray:
-    """``model.predict`` for flat-state or hybrid-board candidate models."""
-    names = _model_input_names(model)
-    feed: dict[str, np.ndarray] = {"move_feats": move_feats}
-    if "board" in names:
-        from chess_teacher.pipelines.neural_network.board_tensor import pack_board_tensors
-
-        feed["board"] = pack_board_tensors(kept_datums)
-    else:
-        feed["state"] = TrainingBatch(kept_datums).state_matrix()
-    return np.asarray(model.predict(feed, verbose=0), dtype=np.float64)
-
-
 def evaluate_datums(
     model: Any,
     datums: list[TrainingDatum],
@@ -209,7 +177,11 @@ def evaluate_datums(
             "(user move must be in evals)"
         )
     kept_datums = [datums[i] for i in kept]
-    logits = predict_candidate_logits(model, kept_datums, feats)
+    x_state = TrainingBatch(kept_datums).state_matrix()
+    logits = np.asarray(
+        model.predict({"state": x_state, "move_feats": feats}, verbose=0),
+        dtype=np.float64,
+    )
     return compute_candidate_style_metrics(
         logits=logits,
         mask=mask,
@@ -260,34 +232,27 @@ def format_eval_delta(
         return f"{value:+.4f}"
 
     d_top1 = _signed_delta(candidate.top1_overall, baseline.top1_overall)
-    d_top3 = _signed_delta(candidate.top3_overall, baseline.top3_overall)
     d_dis = _signed_delta(candidate.top1_sf_disagree, baseline.top1_sf_disagree)
-    d_dis3 = _signed_delta(candidate.top3_sf_disagree, baseline.top3_sf_disagree)
     d_agr = _signed_delta(candidate.top1_sf_agree, baseline.top1_sf_agree)
-    d_agr3 = _signed_delta(candidate.top3_sf_agree, baseline.top3_sf_agree)
     beat_top1 = d_top1 is not None and d_top1 >= 0.0
     beat_dis = d_dis is not None and d_dis >= 0.0
     return (
         f"delta ({candidate_name} - {baseline_name}) "
-        f"top1={_fmt(d_top1)} top3={_fmt(d_top3)} "
-        f"agree_t1={_fmt(d_agr)} agree_t3={_fmt(d_agr3)} "
-        f"disagree_t1={_fmt(d_dis)} disagree_t3={_fmt(d_dis3)} "
+        f"top1={_fmt(d_top1)} agree_t1={_fmt(d_agr)} disagree_t1={_fmt(d_dis)} "
         f"informational_beats_top1={str(beat_top1).lower()} "
         f"informational_beats_disagree={str(beat_dis).lower()}"
     )
 
 
 def format_eval_metrics(name: str, metrics: EvalMetrics) -> str:
-    """Single-line human-readable summary for scripts (stratified top1 + top3)."""
-
-    def _fmt(value: float | None) -> str:
-        return "n/a" if value is None else f"{value:.4f}"
-
+    """Single-line human-readable summary for scripts."""
+    agree_t1 = f"{metrics.top1_sf_agree:.4f}" if metrics.top1_sf_agree is not None else "n/a"
+    disagree_t1 = (
+        f"{metrics.top1_sf_disagree:.4f}" if metrics.top1_sf_disagree is not None else "n/a"
+    )
     return (
         f"{name} top1={metrics.top1_overall:.4f} top3={metrics.top3_overall:.4f} "
-        f"agree_t1={_fmt(metrics.top1_sf_agree)} agree_t3={_fmt(metrics.top3_sf_agree)} "
-        f"disagree_t1={_fmt(metrics.top1_sf_disagree)} "
-        f"disagree_t3={_fmt(metrics.top3_sf_disagree)} "
+        f"agree_t1={agree_t1} disagree_t1={disagree_t1} "
         f"n={metrics.n_eval} dropped={metrics.n_dropped} "
         f"disagree_frac={metrics.sf_disagree_frac:.3f}"
     )

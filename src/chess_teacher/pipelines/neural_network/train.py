@@ -1,15 +1,8 @@
 """Keras baseline trainer — candidate-aware style scorer (SF eval features per move).
 
-POC / TO-BE-SUNSET
-------------------
-``BaselineTrainer`` (flat ``state`` MLP + move feats) is the Phase 2c A/B
-*control* and today's production-wired trainer. Prefer sunsetting it once a
-greenfield successor (e.g. ``HybridBoardTrainer``) wins registry-val — do not
-treat this class as a long-lived API. Entire ``neural_network`` package is POC.
-
-Parent weights load only when compatible with ``head=candidate_style``
-(state tower + per-candidate scorer). See ``candidate_eval.py`` for delta
-convention.
+Replaces the fixed-vocab policy head. Parent weights load only when compatible with
+``head=candidate_style`` (state tower + per-candidate scorer). See
+``candidate_eval.py`` for delta convention.
 """
 
 from __future__ import annotations
@@ -227,9 +220,6 @@ class BaselineTrainer:
 
     Inputs: ``state`` (D,), ``move_feats`` (MAX, F). Output: logits (MAX,).
     Sample weights: ply * continuous SF-disagree style boost (see ``ply_weights``).
-
-    POC / TO-BE-SUNSET: flat-state control. Greenfield path is
-    ``board_encoder.HybridBoardTrainer`` (or whatever beats it on val).
     """
 
     # Justified 2a pick: 10k registry-val sweep still climbing at 20; peak
