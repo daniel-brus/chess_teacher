@@ -33,7 +33,7 @@ from chess_teacher.pipelines.neural_network.eval_metrics import (
     format_eval_metrics,
 )
 from chess_teacher.pipelines.neural_network.offline_eval import (
-    load_registry_split,
+    load_registry_prefix_split,
     load_registry_val_datums,
     resolve_production_model_uri,
 )
@@ -75,8 +75,8 @@ def run_offline_promotion(
         return 1
 
     if train_inline:
-        logger.info("Loading sample limit=%s for inline train + registry val…", limit)
-        split = load_registry_split(db, limit=limit, split_version=split_version)
+        logger.info("Loading game_id prefixes limit=%s/bucket for inline train + val…", limit)
+        split = load_registry_prefix_split(db, limit=limit, split_version=split_version)
         print("\n" + format_split_summary(split))
         train = split.train_datums
         val = split.val_datums

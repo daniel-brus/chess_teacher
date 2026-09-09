@@ -7,12 +7,17 @@ Run (dev)::
 
 Optional::
 
-    --limit 10000
-    --epochs 20
-    --split-version baseline-v1
+    --epochs 10
+    --max-rounds 10
     --full-val
-    --arms both|mlp|hybrid
+    --arms hybrid|mlp|both
+    --reset-queue
+    --batch-limit 10000
     --style-disagree-boost 2.0
+
+``--max-rounds 1`` = single cold sample A/B.
+``--max-rounds >1`` = registry train queue (game_id + mark processed);
+val packed once, scored every round.
 """
 
 from __future__ import annotations

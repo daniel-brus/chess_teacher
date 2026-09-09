@@ -60,25 +60,56 @@ Hand-crafted **move feats** (Δeval, geometry, recapture, …) already encode mu
 
 **Deferred (ablate later):** history frames; attack maps; per-candidate from/to planes (coords already in move feats); fen_after / delta boards.
 
-### Chosen hybrid architecture (v1)
+### Chosen hybrid architecture (v1 → v1b fuse)
+
+Board conv is **additive** to the flat state tower (not a replacement).
 
 ```
 board (8×8×17)
-  → Conv2D(32, 3, same, relu) × 2
+  → Conv2D(64, 3, same, relu) × 2
   → GlobalAveragePooling2D
-  → Dense(hidden=128, relu)          # board embedding
+  → Dense(hidden=128, relu)          # board_emb
+
+state (D≈20,)
+  → Dense(128, relu) × 2             # same as BaselineTrainer state tower
+  → state_emb
+
+concat(board_emb, state_emb) → Dense(128, relu)   # fused_emb
   → RepeatVector(MAX)
   → concat move_feats (MAX, 55)
   → TimeDistributed Dense(score_hidden=64) → Dense(1)
   → logits (MAX,)  + masked sparse CE
 ```
 
-- **Control:** today’s flat `state` MLP + move feats (`BaselineTrainer`).
-- **Treatment:** board conv trunk replaces flat state tower; **same** candidate head + move feats + sample weights/loss.
+- **Control:** flat `state` MLP + move feats only (`BaselineTrainer`).
+- **Treatment:** board conv **+** state tower + same candidate head.
+- First A/B (board **replaced** state, conv=32): negative on full val — see below.
 - One change family per A/B: encoder **or** weights/loss — not both.
-- Param target: still ≪ Leela; shallow tower (~tens of k params + candidate head).
 
 **Reject criterion:** if full-registry-val A/B shows no clear gain on `disagree_t1` / agreed weighted product vs MLP control under same epochs/batch/weights, document negative and park deeper towers / planes — do not wire production.
+
+### E20 A/B result (2026-09-08) — negative on *replace*-state hybrid (conv=32)
+
+Cold-start both arms: train `--limit 10000` (8532 train moves), `--epochs 20`, style boost 2.0, **full registry val** `n=45027`. Hybrid **replaced** flat state (no fuse); `conv_filters=32`.
+
+| Arm | params | top1 | top3 | agree_t1 | disagree_t1 |
+|-----|--------|------|------|----------|-------------|
+| MLP (control) | 31041 | 0.3757 | 0.6354 | 0.6366 | **0.2149** |
+| Hybrid replace-state | 30241 | 0.3711 | 0.6350 | 0.6332 | **0.2096** |
+
+Primary delta `disagree_t1` (hybrid − mlp) = **−0.0052**. Follow-up design: **fuse** board + state + bump conv to 64 (v1b) — re-run before parking conv.
+
+### E20 A/B result (2026-09-09) — fuse board+state hybrid (conv=64), catch-up 3×10ep
+
+Protocol: catch-up R1 cold → R2–R3 resume; `--epochs 10` / round; `--max-rounds 3`; `--batch-limit 10000` (~10k train/round); style boost 2.0; **full registry val** packed once `n=45027`. Hybrid = board fuse + state (v1b), `conv_filters=64`. Wall ~5.1h. Weights under `storage/tmp/encoder_ab_fuse64_r3_ep10/`.
+
+| Round | mlp disagree_t1 | hybrid disagree_t1 | Δ (h−m) | mlp top1 | hybrid top1 |
+|------:|----------------:|-------------------:|--------:|---------:|------------:|
+| 1 | 0.2105 | 0.2145 | **+0.0040** | 0.3854 | 0.3829 |
+| 2 | 0.2153 | 0.2184 | **+0.0031** | 0.4098 | 0.4088 |
+| 3 | 0.2161 | 0.2221 | **+0.0060** | 0.4172 | 0.4102 |
+
+Hybrid beats MLP on primary `disagree_t1` every round (small +3–6‰) but loses overall/agree top1 by R3 (`top1` −0.0071, `agree_t1` −0.0283). Params 119k vs 31k. **Not a clear promote** — style edge tiny; agree regresses under catch-up. Next: park deeper towers, or try E21 forced-weight / E22 loss with **frozen** encoder winner (MLP still control).
 
 ---
 

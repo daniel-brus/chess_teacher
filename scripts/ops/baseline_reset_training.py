@@ -1,7 +1,7 @@
 """Reset baseline training state for a cold restart.
 
-Clears ``training_state.last_trained_data_cutoff`` and archives all
-non-archived ``baseline_models`` rows. MLflow artifacts are kept.
+Archives all non-archived ``baseline_models`` rows and clears
+``already_processed_baseline``. MLflow artifacts are kept.
 
 Run (dev)::
 
@@ -32,13 +32,15 @@ logger = get_logger()
 
 def _print_result(*, dry_run: bool, result) -> None:
     prefix = "Would" if dry_run else "Did"
-    if result.cutoff_cleared:
-        print(f"{prefix} clear cutoff (was {result.previous_cutoff})")
     if result.models_archived:
         versions = ", ".join(result.archived_versions)
         print(f"{prefix} archive {result.models_archived} baseline(s): {versions}")
-    if not result.cutoff_cleared and not result.models_archived:
-        print("Nothing to reset (cutoff already NULL and no active baselines).")
+    if not dry_run:
+        print(f"{prefix} clear baseline processed flags ({result.flags_cleared} rows)")
+    elif not result.models_archived:
+        print("Would clear baseline processed flags (row count after apply).")
+    if dry_run and result.models_archived:
+        print("Would also clear baseline processed flags.")
 
 
 def main() -> int:
@@ -55,14 +57,9 @@ def main() -> int:
         help="Apply without interactive confirmation.",
     )
     parser.add_argument(
-        "--no-clear-cutoff",
-        action="store_true",
-        help="Only archive baseline model rows.",
-    )
-    parser.add_argument(
         "--no-archive-models",
         action="store_true",
-        help="Only clear the training cutoff.",
+        help="Only clear baseline processed flags.",
     )
     args = parser.parse_args()
     log_script_runtime_context(logger, script="baseline_reset_training")
@@ -70,7 +67,6 @@ def main() -> int:
     db = get_db_client()
     preview = reset_baseline_training(
         db,
-        clear_cutoff=not args.no_clear_cutoff,
         archive_models=not args.no_archive_models,
         dry_run=True,
     )
@@ -90,7 +86,6 @@ def main() -> int:
 
     result = reset_baseline_training(
         db,
-        clear_cutoff=not args.no_clear_cutoff,
         archive_models=not args.no_archive_models,
         dry_run=False,
     )

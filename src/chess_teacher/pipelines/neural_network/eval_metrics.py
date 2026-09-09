@@ -1,8 +1,7 @@
 """Stratified candidate-style eval metrics for offline experiments.
 
 Reports overall top-1 / top-3 plus SF-agree and SF-disagree subsets.
-Phase 2c: primary report surface is stratified top1/top3; see
-``.agents/docs/ml-phase2c-board-encoder.md`` (E23).
+See ``.agents/docs/ml-training-roadmap.md`` Phase 1.
 """
 
 from __future__ import annotations
@@ -65,6 +64,55 @@ class EvalMetrics:
         if self.top3_sf_disagree is not None:
             out["top3_sf_disagree"] = self.top3_sf_disagree
         return out
+
+
+KEEP_TRAINING_PARENT_MIN_DELTA = 0.002
+
+
+def keep_training_parent(
+    candidate: EvalMetrics,
+    parent: EvalMetrics,
+    *,
+    min_delta: float = KEEP_TRAINING_PARENT_MIN_DELTA,
+) -> tuple[bool, str]:
+    """Whether ``candidate`` should become the next train parent.
+
+    Production promote (personal-bot base) still wants a *large* margin.
+    This gate only blocks a **step back** or **sideways** update:
+
+    - Step back: overall top1 or agree_t1 lower than parent.
+    - Sideways: neither overall top1 nor disagree_t1 rose by ``min_delta``.
+    - Keep: no step back, and at least one of those two rose by ``min_delta``.
+    """
+    if candidate.top1_overall < parent.top1_overall:
+        return False, (
+            f"step back overall top1 {candidate.top1_overall:.6f} < {parent.top1_overall:.6f}"
+        )
+    if (
+        candidate.top1_sf_agree is not None
+        and parent.top1_sf_agree is not None
+        and candidate.top1_sf_agree < parent.top1_sf_agree
+    ):
+        return False, (
+            f"step back agree_t1 {candidate.top1_sf_agree:.6f} < {parent.top1_sf_agree:.6f}"
+        )
+    top1_up = candidate.top1_overall >= parent.top1_overall + min_delta
+    disagree_up = (
+        candidate.top1_sf_disagree is not None
+        and parent.top1_sf_disagree is not None
+        and candidate.top1_sf_disagree >= parent.top1_sf_disagree + min_delta
+    )
+    if top1_up or disagree_up:
+        return True, (
+            f"keep top1={candidate.top1_overall:.6f} "
+            f"disagree_t1={candidate.top1_sf_disagree} "
+            f"(min_delta={min_delta})"
+        )
+    return False, (
+        f"sideways top1 {candidate.top1_overall:.6f} vs {parent.top1_overall:.6f}, "
+        f"disagree_t1 {candidate.top1_sf_disagree} vs {parent.top1_sf_disagree} "
+        f"(min_delta={min_delta})"
+    )
 
 
 @dataclass(frozen=True)
@@ -160,6 +208,9 @@ def compute_candidate_style_metrics(
     )
 
 
+
+
+
 def _model_input_names(model: Any) -> set[str]:
     names: set[str] = set()
     try:
@@ -179,16 +230,84 @@ def predict_candidate_logits(
     kept_datums: list[TrainingDatum],
     move_feats: np.ndarray,
 ) -> np.ndarray:
-    """``model.predict`` for flat-state or hybrid-board candidate models."""
+    """``model.predict`` for flat-state and/or hybrid-board candidate models."""
     names = _model_input_names(model)
     feed: dict[str, np.ndarray] = {"move_feats": move_feats}
     if "board" in names:
         from chess_teacher.pipelines.neural_network.board_tensor import pack_board_tensors
 
         feed["board"] = pack_board_tensors(kept_datums)
-    else:
+    if "state" in names:
+        feed["state"] = TrainingBatch(kept_datums).state_matrix()
+    if "board" not in feed and "state" not in feed:
         feed["state"] = TrainingBatch(kept_datums).state_matrix()
     return np.asarray(model.predict(feed, verbose=0), dtype=np.float64)
+
+
+@dataclass(frozen=True)
+class PackedCandidateEval:
+    """Candidate tensors packed once for repeated model.eval (multi-round A/B)."""
+
+    kept_datums: list[TrainingDatum]
+    feats: np.ndarray
+    mask: np.ndarray
+    labels: np.ndarray
+    state: np.ndarray
+    board: np.ndarray
+    n_input: int
+    max_candidates: int
+
+
+def pack_datums_for_eval(
+    datums: list[TrainingDatum],
+    *,
+    max_candidates: int = MAX_CANDIDATES,
+) -> PackedCandidateEval:
+    """Pack move_feats / state / board once; reuse across MLP and hybrid predicts."""
+    if not datums:
+        raise ValueError("pack_datums_for_eval requires a non-empty datum list")
+    batch = TrainingBatch(datums)
+    feats, mask, labels, kept = batch.candidate_style_targets()
+    if not kept:
+        raise ValueError(
+            "pack_datums_for_eval: no datums with usable candidate_evaluations "
+            "(user move must be in evals)"
+        )
+    kept_datums = [datums[i] for i in kept]
+    from chess_teacher.pipelines.neural_network.board_tensor import pack_board_tensors
+
+    return PackedCandidateEval(
+        kept_datums=kept_datums,
+        feats=feats,
+        mask=mask,
+        labels=labels,
+        state=TrainingBatch(kept_datums).state_matrix(),
+        board=pack_board_tensors(kept_datums),
+        n_input=len(datums),
+        max_candidates=max_candidates,
+    )
+
+
+def evaluate_packed(model: Any, packed: PackedCandidateEval) -> EvalMetrics:
+    """Score a model using pre-packed val tensors (board + state)."""
+    names = _model_input_names(model)
+    feed: dict[str, np.ndarray] = {"move_feats": packed.feats}
+    if "board" in names:
+        feed["board"] = packed.board
+    if "state" in names:
+        feed["state"] = packed.state
+    if "board" not in feed and "state" not in feed:
+        feed["state"] = packed.state
+    logits = np.asarray(model.predict(feed, verbose=0), dtype=np.float64)
+    return compute_candidate_style_metrics(
+        logits=logits,
+        mask=packed.mask,
+        labels=packed.labels,
+        move_feats=packed.feats,
+        plies=[d.ply for d in packed.kept_datums],
+        n_input=packed.n_input,
+        max_candidates=packed.max_candidates,
+    )
 
 
 def evaluate_datums(
@@ -198,26 +317,9 @@ def evaluate_datums(
     max_candidates: int = MAX_CANDIDATES,
 ) -> EvalMetrics:
     """Run ``model.predict`` on datums and return stratified metrics."""
-    if not datums:
-        raise ValueError("evaluate_datums requires a non-empty datum list")
-
-    batch = TrainingBatch(datums)
-    feats, mask, labels, kept = batch.candidate_style_targets()
-    if not kept:
-        raise ValueError(
-            "evaluate_datums: no datums with usable candidate_evaluations "
-            "(user move must be in evals)"
-        )
-    kept_datums = [datums[i] for i in kept]
-    logits = predict_candidate_logits(model, kept_datums, feats)
-    return compute_candidate_style_metrics(
-        logits=logits,
-        mask=mask,
-        labels=labels,
-        move_feats=feats,
-        plies=[d.ply for d in kept_datums],
-        n_input=len(datums),
-        max_candidates=max_candidates,
+    return evaluate_packed(
+        model,
+        pack_datums_for_eval(datums, max_candidates=max_candidates),
     )
 
 
@@ -260,34 +362,38 @@ def format_eval_delta(
         return f"{value:+.4f}"
 
     d_top1 = _signed_delta(candidate.top1_overall, baseline.top1_overall)
-    d_top3 = _signed_delta(candidate.top3_overall, baseline.top3_overall)
     d_dis = _signed_delta(candidate.top1_sf_disagree, baseline.top1_sf_disagree)
     d_dis3 = _signed_delta(candidate.top3_sf_disagree, baseline.top3_sf_disagree)
     d_agr = _signed_delta(candidate.top1_sf_agree, baseline.top1_sf_agree)
-    d_agr3 = _signed_delta(candidate.top3_sf_agree, baseline.top3_sf_agree)
     beat_top1 = d_top1 is not None and d_top1 >= 0.0
     beat_dis = d_dis is not None and d_dis >= 0.0
+    beat_dis3 = d_dis3 is not None and d_dis3 >= 0.0
+    agree_ok = d_agr is None or d_agr >= -0.03
     return (
         f"delta ({candidate_name} - {baseline_name}) "
-        f"top1={_fmt(d_top1)} top3={_fmt(d_top3)} "
-        f"agree_t1={_fmt(d_agr)} agree_t3={_fmt(d_agr3)} "
+        f"top1={_fmt(d_top1)} agree_t1={_fmt(d_agr)} "
         f"disagree_t1={_fmt(d_dis)} disagree_t3={_fmt(d_dis3)} "
         f"informational_beats_top1={str(beat_top1).lower()} "
-        f"informational_beats_disagree={str(beat_dis).lower()}"
+        f"informational_beats_disagree={str(beat_dis).lower()} "
+        f"informational_beats_disagree_t3={str(beat_dis3).lower()} "
+        f"agree_guardrail_ok={str(agree_ok).lower()}"
     )
 
 
 def format_eval_metrics(name: str, metrics: EvalMetrics) -> str:
-    """Single-line human-readable summary for scripts (stratified top1 + top3)."""
-
-    def _fmt(value: float | None) -> str:
-        return "n/a" if value is None else f"{value:.4f}"
-
+    """Single-line human-readable summary for scripts."""
+    agree_t1 = f"{metrics.top1_sf_agree:.4f}" if metrics.top1_sf_agree is not None else "n/a"
+    agree_t3 = f"{metrics.top3_sf_agree:.4f}" if metrics.top3_sf_agree is not None else "n/a"
+    disagree_t1 = (
+        f"{metrics.top1_sf_disagree:.4f}" if metrics.top1_sf_disagree is not None else "n/a"
+    )
+    disagree_t3 = (
+        f"{metrics.top3_sf_disagree:.4f}" if metrics.top3_sf_disagree is not None else "n/a"
+    )
     return (
         f"{name} top1={metrics.top1_overall:.4f} top3={metrics.top3_overall:.4f} "
-        f"agree_t1={_fmt(metrics.top1_sf_agree)} agree_t3={_fmt(metrics.top3_sf_agree)} "
-        f"disagree_t1={_fmt(metrics.top1_sf_disagree)} "
-        f"disagree_t3={_fmt(metrics.top3_sf_disagree)} "
+        f"agree_t1={agree_t1} agree_t3={agree_t3} "
+        f"disagree_t1={disagree_t1} disagree_t3={disagree_t3} "
         f"n={metrics.n_eval} dropped={metrics.n_dropped} "
         f"disagree_frac={metrics.sf_disagree_frac:.3f}"
     )

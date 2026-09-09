@@ -9,7 +9,10 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from chess_teacher.pipelines.neural_network.models import GameSplitAssignment
-from chess_teacher.pipelines.neural_network.split_registry import SplitRegistry
+from chess_teacher.pipelines.neural_network.split_registry import (
+    SplitRegistry,
+    clear_personal_processed,
+)
 from chess_teacher.pipelines.neural_network.splits import (
     DEFAULT_SPLIT_SALT,
     SplitBucket,
@@ -177,3 +180,73 @@ def test_ensure_eligible_games_for_account_requires_id() -> None:
     registry = SplitRegistry(db, split_version=DEFAULT_SPLIT_SALT)
     with pytest.raises(ValueError, match="account_id is required"):
         registry.ensure_eligible_games_for_account("")
+
+
+def test_mark_processed_updates_train_null_flag_only() -> None:
+    db = MagicMock()
+    db.update_where.return_value = 2
+    registry = SplitRegistry(db, split_version="baseline-v1")
+    n = registry.mark_processed(["g2", "g1"])
+    assert n == 2
+    values, where = db.update_where.call_args.args[1], db.update_where.call_args.args[2]
+    assert "already_processed_baseline" in values
+    assert values["already_processed_baseline"] is not None
+    assert "baseline-v1" in where
+    assert "train" in where
+    assert "already_processed_baseline" in where
+    assert "IS NULL" in where
+    assert "g1" in where
+    assert "g2" in where
+
+
+def test_mark_processed_empty_is_noop() -> None:
+    db = MagicMock()
+    registry = SplitRegistry(db, split_version=DEFAULT_SPLIT_SALT)
+    assert registry.mark_processed([]) == 0
+    db.update_where.assert_not_called()
+
+
+def test_clear_processed_nulls_flag() -> None:
+    db = MagicMock()
+    db.update_where.return_value = 4
+    registry = SplitRegistry(db, split_version="baseline-v1")
+    n = registry.clear_processed()
+    assert n == 4
+    values, where = db.update_where.call_args.args[1], db.update_where.call_args.args[2]
+    assert values["already_processed_baseline"] is None
+    assert "baseline-v1" in where
+
+
+def test_clear_personal_processed_scopes_game_ids() -> None:
+    db = MagicMock()
+    db.update_where.return_value = 2
+    n = clear_personal_processed(db, ["g2", "g1"], split_version="baseline-v1")
+    assert n == 2
+    values, where = db.update_where.call_args.args[1], db.update_where.call_args.args[2]
+    assert values["already_processed_personal"] is None
+    assert "already_processed_baseline" not in values
+    assert "baseline-v1" in where
+    assert "g1" in where
+    assert "g2" in where
+
+
+def test_clear_personal_processed_empty_is_noop() -> None:
+    db = MagicMock()
+    assert clear_personal_processed(db, []) == 0
+    db.update_where.assert_not_called()
+
+
+def test_ensure_games_inserts_null_processed_flags() -> None:
+    db = MagicMock()
+    db.insert.return_value = WriteResult(
+        strategy=WriteStrategy.INSERT_IGNORE,
+        rows_inserted=1,
+    )
+    registry = SplitRegistry(db, split_version=DEFAULT_SPLIT_SALT)
+
+    with patch.object(GameSplitAssignment, "fetch_all_from_db", return_value=[]):
+        registry.ensure_games(["game-a"])
+
+    records = db.insert.call_args[0][0]
+    assert records[0]["already_processed_baseline"] is None
+    assert records[0]["already_processed_personal"] is None

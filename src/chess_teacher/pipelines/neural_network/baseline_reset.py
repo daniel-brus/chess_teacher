@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from datetime import datetime
 
 from chess_teacher.pipelines.neural_network.models import (
-    BASELINE_TRAINING_SCOPE,
+    PROCESSED_FLAG_BASELINE,
     BaselineModel,
     BaselineModelStatus,
     TrainingState,
 )
+from chess_teacher.pipelines.neural_network.split_registry import get_split_registry
+from chess_teacher.pipelines.neural_network.splits import DEFAULT_SPLIT_SALT
 from chess_teacher.utils.db.client import DatabaseClient
 from chess_teacher.utils.general_utils import quote_literal
 from chess_teacher.utils.logging import get_logger
@@ -20,28 +21,27 @@ logger = get_logger()
 
 @dataclass(frozen=True)
 class BaselineTrainingResetResult:
-    previous_cutoff: datetime | None
     archived_versions: tuple[str, ...]
-    cutoff_cleared: bool
     models_archived: int
+    flags_cleared: int
 
 
 def reset_baseline_training(
     db_client: DatabaseClient,
     *,
-    clear_cutoff: bool = True,
     archive_models: bool = True,
     dry_run: bool = False,
+    split_version: str = DEFAULT_SPLIT_SALT,
 ) -> BaselineTrainingResetResult:
-    """Clear baseline data cutoff and archive active baseline model rows.
+    """Archive active baseline rows and reset baseline queue flags.
 
-    Does not delete MLflow artifacts or DB rows — only sets ``status=archived``
-    and ``last_trained_data_cutoff=NULL`` so the next train cold-starts.
+    Does not delete MLflow artifacts or DB rows - only sets ``status=archived``
+    and NULLs ``already_processed_baseline`` for ``split_version``. Dry-run
+    writes nothing. Personal flags stay.
     """
     db_client.ensure_metadata(TrainingState.get_metadata())
     db_client.ensure_metadata(BaselineModel.get_metadata())
 
-    previous = TrainingState.for_baseline(db_client)
     archived_versions: list[str] = []
 
     if archive_models:
@@ -57,23 +57,19 @@ def reset_baseline_training(
             replace(row, status=BaselineModelStatus.ARCHIVED).save_to_db(db_client)
             logger.info("Archived baseline version=%s (was %s)", row.version, row.status)
 
-    cutoff_cleared = False
-    if clear_cutoff:
-        cutoff_cleared = True
-        if not dry_run:
-            TrainingState(
-                scope=previous.scope or BASELINE_TRAINING_SCOPE,
-                last_trained_data_cutoff=None,
-                last_min_data_check_at=previous.last_min_data_check_at,
-            ).save_to_db(db_client)
-            logger.info(
-                "Cleared baseline training cutoff (was %s)",
-                previous.last_trained_data_cutoff,
-            )
+    flags_cleared = 0
+    if not dry_run:
+        flags_cleared = get_split_registry(db_client, split_version=split_version).clear_processed(
+            flag_column=PROCESSED_FLAG_BASELINE,
+        )
+        logger.info(
+            "Cleared baseline processed flags split_version=%s updated=%s",
+            split_version,
+            flags_cleared,
+        )
 
     return BaselineTrainingResetResult(
-        previous_cutoff=previous.last_trained_data_cutoff,
         archived_versions=tuple(archived_versions),
-        cutoff_cleared=cutoff_cleared,
         models_archived=len(archived_versions),
+        flags_cleared=flags_cleared,
     )

@@ -115,7 +115,7 @@ def _metrics(*, top1: float, agree: float, disagree: float) -> EvalMetrics:
     )
 
 
-def test_format_eval_delta_signs_and_informational_flags() -> None:
+def test_format_eval_delta_includes_t3_and_small_agree_drop_ok() -> None:
     text = format_eval_delta(
         _metrics(top1=0.42, agree=0.70, disagree=0.22),
         _metrics(top1=0.40, agree=0.71, disagree=0.20),
@@ -123,7 +123,20 @@ def test_format_eval_delta_signs_and_informational_flags() -> None:
     assert "top1=+0.0200" in text
     assert "agree_t1=-0.0100" in text
     assert "disagree_t1=+0.0200" in text
+    assert "disagree_t3=" in text
     assert "informational_beats_top1=true" in text
+    assert "informational_beats_disagree=true" in text
+    assert "informational_beats_disagree_t3=" in text
+    assert "agree_guardrail_ok=true" in text
+
+
+def test_format_eval_delta_agree_guardrail_fails_on_large_drop() -> None:
+    text = format_eval_delta(
+        _metrics(top1=0.45, agree=0.60, disagree=0.30),
+        _metrics(top1=0.40, agree=0.71, disagree=0.20),
+    )
+    assert "agree_t1=-0.1100" in text
+    assert "agree_guardrail_ok=false" in text
     assert "informational_beats_disagree=true" in text
 
 

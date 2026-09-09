@@ -1,7 +1,7 @@
 """Sweep Keras epochs on a frozen registry split; report stratified val metrics.
 
-Cold-starts a fresh model per epoch count. Train games stay in train; val is the
-persistent registry val subset of the loaded sample (not move-level 80/20).
+Cold-starts a fresh model per epoch count. Train/val are lowest-``game_id``
+prefixes of the persistent registry buckets (complete games; not a timestamp sample).
 
 Use to pick ``BaselineTrainer.DEFAULT_EPOCHS``. Smoke: ``--limit 2000``.
 Decisions: ``--limit 10000+``. Does **not** touch production pipelines.
@@ -36,7 +36,7 @@ from chess_teacher.pipelines.neural_network.eval_metrics import (
     compute_candidate_style_metrics,
     format_eval_metrics,
 )
-from chess_teacher.pipelines.neural_network.offline_eval import load_registry_split
+from chess_teacher.pipelines.neural_network.offline_eval import load_registry_prefix_split
 from chess_teacher.pipelines.neural_network.ply_weights import candidate_style_sample_weights
 from chess_teacher.pipelines.neural_network.splits import DEFAULT_SPLIT_SALT, format_split_summary
 from chess_teacher.pipelines.neural_network.tf_runtime import ensure_tensorflow_logging
@@ -100,8 +100,8 @@ def run_sweep(
     style_disagree_scale: float,
 ) -> int:
     db = get_db_client()
-    logger.info("Loading datums limit=%s (cutoff=None for experiment sample)…", limit)
-    split = load_registry_split(db, limit=limit, split_version=salt)
+    logger.info("Loading registry game_id prefixes limit=%s/bucket salt=%s…", limit, salt)
+    split = load_registry_prefix_split(db, limit=limit, split_version=salt)
     print("\n" + format_split_summary(split))
 
     train = split.train_datums

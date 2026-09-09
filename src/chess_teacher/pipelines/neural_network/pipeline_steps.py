@@ -16,8 +16,11 @@ from chess_teacher.pipelines.neural_network.mlflow_utils import MLflowTracker
 from chess_teacher.pipelines.neural_network.models import (
     BaselineModel,
     BaselineModelStatus,
+    GameSplitAssignment,
     TrainingState,
 )
+from chess_teacher.pipelines.neural_network.split_registry import SplitRegistry
+from chess_teacher.pipelines.neural_network.splits import DEFAULT_SPLIT_SALT
 from chess_teacher.pipelines.neural_network.train import BaselineTrainer
 from chess_teacher.pipelines.preprocessing.games import Game
 from chess_teacher.pipelines.preprocessing.moves import Move, MoveCharacteristics
@@ -28,9 +31,9 @@ from chess_teacher.utils.pipeline_utils.pipeline_base import PipelineContext, Pi
 
 logger = get_logger()
 
-# Train only when at least this many new moves exist since last cutoff.
+# Train only when at least this many unprocessed train moves sit on the queue.
 MIN_NEW_MOVES_BASELINE = 1000
-# Cap each incremental train batch (oldest-first); avoids first-run OOM on huge backlog.
+# Cap each incremental train batch (complete games by game_id); avoids first-run OOM.
 MAX_MOVES_PER_BASELINE_BATCH = 10_000
 
 
@@ -39,51 +42,53 @@ def _should_skip(context: PipelineContext) -> bool:
 
 
 class CheckSufficientNewDataStep(PipelineStep):
-    """No-op remaining steps when new moves since cutoff < MIN_NEW_MOVES_BASELINE."""
+    """No-op remaining steps when unprocessed train moves < MIN_NEW_MOVES_BASELINE."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, split_version: str = DEFAULT_SPLIT_SALT) -> None:
         super().__init__(name="CheckSufficientNewData")
+        self.split_version = split_version
 
     def run(self, db_client: DatabaseClient, context: PipelineContext) -> None:
         db_client.ensure_metadata(BaselineModel.get_metadata())
         db_client.ensure_metadata(TrainingState.get_metadata())
+        db_client.ensure_metadata(GameSplitAssignment.get_metadata())
         db_client.ensure_tables(
             Move.get_metadata(),
             Game.get_metadata(),
             MoveCharacteristics.get_metadata(),
         )
         state = TrainingState.for_baseline(db_client)
-        cutoff = state.last_trained_data_cutoff
         store = TrainingDataStore(db_client)
         logger.info(
-            "Counting eligible training moves (needs characteristics + candidate_evaluations; "
-            "cutoff=%s) — may take a while…",
-            cutoff,
+            "Counting unprocessed train moves (bucket=train, flag NULL, "
+            "split_version=%s) - may take a while...",
+            self.split_version,
         )
-        n_new = store.count_since(cutoff)
+        n_new = store.count_unprocessed_train(split_version=self.split_version)
         min_needed = MIN_NEW_MOVES_BASELINE
         updated = state.with_check_at(get_current_datetime())
         updated.save_to_db(db_client)
 
         context.extras["training_state"] = updated
+        context.extras["split_version"] = self.split_version
         context.extras["new_move_count"] = n_new
         context.extras["min_new_moves"] = min_needed
 
         if n_new < min_needed:
             logger.info(
-                "Baseline training skip: new_moves=%s < min=%s cutoff=%s",
+                "Baseline training skip: unprocessed_train=%s < min=%s split_version=%s",
                 n_new,
                 min_needed,
-                cutoff,
+                self.split_version,
             )
             context.extras["baseline_skip"] = True
             return
 
         logger.info(
-            "Baseline training proceed: new_moves=%s >= min=%s cutoff=%s",
+            "Baseline training proceed: unprocessed_train=%s >= min=%s split_version=%s",
             n_new,
             min_needed,
-            cutoff,
+            self.split_version,
         )
         context.extras["baseline_skip"] = False
 
@@ -122,33 +127,35 @@ class LoadPreviousCandidateWeightsStep(PipelineStep):
 
 
 class LoadNewDataStep(PipelineStep):
-    """Load incremental training datums since last cutoff (oldest first)."""
+    """Load next unprocessed train games in game_id order (complete games)."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, split_version: str = DEFAULT_SPLIT_SALT) -> None:
         super().__init__(name="LoadNewData")
+        self.split_version = split_version
 
     def run(self, db_client: DatabaseClient, context: PipelineContext) -> None:
         if _should_skip(context):
             return
 
-        state: TrainingState = context.extras["training_state"]
+        split_version = str(context.extras.get("split_version") or self.split_version)
         limit = MAX_MOVES_PER_BASELINE_BATCH
         logger.info(
-            "Loading training datums from DB (oldest-first, limit=%s, cutoff=%s) — "
-            "SQL + hydrate characteristics…",
+            "Loading unprocessed train datums (game_id order, limit=%s, "
+            "split_version=%s) - SQL + hydrate characteristics...",
             limit,
-            state.last_trained_data_cutoff,
+            split_version,
         )
-        datums, max_end_time = TrainingDataStore(db_client).fetch_since(
-            state.last_trained_data_cutoff,
+        datums, game_ids = TrainingDataStore(db_client).fetch_unprocessed_train_batch(
+            split_version=split_version,
             limit=limit,
         )
         context.extras["training_datums"] = datums
-        context.extras["batch_data_cutoff_at"] = max_end_time
+        context.extras["batch_game_ids"] = game_ids
+        context.extras["split_version"] = split_version
         logger.info(
-            "Loaded training datums=%s batch_cutoff=%s limit=%s",
+            "Loaded training datums=%s games=%s limit=%s",
             len(datums),
-            max_end_time,
+            len(game_ids),
             limit,
         )
         if not datums:
@@ -252,24 +259,28 @@ class LogToMLflowStep(PipelineStep):
 
 
 class UpdateTrainingStateStep(PipelineStep):
-    """Advance baseline data cutoff after a successful train."""
+    """Mark batch game_ids processed after a successful fit. Skip must not mark."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, split_version: str = DEFAULT_SPLIT_SALT) -> None:
         super().__init__(name="UpdateTrainingState")
+        self.split_version = split_version
 
     def run(self, db_client: DatabaseClient, context: PipelineContext) -> None:
         if _should_skip(context):
             return
 
-        data_cutoff_at: datetime | None = context.extras.get("batch_data_cutoff_at")
-        if data_cutoff_at is None:
-            logger.warning("No batch_data_cutoff_at; training_state cutoff unchanged.")
+        game_ids: list[str] = list(context.extras.get("batch_game_ids") or [])
+        if not game_ids:
+            logger.warning("No batch_game_ids; processed flags unchanged.")
             return
 
-        previous: TrainingState = context.extras.get(
-            "training_state"
-        ) or TrainingState.for_baseline(db_client)
-        state = previous.with_cutoff(data_cutoff_at)
-        state.save_to_db(db_client)
-        context.extras["training_state"] = state
-        logger.info("Updated baseline training_state cutoff=%s", data_cutoff_at)
+        split_version = str(context.extras.get("split_version") or self.split_version)
+        registry = SplitRegistry(db_client, split_version=split_version)
+        updated = registry.mark_processed(game_ids)
+        context.extras["marked_game_count"] = updated
+        logger.info(
+            "Marked already_processed_baseline on %s/%s train games (split_version=%s)",
+            updated,
+            len(game_ids),
+            split_version,
+        )

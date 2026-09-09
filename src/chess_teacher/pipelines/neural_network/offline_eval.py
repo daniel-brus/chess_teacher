@@ -11,27 +11,34 @@ from chess_teacher.pipelines.neural_network.create_training_set import (
     TrainingDatum,
 )
 from chess_teacher.pipelines.neural_network.models import BaselineModel, BaselineModelStatus
-from chess_teacher.pipelines.neural_network.split_registry import get_split_registry
 from chess_teacher.pipelines.neural_network.splits import (
     DEFAULT_SPLIT_SALT,
     GameSplitResult,
     SplitBucket,
+    game_split_result,
 )
 from chess_teacher.utils.db.client import DatabaseClient, get_db_client
 
 
-def load_registry_split(
+def load_registry_bucket_datums(
     db_client: DatabaseClient | None = None,
     *,
-    limit: int,
+    bucket: SplitBucket,
     split_version: str = DEFAULT_SPLIT_SALT,
-    assign_if_missing: bool = True,
-) -> GameSplitResult:
-    """Fetch a cutoff-free sample and partition it via the persistent registry."""
+    limit: int | None = None,
+    extra_where: str | None = None,
+) -> list[TrainingDatum]:
+    """Eligible moves for one registry bucket, lowest ``game_id`` first.
+
+    ``limit`` is a complete-game move cap. ``None`` loads the whole bucket.
+    """
     db = db_client or get_db_client()
-    datums, _cutoff = TrainingDataStore(db).fetch_since(None, limit=limit)
-    registry = get_split_registry(db, split_version=split_version)
-    return registry.split_datums(datums, assign_if_missing=assign_if_missing)
+    return TrainingDataStore(db).fetch_registry_bucket_batch(
+        split_version=split_version,
+        bucket=bucket.value,
+        limit=limit,
+        extra_where=extra_where,
+    )
 
 
 def load_registry_val_datums(
@@ -40,23 +47,56 @@ def load_registry_val_datums(
     split_version: str = DEFAULT_SPLIT_SALT,
     limit: int | None = None,
     full: bool = False,
-    assign_if_missing: bool = True,
+    extra_where: str | None = None,
 ) -> list[TrainingDatum]:
-    """Load registry val moves: either a ``--limit`` sample or all val games."""
-    db = db_client or get_db_client()
+    """Load registry val: all games, or a lowest-``game_id`` complete-game prefix."""
     if full:
-        registry = get_split_registry(db, split_version=split_version)
-        game_ids = registry.fetch_game_ids_for_bucket(SplitBucket.VAL)
-        return TrainingDataStore(db).fetch_for_game_ids(game_ids)
-    if limit is None:
+        limit = None
+    elif limit is None:
         raise ValueError("limit is required unless full=True")
-    split = load_registry_split(
-        db,
-        limit=limit,
+    return load_registry_bucket_datums(
+        db_client,
+        bucket=SplitBucket.VAL,
         split_version=split_version,
-        assign_if_missing=assign_if_missing,
+        limit=limit,
+        extra_where=extra_where,
     )
-    return split.val_datums
+
+
+def load_registry_prefix_split(
+    db_client: DatabaseClient | None = None,
+    *,
+    limit: int,
+    split_version: str = DEFAULT_SPLIT_SALT,
+    include_test: bool = False,
+) -> GameSplitResult:
+    """Train/val (and optional test) prefixes from the registry, per bucket.
+
+    ``limit`` caps **each** bucket independently (complete games, ``game_id``
+    ASC). This is not a mixed timestamp sample.
+    """
+    db = db_client or get_db_client()
+    train = load_registry_bucket_datums(
+        db,
+        bucket=SplitBucket.TRAIN,
+        split_version=split_version,
+        limit=limit,
+    )
+    val = load_registry_bucket_datums(
+        db,
+        bucket=SplitBucket.VAL,
+        split_version=split_version,
+        limit=limit,
+    )
+    test: list[TrainingDatum] = []
+    if include_test:
+        test = load_registry_bucket_datums(
+            db,
+            bucket=SplitBucket.TEST,
+            split_version=split_version,
+            limit=limit,
+        )
+    return game_split_result(train, val, test, salt=split_version)
 
 
 def resolve_production_model_uri(db_client: DatabaseClient | None = None) -> str:

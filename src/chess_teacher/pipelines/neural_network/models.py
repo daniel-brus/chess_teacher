@@ -1,8 +1,4 @@
-"""DB row classes for baseline models and training bookkeeping.
-
-POC: ``BaselineModel`` rows / URIs (incl. v50/v51) are disposable. Phase 4
-starts a fresh train/promote chain — do not archaeology these artifacts.
-"""
+"""DB row classes for baseline models and training bookkeeping."""
 
 from __future__ import annotations
 
@@ -28,6 +24,18 @@ class BaselineModelStatus(StrEnum):
 
 
 BASELINE_TRAINING_SCOPE = "baseline"
+PROCESSED_FLAG_BASELINE = "already_processed_baseline"
+PROCESSED_FLAG_PERSONAL = "already_processed_personal"
+PROCESSED_FLAGS = frozenset({PROCESSED_FLAG_BASELINE, PROCESSED_FLAG_PERSONAL})
+
+
+def require_processed_flag(flag_column: str) -> str:
+    """Reject unknown processed-flag column names (SQL ident safety)."""
+    if flag_column not in PROCESSED_FLAGS:
+        raise ValueError(
+            f"flag_column must be one of {sorted(PROCESSED_FLAGS)}, got {flag_column!r}"
+        )
+    return flag_column
 
 
 @dataclass(frozen=True)
@@ -196,7 +204,6 @@ class BaselineModel(TableDataClass):
 @dataclass(frozen=True)
 class TrainingState(TableDataClass):
     scope: str
-    last_trained_data_cutoff: datetime | None = None
     last_min_data_check_at: datetime | None = None
 
     @classmethod
@@ -230,14 +237,6 @@ class TrainingState(TableDataClass):
     def with_check_at(self, checked_at: datetime | None = None) -> TrainingState:
         return TrainingState(
             scope=self.scope,
-            last_trained_data_cutoff=self.last_trained_data_cutoff,
-            last_min_data_check_at=checked_at or get_current_datetime(),
-        )
-
-    def with_cutoff(self, cutoff: datetime, *, checked_at: datetime | None = None) -> TrainingState:
-        return TrainingState(
-            scope=self.scope,
-            last_trained_data_cutoff=cutoff,
             last_min_data_check_at=checked_at or get_current_datetime(),
         )
 

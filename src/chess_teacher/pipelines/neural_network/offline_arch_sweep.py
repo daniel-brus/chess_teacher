@@ -19,7 +19,7 @@ from chess_teacher.pipelines.neural_network.eval_metrics import (
     evaluate_datums,
     format_eval_metrics,
 )
-from chess_teacher.pipelines.neural_network.offline_eval import load_registry_split
+from chess_teacher.pipelines.neural_network.offline_eval import load_registry_prefix_split
 from chess_teacher.pipelines.neural_network.splits import DEFAULT_SPLIT_SALT, format_split_summary
 from chess_teacher.pipelines.neural_network.train import BaselineTrainer
 from chess_teacher.utils.db.client import get_db_client
@@ -53,17 +53,17 @@ def run_arch_sweep(
 ) -> int:
     db = get_db_client()
     logger.info(
-        "Loading registry split once limit=%s split_version=%s feat_version=%s feat_dim=%s...",
+        "Loading registry game_id prefixes once limit=%s/bucket split_version=%s "
+        "feat_version=%s feat_dim=%s...",
         limit,
         split_version,
         CANDIDATE_MOVE_FEAT_VERSION,
         MOVE_FEAT_DIM,
     )
-    split = load_registry_split(
+    split = load_registry_prefix_split(
         db,
         limit=limit,
         split_version=split_version,
-        assign_if_missing=False,
     )
     print("\n" + format_split_summary(split))
     train = split.train_datums

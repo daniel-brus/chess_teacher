@@ -87,7 +87,7 @@ def test_run_arch_sweep_cold_starts_each_cell(
 
     split = _split()
     load = MagicMock(return_value=split)
-    monkeypatch.setattr(offline_arch_sweep, "load_registry_split", load)
+    monkeypatch.setattr(offline_arch_sweep, "load_registry_prefix_split", load)
     monkeypatch.setattr(offline_arch_sweep, "get_db_client", lambda: MagicMock())
     monkeypatch.setattr(offline_arch_sweep, "BaselineTrainer", FakeTrainer)
 
@@ -109,7 +109,9 @@ def test_run_arch_sweep_cold_starts_each_cell(
     )
 
     load.assert_called_once()
-    assert load.call_args.kwargs["assign_if_missing"] is False
+    assert load.call_args.kwargs["limit"] == 200
+    assert load.call_args.kwargs["split_version"] == "baseline-v1"
+    assert "assign_if_missing" not in load.call_args.kwargs
     assert len(created) == 4
     assert fit_parents == [None, None, None, None]
     assert fit_datums == [split.train_datums] * 4

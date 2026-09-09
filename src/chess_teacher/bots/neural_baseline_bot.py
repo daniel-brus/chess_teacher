@@ -148,8 +148,18 @@ class NeuralBaselineBot(ChessBot):
 
         x_state = np.asarray(state, dtype=np.float32)[None, :]
         x_feats = feats[None, :, :]
+        feed: dict[str, np.ndarray] = {"state": x_state, "move_feats": x_feats}
+        # Hybrid Phase 2c models also take board (8,8,C); MLP baselines omit it.
+        input_names = {
+            (getattr(inp, "name", "") or "").split(":")[0]
+            for inp in (getattr(self._model, "inputs", None) or [])
+        }
+        if "board" in input_names:
+            from chess_teacher.pipelines.neural_network.board_tensor import fen_to_board_tensor
+
+            feed["board"] = fen_to_board_tensor(fen)[None, ...]
         logits = np.asarray(
-            self._model.predict({"state": x_state, "move_feats": x_feats}, verbose=0),
+            self._model.predict(feed, verbose=0),
             dtype=np.float64,
         )[0]
         n = len(ucis)

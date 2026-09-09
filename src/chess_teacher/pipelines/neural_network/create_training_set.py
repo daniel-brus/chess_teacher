@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import time
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from datetime import datetime
@@ -11,27 +10,32 @@ from typing import Any, Literal
 import chess
 import numpy as np
 
+from chess_teacher.pipelines.neural_network.models import (
+    PROCESSED_FLAG_BASELINE,
+    GameSplitAssignment,
+    require_processed_flag,
+)
 from chess_teacher.pipelines.neural_network.move_encoding import (
     POLICY_VOCAB_SIZE,
     MoveEncoder,
 )
+from chess_teacher.pipelines.neural_network.splits import SplitBucket
 from chess_teacher.pipelines.preprocessing.games import Game
 from chess_teacher.pipelines.preprocessing.moves import Move, MoveCharacteristics
 from chess_teacher.utils.chess_utils import Color
 from chess_teacher.utils.db.client import DatabaseClient, get_db_client
-from chess_teacher.utils.general_utils import generate_ident_is_literal, quote_literal
+from chess_teacher.utils.general_utils import generate_ident_is_literal, quote_ident, quote_literal
 from chess_teacher.utils.logging import get_logger
-from chess_teacher.utils.process_utils import snapshot_host_pressure
 
 logger = get_logger()
 
-# Shared FROM/WHERE for moves that have complete expensive characteristics + known end_time.
-_SQL_MOVES_WITH_CHARS = f"""
+# Shared FROM/WHERE for moves that have characteristics + candidate SF evals + known end_time.
+_SQL_MOVES_WITH_CHARS = """
             FROM games.moves m
             INNER JOIN games.games g ON g.game_id = m.game_id
             INNER JOIN games.move_characteristics mc ON mc.move_id = m.move_id
             WHERE g.end_time IS NOT NULL
-              AND {MoveCharacteristics.sql_expensive_complete("mc")}
+              AND mc.candidate_evaluations IS NOT NULL
 """
 
 # Large move_characteristics JSONB + parallel hash join can OOM Postgres workers on
@@ -45,6 +49,14 @@ def _with_extra_where(sql: str, extra_where: str | None) -> str:
     if not fragment:
         return sql
     return f"{sql} AND ({fragment})"
+
+
+def account_id_in_sql(account_ids: Sequence[str]) -> str:
+    """``g.account_id IN (...)`` from linked account ids. Empty ids match nothing."""
+    unique = sorted({aid for aid in account_ids if aid})
+    if not unique:
+        return "1 = 0"
+    return "g.account_id IN (" + ", ".join(quote_literal(aid) for aid in unique) + ")"
 
 
 # Domain scales tuned against local games.move_characteristics (n=825, dev_local).
@@ -923,7 +935,6 @@ class TrainingBatch:
         )
 
         n = len(self.datums)
-        pack_t0 = time.monotonic()
         logger.info(
             "Packing candidate-style targets for %s datums (feat_dim=%s, max_candidates=%s)…",
             n,
@@ -953,23 +964,12 @@ class TrainingBatch:
                     len(kept),
                 )
         if not feats_list:
-            logger.info(
-                "Packed candidate-style targets kept=0 dropped=%s duration_s=%.2f",
-                n,
-                time.monotonic() - pack_t0,
-            )
             return (
                 np.zeros((0, MAX_CANDIDATES, MOVE_FEAT_DIM), dtype=np.float32),
                 np.zeros((0, MAX_CANDIDATES), dtype=np.float32),
                 np.zeros((0,), dtype=np.int32),
                 [],
             )
-        logger.info(
-            "Packed candidate-style targets kept=%s dropped=%s duration_s=%.2f",
-            len(kept),
-            n - len(kept),
-            time.monotonic() - pack_t0,
-        )
         return (
             np.stack(feats_list, axis=0),
             np.stack(mask_list, axis=0),
@@ -1005,6 +1005,9 @@ class TrainingBatch:
 class TrainingDataStore:
     """Load training datums from Postgres (platform-wide or per account)."""
 
+    # Giant ``IN (...)`` hydrates OOM Postgres (seen at ~45k moves). Chunk.
+    HYDRATE_MOVE_BATCH = 2000
+
     def __init__(self, db_client: DatabaseClient | None = None) -> None:
         self._db = db_client or get_db_client()
 
@@ -1014,6 +1017,57 @@ class TrainingDataStore:
             Game.get_metadata(),
             MoveCharacteristics.get_metadata(),
         )
+
+    def _ensure_queue_tables(self) -> None:
+        self._ensure_training_tables()
+        self._db.ensure_metadata(GameSplitAssignment.get_metadata())
+
+    def _unprocessed_train_from_sql(
+        self,
+        *,
+        split_version: str,
+        flag_column: str,
+        extra_where: str | None = None,
+    ) -> tuple[str, dict[str, Any]]:
+        """Eligible moves on registry train rows whose processed flag is NULL."""
+        flag = require_processed_flag(flag_column)
+        sql = f"""
+            FROM games.moves m
+            INNER JOIN games.games g ON g.game_id = m.game_id
+            INNER JOIN games.move_characteristics mc ON mc.move_id = m.move_id
+            INNER JOIN ml.game_split_assignments gs
+              ON gs.game_id = g.game_id
+             AND gs.split_version = :split_version
+            WHERE g.end_time IS NOT NULL
+              AND mc.candidate_evaluations IS NOT NULL
+              AND gs.bucket = 'train'
+              AND gs.{quote_ident(flag)} IS NULL
+"""
+        sql = _with_extra_where(sql, extra_where)
+        return sql, {"split_version": split_version}
+
+    def _registry_bucket_from_sql(
+        self,
+        *,
+        split_version: str,
+        bucket: str,
+        extra_where: str | None = None,
+    ) -> tuple[str, dict[str, Any]]:
+        """Eligible moves on registry rows for one bucket (no processed-flag filter)."""
+        bucket_name = SplitBucket(bucket).value
+        sql = """
+            FROM games.moves m
+            INNER JOIN games.games g ON g.game_id = m.game_id
+            INNER JOIN games.move_characteristics mc ON mc.move_id = m.move_id
+            INNER JOIN ml.game_split_assignments gs
+              ON gs.game_id = g.game_id
+             AND gs.split_version = :split_version
+            WHERE g.end_time IS NOT NULL
+              AND mc.candidate_evaluations IS NOT NULL
+              AND gs.bucket = :bucket
+"""
+        sql = _with_extra_where(sql, extra_where)
+        return sql, {"split_version": split_version, "bucket": bucket_name}
 
     def _query_moves_sql(
         self,
@@ -1029,7 +1083,6 @@ class TrainingDataStore:
     def _datums_from_moves(self, moves: list[Move]) -> list[TrainingDatum]:
         if not moves:
             return []
-        hydrate_t0 = time.monotonic()
         self._ensure_training_tables()
         game_ids = sorted({m.game_id for m in moves})
         move_ids = [m.move_id for m in moves]
@@ -1070,13 +1123,6 @@ class TrainingDataStore:
                 )
             except ValueError:
                 continue
-        logger.info(
-            "Hydrated TrainingDatum rows=%s from moves=%s duration_s=%.2f %s",
-            len(datums),
-            len(moves),
-            time.monotonic() - hydrate_t0,
-            snapshot_host_pressure().format_fields(),
-        )
         return datums
 
     def _datums_for_move_ids(self, move_ids: list[str]) -> list[TrainingDatum]:
@@ -1087,15 +1133,20 @@ class TrainingDataStore:
             "Hydrating %s moves into TrainingDatum (moves + characteristics + games)…",
             len(move_ids),
         )
-        move_id_list = ", ".join(quote_literal(mid) for mid in move_ids)
-        moves = Move.fetch_all_from_db(
-            self._db,
-            columns=_MOVE_TRAINING_COLUMNS,
-            where=f'"move_id" IN ({move_id_list})',
-        )
-        by_id = {m.move_id: m for m in moves}
-        ordered_moves = [by_id[mid] for mid in move_ids if mid in by_id]
-        return self._datums_from_moves(ordered_moves)
+        batch = max(1, int(self.HYDRATE_MOVE_BATCH))
+        datums: list[TrainingDatum] = []
+        for offset in range(0, len(move_ids), batch):
+            chunk = move_ids[offset : offset + batch]
+            move_id_list = ", ".join(quote_literal(mid) for mid in chunk)
+            moves = Move.fetch_all_from_db(
+                self._db,
+                columns=_MOVE_TRAINING_COLUMNS,
+                where=f'"move_id" IN ({move_id_list})',
+            )
+            by_id = {m.move_id: m for m in moves}
+            ordered_moves = [by_id[mid] for mid in chunk if mid in by_id]
+            datums.extend(self._datums_from_moves(ordered_moves))
+        return datums
 
     def fetch_one(self, move_id: str) -> TrainingDatum:
         move = Move.fetch_from_db(self._db, id=move_id, columns=_MOVE_TRAINING_COLUMNS)
@@ -1133,103 +1184,175 @@ class TrainingDataStore:
         )
         return self._datums_from_moves(moves)
 
-    def count_since(
+    def count_unprocessed_train(
         self,
-        cutoff: datetime | None,
         *,
+        split_version: str,
+        flag_column: str = PROCESSED_FLAG_BASELINE,
         extra_where: str | None = None,
     ) -> int:
-        """Count platform moves with characteristics and ``games.end_time`` after cutoff.
-
-        ``extra_where`` is an optional SQL fragment (no leading AND) appended as
-        ``AND (...)``. Default ``None`` leaves production callers unchanged.
-        """
-        self._ensure_training_tables()
-        sql = f"SELECT COUNT(*) AS n{_SQL_MOVES_WITH_CHARS}"
-        params: dict[str, Any] = {}
-        if cutoff is not None:
-            sql += " AND g.end_time > :cutoff"
-            params["cutoff"] = cutoff
-        sql = _with_extra_where(sql, extra_where)
-        count_t0 = time.monotonic()
-        rows = self._query_moves_sql(sql, params)
-        n = int(rows[0]["n"]) if rows else 0
-        logger.info(
-            "count_since cutoff=%s extra_where=%s n=%s duration_s=%.2f",
-            cutoff,
-            extra_where or "-",
-            n,
-            time.monotonic() - count_t0,
+        """Count eligible unprocessed **train** moves (registry bucket + flag NULL)."""
+        self._ensure_queue_tables()
+        from_sql, params = self._unprocessed_train_from_sql(
+            split_version=split_version,
+            flag_column=flag_column,
+            extra_where=extra_where,
         )
-        return n
+        sql = f"SELECT COUNT(*) AS n{from_sql}"
+        rows = self._query_moves_sql(sql, params)
+        return int(rows[0]["n"]) if rows else 0
 
-    def fetch_since(
+    def fetch_unprocessed_train_batch(
         self,
-        cutoff: datetime | None,
         *,
-        limit: int | None = None,
+        split_version: str,
+        limit: int,
+        flag_column: str = PROCESSED_FLAG_BASELINE,
         extra_where: str | None = None,
-    ) -> tuple[list[TrainingDatum], datetime | None]:
-        """Load new rows ordered by ``games.end_time`` (oldest first).
+    ) -> tuple[list[TrainingDatum], list[str]]:
+        """Next complete train games in ``game_id`` order, up to ``limit`` moves.
 
-        Returns ``(datums, max_end_time)``.
-
-        When ``limit`` truncates mid-``end_time`` group (all moves in a game share
-        ``games.end_time``), the batch is expanded to include **every** move at
-        that boundary timestamp so the next cutoff ``end_time > max`` cannot skip
-        the rest of the game / same-second games.
-
-        ``extra_where`` is applied to the main query and the boundary expand.
-        Default ``None`` leaves production callers unchanged.
+        Never selects val/test. Last game is expanded so a round never splits
+        a game. Returns ``(datums, game_ids)``. Caller marks ``game_ids`` only
+        after a successful fit.
         """
-        self._ensure_training_tables()
-        sql = f"SELECT m.move_id AS move_id, g.end_time AS end_time{_SQL_MOVES_WITH_CHARS}"
-        params: dict[str, Any] = {}
-        if cutoff is not None:
-            sql += " AND g.end_time > :cutoff"
-            params["cutoff"] = cutoff
-        sql = _with_extra_where(sql, extra_where)
-        sql += " ORDER BY g.end_time ASC, m.game_id ASC, m.move_nr ASC"
-        if limit is not None:
-            sql += " LIMIT :limit"
-            params["limit"] = limit
-
+        if limit <= 0:
+            return [], []
+        self._ensure_queue_tables()
+        from_sql, params = self._unprocessed_train_from_sql(
+            split_version=split_version,
+            flag_column=flag_column,
+            extra_where=extra_where,
+        )
+        sql = (
+            f"SELECT m.move_id AS move_id, g.game_id AS game_id{from_sql} "
+            "ORDER BY g.game_id ASC, m.move_nr ASC LIMIT :limit"
+        )
+        params = {**params, "limit": int(limit)}
         logger.info(
-            "Querying training move ids (cutoff=%s limit=%s)…",
-            cutoff,
+            "Querying unprocessed train move ids (split_version=%s flag=%s limit=%s)...",
+            split_version,
+            flag_column,
             limit,
         )
-        fetch_t0 = time.monotonic()
         rows = self._query_moves_sql(sql, params)
         if not rows:
-            logger.info(
-                "Querying training move ids found 0 rows duration_s=%.2f",
-                time.monotonic() - fetch_t0,
-            )
-            return [], None
+            return [], []
 
-        # LIMIT may cut inside a shared end_time group - finish that group.
-        if limit is not None and len(rows) >= limit:
-            max_end_time = max(r["end_time"] for r in rows if r["end_time"] is not None)
-            prefix = [r for r in rows if r["end_time"] is not None and r["end_time"] < max_end_time]
-            expand_sql = _with_extra_where(
-                f"SELECT m.move_id AS move_id, g.end_time AS end_time{_SQL_MOVES_WITH_CHARS}"
-                " AND g.end_time = :boundary",
-                extra_where,
+        if len(rows) >= int(limit):
+            boundary_gid = str(rows[-1]["game_id"])
+            prefix = [r for r in rows if str(r["game_id"]) != boundary_gid]
+            expand_sql = (
+                f"SELECT m.move_id AS move_id, g.game_id AS game_id{_SQL_MOVES_WITH_CHARS} "
+                "AND g.game_id = :boundary_game"
             )
-            expand_sql += " ORDER BY m.game_id ASC, m.move_nr ASC"
-            at_boundary = self._query_moves_sql(expand_sql, {"boundary": max_end_time})
+            expand_sql = _with_extra_where(expand_sql, extra_where)
+            expand_sql += " ORDER BY m.move_nr ASC"
+            at_boundary = self._query_moves_sql(
+                expand_sql,
+                {"boundary_game": boundary_gid},
+            )
             rows = prefix + list(at_boundary)
 
         move_ids = [str(r["move_id"]) for r in rows]
-        end_times = [r["end_time"] for r in rows if r["end_time"] is not None]
-        max_end_time = max(end_times) if end_times else None
-        logger.info(
-            "Fetched training move ids=%s duration_s=%.2f; hydrating…",
-            len(move_ids),
-            time.monotonic() - fetch_t0,
+        sql_game_ids: list[str] = []
+        sql_seen: set[str] = set()
+        for row in rows:
+            gid = str(row["game_id"])
+            if gid and gid not in sql_seen:
+                sql_seen.add(gid)
+                sql_game_ids.append(gid)
+
+        datums = self._datums_for_move_ids(move_ids)
+        game_ids: list[str] = []
+        datum_seen: set[str] = set()
+        for datum in datums:
+            gid = str(datum.game_id)
+            if gid and gid not in datum_seen:
+                datum_seen.add(gid)
+                game_ids.append(gid)
+
+        dropped = [gid for gid in sql_game_ids if gid not in datum_seen]
+        if dropped:
+            logger.warning(
+                "Hydrate produced 0 datums for %s/%s selected train games; "
+                "not returning those game_ids for mark: %s",
+                len(dropped),
+                len(sql_game_ids),
+                dropped[:20],
+            )
+        return datums, game_ids
+
+    def fetch_registry_bucket_batch(
+        self,
+        *,
+        split_version: str,
+        bucket: str,
+        limit: int | None = None,
+        extra_where: str | None = None,
+    ) -> list[TrainingDatum]:
+        """Eligible moves for one registry bucket in ``game_id`` order.
+
+        ``limit`` caps complete games (never splits a game). ``None`` loads the
+        whole bucket. Does not filter processed flags.
+        """
+        if limit is not None and limit <= 0:
+            return []
+        self._ensure_queue_tables()
+        from_sql, params = self._registry_bucket_from_sql(
+            split_version=split_version,
+            bucket=bucket,
+            extra_where=extra_where,
         )
-        return self._datums_for_move_ids(move_ids), max_end_time
+        sql = (
+            f"SELECT m.move_id AS move_id, g.game_id AS game_id{from_sql} "
+            "ORDER BY g.game_id ASC, m.move_nr ASC"
+        )
+        if limit is not None:
+            sql += " LIMIT :limit"
+            params = {**params, "limit": int(limit)}
+        logger.info(
+            "Querying registry bucket move ids (split_version=%s bucket=%s limit=%s)...",
+            split_version,
+            SplitBucket(bucket).value,
+            limit,
+        )
+        rows = self._query_moves_sql(sql, params)
+        if not rows:
+            return []
+
+        if limit is not None and len(rows) >= int(limit):
+            boundary_gid = str(rows[-1]["game_id"])
+            prefix = [r for r in rows if str(r["game_id"]) != boundary_gid]
+            expand_sql = (
+                f"SELECT m.move_id AS move_id, g.game_id AS game_id{_SQL_MOVES_WITH_CHARS} "
+                "AND g.game_id = :boundary_game"
+            )
+            expand_sql = _with_extra_where(expand_sql, extra_where)
+            expand_sql += " ORDER BY m.move_nr ASC"
+            at_boundary = self._query_moves_sql(
+                expand_sql,
+                {"boundary_game": boundary_gid},
+            )
+            rows = prefix + list(at_boundary)
+
+        move_ids = [str(r["move_id"]) for r in rows]
+        return self._datums_for_move_ids(move_ids)
+
+    def fetch_split_val_datums(
+        self,
+        *,
+        split_version: str,
+        extra_where: str | None = None,
+        limit: int | None = None,
+    ) -> list[TrainingDatum]:
+        """Registry ``bucket=val`` games in ``game_id`` order."""
+        return self.fetch_registry_bucket_batch(
+            split_version=split_version,
+            bucket=SplitBucket.VAL.value,
+            limit=limit,
+            extra_where=extra_where,
+        )
 
     def fetch_random(
         self,
@@ -1283,6 +1406,66 @@ class TrainingDataStore:
             rows = self._query_moves_sql(sql, {})
             move_ids.extend(str(r["move_id"]) for r in rows)
         return self._datums_for_move_ids(move_ids)
+
+    def fetch_end_times(self, game_ids: Sequence[str]) -> dict[str, datetime]:
+        """Map unique ``game_id`` -> ``end_time``; skip rows with NULL end_time."""
+        unique = sorted({gid for gid in game_ids if gid})
+        if not unique:
+            return {}
+        self._ensure_training_tables()
+        out: dict[str, datetime] = {}
+        batch_size = 500
+        for offset in range(0, len(unique), batch_size):
+            chunk = unique[offset : offset + batch_size]
+            game_id_list = ", ".join(quote_literal(gid) for gid in chunk)
+            rows = self._db.read(
+                Game.get_metadata(),
+                columns=["game_id", "end_time"],
+                where=f'"game_id" IN ({game_id_list})',
+            )
+            for row in rows:
+                end_time = row.get("end_time")
+                if end_time is None:
+                    continue
+                out[str(row["game_id"])] = end_time
+        return out
+
+    def fetch_account_game_end_times(self, account_id: str) -> dict[str, datetime]:
+        """Eligible-move games for one account: ``game_id`` -> ``end_time``.
+
+        Universe matches ``fetch_for_account`` (characteristics + candidate
+        evals + known ``end_time``), without hydrating datums or ply-capping.
+        """
+        self._ensure_training_tables()
+        account_pred = "g.account_id = " + quote_literal(account_id)
+        sql = (
+            "SELECT DISTINCT g.game_id AS game_id, g.end_time AS end_time"
+            f"{_SQL_MOVES_WITH_CHARS} AND ({account_pred})"
+        )
+        rows = self._query_moves_sql(sql, {})
+        out: dict[str, datetime] = {}
+        for row in rows:
+            end_time = row.get("end_time")
+            if end_time is None:
+                continue
+            out[str(row["game_id"])] = end_time
+        return out
+
+    def fetch_account_game_move_counts(self, account_id: str) -> dict[str, int]:
+        """Eligible-move counts per game for one account.
+
+        Same universe as ``fetch_account_game_end_times`` (characteristics +
+        candidate evals + known ``end_time``), without hydrating datums.
+        """
+        self._ensure_training_tables()
+        account_pred = "g.account_id = " + quote_literal(account_id)
+        sql = (
+            "SELECT g.game_id AS game_id, COUNT(*) AS n_moves"
+            f"{_SQL_MOVES_WITH_CHARS} AND ({account_pred}) "
+            "GROUP BY g.game_id"
+        )
+        rows = self._query_moves_sql(sql, {})
+        return {str(row["game_id"]): int(row["n_moves"]) for row in rows}
 
 
 def training_datum_feature_keys() -> list[str]:
@@ -1361,35 +1544,14 @@ def fetch_training_data_for_account(
     return TrainingDataStore(db_client).fetch_for_account(account_id, limit=limit)
 
 
-def count_new_moves_since(
-    cutoff: datetime | None,
-    *,
-    db_client: DatabaseClient | None = None,
-    extra_where: str | None = None,
-) -> int:
-    return TrainingDataStore(db_client).count_since(cutoff, extra_where=extra_where)
-
-
-def fetch_training_data_since(
-    cutoff: datetime | None,
-    *,
-    db_client: DatabaseClient | None = None,
-    limit: int | None = None,
-    extra_where: str | None = None,
-) -> tuple[list[TrainingDatum], datetime | None]:
-    return TrainingDataStore(db_client).fetch_since(cutoff, limit=limit, extra_where=extra_where)
-
-
 __all__ = [
     "FeatureNormalizer",
     "TrainingBatch",
     "TrainingDataStore",
     "TrainingDatum",
     "TrainingDatumBuilder",
-    "count_new_moves_since",
     "derive_move_identity",
     "fetch_training_data_for_account",
-    "fetch_training_data_since",
     "fetch_training_datum",
     "move_in_database_to_training_datum",
     "remap_characteristics_to_user_pov",
