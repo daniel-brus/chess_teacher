@@ -8,7 +8,7 @@ base = "light"
 backgroundColor = "#FAFAFA"
 secondaryBackgroundColor = "#F0F0F0"
 textColor = "#262730"
-primaryColor = "#5C6BC0"
+primaryColor = "#3F51B5"
 
 [theme.dark]
 backgroundColor = "#0E1117"

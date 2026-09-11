@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, field
 from datetime import date, datetime, time
@@ -131,6 +132,33 @@ def _to_records(data: list[dict] | pl.DataFrame) -> list[dict]:
     if isinstance(data, list):
         return data
     raise TypeError(f"Expected list[dict] or pl.DataFrame, got {type(data)}")
+
+
+def _prepare_records_for_copy(records: list[dict], table: TableMetadata) -> list[dict]:
+    """Serialize json/jsonb dict/list values for psycopg COPY TEXT format.
+
+    VALUES-based merge already json.dumps via ``_value_to_typed_sql``. COPY writes
+    raw Python objects; psycopg cannot adapt ``dict`` → fails with
+    ``cannot adapt type 'dict'``.
+    """
+    columns_by_name = table.columns_by_name()
+    json_cols = {
+        name
+        for name, column in columns_by_name.items()
+        if column.data_type.strip().lower() in {"json", "jsonb"}
+    }
+    if not json_cols:
+        return records
+
+    prepared: list[dict] = []
+    for record in records:
+        row = dict(record)
+        for name in json_cols:
+            value = row.get(name)
+            if isinstance(value, (dict, list)):
+                row[name] = json.dumps(value, ensure_ascii=False)
+        prepared.append(row)
+    return prepared
 
 
 def _polars_schema_for_table(
@@ -1514,10 +1542,11 @@ class DatabaseClient:
             source_using=staging_using,
         )
 
+        copy_records = _prepare_records_for_copy(records, table)
         try:
             with self.engine.begin() as conn:
                 conn.execute(text(create_sql))
-                self.engine.copy_records(conn, staging_name, col_names, records)
+                self.engine.copy_records(conn, staging_name, col_names, copy_records)
 
                 matched_row = conn.execute(text(count_matched_sql)).mappings().first()
                 matched_count = int(matched_row["matched_count"]) if matched_row else 0

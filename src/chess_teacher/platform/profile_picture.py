@@ -25,6 +25,10 @@ _APP_LOGO_ASSET_FILES: dict[AppLogoVariant, str] = {
     "white": "app-logo-white.svg",
 }
 _ALLOWED_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".svg"}
+_AVATAR_MAX_EDGE_PX = 512
+_JPEG_QUALITY = 85
+_WEBP_QUALITY = 85
+_RASTER_UPLOAD_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
 
 
 def clear_upload_image_cache(picture: str | None = None) -> None:
@@ -41,6 +45,60 @@ def clear_upload_image_cache(picture: str | None = None) -> None:
     cache = st.session_state.get(_UPLOAD_URI_SESSION_KEY)
     if isinstance(cache, dict):
         cache.pop(picture, None)
+
+
+def prepare_profile_upload_bytes(data: bytes, *, suffix: str) -> bytes:
+    """Validate an upload and shrink large raster avatars before storage."""
+    if not data:
+        raise ValueError("Upload a valid image.")
+    if suffix == ".svg":
+        text = data.lstrip()[:200].lower()
+        if b"<svg" not in text and not text.startswith(b"<?xml"):
+            raise ValueError("Upload a valid SVG image.")
+        return data
+    if suffix not in _RASTER_UPLOAD_SUFFIXES:
+        raise ValueError(f"Unsupported image type: {suffix or '(none)'}")
+    return _compress_raster_upload(data, suffix=suffix)
+
+
+def _compress_raster_upload(data: bytes, *, suffix: str) -> bytes:
+    from io import BytesIO
+
+    from PIL import Image, ImageOps, UnidentifiedImageError
+    from PIL.Image import Image as PILImage
+
+    try:
+        with Image.open(BytesIO(data)) as opened:
+            opened.load()
+            if suffix == ".gif":
+                return data
+            transposed = ImageOps.exif_transpose(opened)
+            image: PILImage = transposed if transposed is not None else opened
+            image.thumbnail((_AVATAR_MAX_EDGE_PX, _AVATAR_MAX_EDGE_PX))
+            buffer = BytesIO()
+            if suffix == ".png":
+                if image.mode not in {"RGB", "RGBA", "P", "L"}:
+                    image = image.convert("RGBA")
+                image.save(buffer, format="PNG", optimize=True)
+            elif suffix in {".jpg", ".jpeg"}:
+                if image.mode != "RGB":
+                    image = image.convert("RGB")
+                image.save(buffer, format="JPEG", quality=_JPEG_QUALITY, optimize=True)
+            elif suffix == ".webp":
+                if image.mode not in {"RGB", "RGBA"}:
+                    image = image.convert("RGBA" if "A" in image.mode else "RGB")
+                image.save(buffer, format="WEBP", quality=_WEBP_QUALITY, method=6)
+            else:
+                return data
+            compressed = buffer.getvalue()
+    except UnidentifiedImageError as e:
+        raise ValueError("Upload a valid PNG, JPEG, WebP, or GIF image.") from e
+    except OSError as e:
+        raise ValueError("Upload a valid PNG, JPEG, WebP, or GIF image.") from e
+
+    if compressed and len(compressed) <= len(data):
+        return compressed
+    return data
 
 
 class ProfilePictureService:
@@ -107,6 +165,7 @@ class ProfilePictureService:
     def save(self, *, user_id: str, data: bytes, original_filename: str) -> str:
         """Persist upload; return URL value for ``User.picture``."""
         suffix = self._normalize_upload_suffix(original_filename)
+        data = prepare_profile_upload_bytes(data, suffix=suffix)
         key = f"{user_id}{suffix}"
         self._purge_stale_user_uploads(user_id, keep_suffix=suffix)
         self._storage.write_bytes(self._object_key(key), data, overwrite=True)
