@@ -1,5 +1,7 @@
 # Agent brief: plan a FEN eval cache service
 
+**Plan (review this):** `.agents/docs/fen-eval-cache-service.md`
+
 **Mode:** planning only — produce a design/plan doc (tradeoffs, phases, interfaces). Do **not** implement yet.
 
 **Audience:** chess_teacher owner will review the plan before any code.
