@@ -6,7 +6,7 @@
 
 **Source brief:** `.agents/docs/brief-fen-eval-cache-service.md` on `feature/sf_lookup_service`.
 
-**Last updated:** 2026-09-13 (rev: one row per EPD+kind; upgrade-in-place; no ply gate)
+**Last updated:** 2026-09-13 (rev: one gateway for every SF eval; ply cap 32; games are games)
 
 ---
 
@@ -14,199 +14,194 @@
 
 ### Problem
 
-Preprocess pages at 2000 rows and only de-dupes FENs inside one page. Play pays Stockfish again at a **smaller** live budget (`LIVE_CANDIDATE_STOCKFISH_NODES=1000`) so a move is not minutes. Same boards keep showing up (openings, the current game, a line you play every week).
-
-The product is a **hot registry**, not “never compute twice.” Skip Stockfish when we already have a result that is **at least as strong** as the request. One-off middlegames may fall off the LRU and be recomputed.
+Stockfish is invoked from several places (expensive enrich, backfill, play live state, NN bot). Each path de-dupes (or not) in its own way. Pipeline pages forget FENs after 2000 rows. Play pays again. Same boards are the same boards, whether they came from a Chess.com ingest or a game on the site.
 
 ### Goals
 
-- Fixed-capacity **LRU** of position → engine result.
-- **One row per position per result kind** (not one row per node budget). Stored `depth` / `num_nodes` are the **quality** of that row.
-- Request at budget D: hit if stored ≥ D; else compute at D and **upsert** (replace the weaker row).
-- **Play is the insert path** (that is the speed win). Preprocess **reads and upgrades** rows that already exist; it does not flood the LRU with the 737k tail.
-- Compute-on-miss. Empty cache never blocks play or pipeline.
-- Fit import DAG, `metadata.yml`, `DatabaseClient`.
+- **One class, every eval, no exceptions.** Application code never calls `StockfishEngine.evaluate_*` / `evaluate_all_legal_after` for real work. Those stay the low-level binary wrapper.
+- **Games are games.** Ingested backlog and live play use the same admit / LRU / upgrade rules. “Hot” means the **EPD is requested again**, not that the game was played five minutes ago.
+- **Ply cap** on *new* inserts (default **game ply ≤ 32**, a bit above the earlier 16). Early middlegame still enters; deep uniques still fall off LRU after they go cold.
+- **Budget upgrade in place.** One row per EPD. Stored depth/nodes are quality. Weaker stored → compute the higher request → upsert. Stronger stored → hit.
+- Compute-on-miss. Cache down never blocks.
 
 ### Non-goals
 
 - NN instead of Stockfish.
-- Cloud Redis. Local Redis as the *registry* (see §3).
-- Changing `candidate_evaluations` train/label JSON.
+- Redis as the registry (see older speed note: skip-SF is the win).
+- Changing candidate JSON shape.
 - Caching cheap board metrics.
-- Rewriting stored `games.moves.fen_*`.
-- Ply-based admission (rejected).
-- Treating a scalar played-move eval and a MultiPV candidate map as the same row.
+- Caching `choose_move` (Stockfish-as-opponent). That is a move pick, not an eval.
+- Treating backlog as read-only / play-only-inserts (rejected).
 
 ---
 
-## 2. Cache key and value schema
+## 2. The class
 
-### Position key
+Working name: **`PositionEvalService`** in `pipelines/fen_eval_cache`.
 
-`position_key = chess.Board(fen).epd()` (placement, STM, castling, EP). Clocks stay on the move row / live board only.
+This is the only application API for Stockfish **evaluations**.
 
-### Identity vs quality
+```python
+@dataclass(frozen=True)
+class PositionEval:
+    position_key: str          # EPD
+    eval_white_pov: float      # scalar, white POV pawns
+    eval_depth: int
+    candidates: dict[str, Any] # build_candidate_payload
+    candidate_nodes: int
 
-**Identity (unique row):** `kind`, `engine`, `engine_version`, `payload_version`, `position_key`.
+class PositionEvalService:
+    def evaluate(
+        self,
+        fen: str,
+        *,
+        ply: int | None,
+        eval_depth: int = 12,
+        candidate_nodes: int,
+    ) -> PositionEval:
+        """Always returns both scalar and candidates (compute whichever is missing/weak)."""
 
-**Quality (columns on the row, overwritten on upgrade):** `depth`, `num_nodes`.
+    def evaluate_many(
+        self,
+        items: Sequence[FenRequest],  # fen + ply + budgets
+    ) -> dict[str, PositionEval]:
+        """Batch: one lookup, SF only on misses/weak, one upsert."""
+```
 
-| `kind` | What we store | “Higher” means |
-|---|---|---|
-| `eval` | `eval_white_pov` (played-move white-POV pawns) | larger `depth` |
-| `candidates` | `build_candidate_payload` JSONB + `legal_uci_count` | larger `num_nodes` |
+`evaluate_many` is what enrich / backfill / process-pool orchestration call. `evaluate` is what play / live_state / NN bot call. Same policy.
 
-`eval` and `candidates` stay **two rows** for the same EPD. A depth-12 scalar is not a 50k MultiPV map. Do not compare depth to nodes.
+### Import DAG
 
-`payload_version` still bumps if mate/cp mapping or JSON shape changes.
+`StockfishEngine` stays in `utils/chess_utils` (process-local binary). It must **not** import the cache (utils ↛ pipelines).
 
-`cache_key = sha256(kind|engine|engine_version|payload_version|position_key)`.
+`PositionEvalService` lives in `pipelines/fen_eval_cache` and is the only thing that calls `evaluate_white_pov_pawns` / `evaluate_all_legal_moves_white_pov` in production.
 
-### Lookup / upgrade (the simple rule)
+Call sites to reroute (today they talk to the engine or `evaluate_all_legal_after`):
 
-Caller asks for EPD + kind + requested budget `R` (`depth` for `eval`, `num_nodes` for `candidates`).
-
-| Stored row | Action |
+| Today | After |
 |---|---|
-| None | Compute at `R`. **Insert only if the caller may admit** (§2.1). |
-| Present, quality ≥ `R` | **Hit.** Use it. Move to LRU top. Do not run SF. |
-| Present, quality < `R` | Compute at `R`. **Upsert** the same row (new payload + new quality). Move to top. |
+| `StockfishEvaluationTransformation` | `evaluate_many` (needs scalar; service still fills candidates) |
+| `CandidateEvaluationsTransformation` | same page → **one** `evaluate_many`, then stamp both mc column families |
+| `scripts/ops/backfill_candidate_evals.py` | `evaluate_many` |
+| `live_state.py` `evaluate_white_pov_pawns` | `evaluate` |
+| `neural_baseline_bot.py` `evaluate_all_legal_after` | `evaluate` |
+| `candidate_eval.evaluate_all_legal_after` / `live_candidate_tensors` | only used via the service (or deleted as a public path) |
 
-That is not too simple **inside one kind**, if “higher” is a single number. It *is* too simple if we pretend every Stockfish call is one totally ordered “depth.”
+`StockfishBot.choose_move` stays on the engine. Tests may construct a raw engine.
 
-Complement of “found lower → compute higher”: **found higher → serve it.** A play 1k request against a 50k row is a hit. That is faster *and* closer to train labels (train is 50k). A play miss still computes 1k so the user is not stuck, then sits at 1k until preprocess (or a later 50k caller) upgrades the row.
+Workers inside `evaluate_many` may use a bare engine. They are an implementation detail of the service, not a second public path.
 
-NULL `num_nodes` (depth-only MultiPV fallback) is weaker than any positive node budget.
+---
 
-### 2.1 Who may insert a *new* row (no ply)
+## 3. Scalar vs candidates — does it matter?
 
-Ply gate is out. Without some other gate, preprocess `put` of every miss still rotates a 10k LRU through unique middlegames and evicts play openings.
+**For the product: no.** Callers should think “eval this position” and get **both**. Enrich already needs `evaluation_*` and `candidate_evaluations`. Play’s NN path wants MultiPV and often a position scalar (`evaluation_before_white` in live tensors). Doing both every time avoids a second later miss on the same EPD.
 
-**Rule:**
+**For the implementation: yes, internally.** They are two Stockfish searches:
 
-| Caller | No row | Weaker row | Strong enough row |
-|---|---|---|---|
-| **Play** | Compute `R` (1k), **insert** | Upgrade to `R` (rare; play is the low budget) | Hit |
-| **Preprocess / backfill** | Compute `R` for **mc only**. **Do not insert.** | Compute `R`, **upsert** | Hit |
+- Scalar: `get_evaluation()` at **depth** (today 12).
+- Candidates: MultiPV-all at **num_nodes** (50k pipeline / 1k live).
 
-The registry is “positions play (or a future explicit warmer) cared about,” optionally **strengthened** when enrich sees them again. Middlegames still land on `move_characteristics`. They do not get a registry slot unless play also hit that EPD.
+The best MultiPV line is *not* a drop-in for `evaluate_white_pov_pawns`. Do not fake one from the other.
 
-Optional later: a one-off warmer that inserts a small opening book. Not a dump of all complete mc.
+So: **one row per EPD**, two payloads, two quality numbers. The service may run 0, 1, or 2 SF calls on a request (full hit / partial / full miss). Callers do not see that.
+
+```text
+row: position_key (EPD)
+     eval_white_pov + eval_depth
+     payload (candidates) + candidate_nodes
+     legal_uci_count
+     last_access_seq
+```
+
+Identity: `(engine, engine_version, payload_version, position_key)`. Quality is updated in place.
+
+---
+
+## 4. Policy (same for every game)
+
+### Ply cap (inserts only)
+
+**Admit a new row if `ply <= 32`** (env `FEN_EVAL_CACHE_MAX_PLY`). That is game ply from `games.moves.ply` / the live board ply, not `move_nr`. Ply 32 ≈ 16 full moves: a bit later than the old “16” idea, still before the unique-mess tail.
+
+- `ply` missing (should be rare): compute, **do not insert**, may still **upgrade** an existing row.
+- `ply > 32`: compute for the caller (mc still gets the number), **no new row**, may **upgrade** if the EPD is already registered (someone hit it earlier in the opening and we transposed? unusual; cheap to allow).
+
+Heat is LRU on **requests**, not source. A 2019 ingested game and tonight’s live game bump the same EPD the same way.
+
+### Budget
+
+Caller passes the budget they need (play 1k, enrich 50k, eval depth 12).
+
+| Stored | Action |
+|---|---|
+| No row, ply ≤ 32 | Compute requested, insert, evict if over cap |
+| No row, ply > 32 | Compute for caller only |
+| Row, both qualities ≥ requested | Hit, move to top |
+| Row, some quality < requested | Compute the weak part at requested, upsert, move to top |
+
+Play at 1k against a 50k candidate row is a hit (stronger is fine). Enrich at 50k against a 1k row upgrades that row. Same EPD, same table, same class.
 
 ### LRU
 
-Same as before: move-to-front on get/upsert; fixed cap per **identity lane** `(kind, engine, engine_version, payload_version)` (default 10_000); evict least recently accessed when over cap. `last_access_seq`, not wall-clock TTL, not a linked list.
+Cap ~10_000 EPDs (env). `last_access_seq` move-to-front on get/upsert. Evict coldest when over cap. Not wall-clock TTL.
 
-Play and preprocess now **share** the `candidates` lane (one row per EPD). That is OK because preprocess does not insert new keys. Eviction is “cold play positions,” not “last 2000 backlog FENs.”
-
-### Table sketch
-
-`engine.position_evals`: identity columns + `depth` + `num_nodes` + payload/eval + `legal_uci_count` + `last_access_seq` + `created_at`.
-
-Unique `(kind, engine, engine_version, payload_version, position_key)`.
+10k + ply 32: openings and common early lines stay if they recur; one-off ply-20 positions slide off. That is the point.
 
 ---
 
-## 3. Architecture and speed (Postgres vs Redis)
-
-**The speed win is skipping Stockfish**, not the cache product.
-
-Order of magnitude on this VPS:
-
-| Step | Typical cost |
-|---|---|
-| Postgres `SELECT` by PK / unique EPD | ~1 ms |
-| Redis `GET` | sub-ms |
-| Live MultiPV @ 1k nodes | tens–hundreds of ms (often more with many legals) |
-| Pipeline MultiPV @ 50k nodes | seconds per FEN |
-
-A hit is “instant” next to a miss on either store. Redis is the **faster cache**. It is not the better **registry** here:
-
-- We need “find this EPD, compare quality, upsert in place.” That is a row update, not a blob GET/SET.
-- LRU + unique key + inspect `num_nodes` is normal SQL.
-- Redis on the same 4GB box is RAM-only (unless we add persistence) and already holds the user-games TTL cache.
-- 10k × 2KB would *fit* in Redis; the model would not (upgrade-in-place, shared play/preprocess row).
-
-**Recommendation stays Postgres + library client.** Revisit Redis if play traces show cache IO (not SF) on the hit path. A Redis *front* that only stores “already strong enough” blobs is optional later, not v1.
-
-No microservice now.
-
-```
-utils → pipelines/fen_eval_cache → preprocessing
-                                 → bots / play
-```
-
----
-
-## 4. API / client contract
-
-```python
-class FenEvalCacheClient:
-    def get_many(self, keys: Sequence[CacheLookup]) -> dict[str, CacheHit]:
-        """Hit = stored quality >= requested. Touches LRU. Else omit (miss / too weak)."""
-
-    def put_many(self, rows: Sequence[CacheRow], *, admit_new: bool) -> int:
-        """Upsert if key exists (always, when new quality >= stored).
-        Insert if missing only when admit_new.
-        Evict lane bottom past capacity."""
-```
-
-Play: `admit_new=True`. Enrich: `admit_new=False`.
-
-Degrade if Postgres is down. Flag `FEN_EVAL_CACHE=off|readwrite|readonly`.
-
----
-
-## 5. Write / read path
+## 5. Enrich / play (no special cases)
 
 ```mermaid
 sequenceDiagram
-  participant C as Play or Enrich
-  participant R as Registry
-  participant SF as Stockfish
-  participant Out as UI or mc
+  participant Caller as Enrich or Play
+  participant S as PositionEvalService
+  participant R as engine.position_evals
+  participant SF as StockfishEngine
 
-  C->>R: lookup EPD + kind + requested R
-  alt row quality >= R
-    R-->>C: hit (bump LRU)
-  else row quality < R
-    C->>SF: compute at R
-    SF-->>C: payload
-    C->>R: upsert same row, bump LRU
-  else no row
-    C->>SF: compute at R
-    SF-->>C: payload
-    alt play (admit_new)
-      C->>R: insert, evict if over cap
-    else enrich
-      Note over R: mc only; no new registry row
-    end
+  Caller->>S: evaluate / evaluate_many(fen, ply, budgets)
+  S->>R: lookup EPD
+  alt strong enough
+    R-->>S: both payloads
+  else missing or weak
+    S->>SF: only the weak search(es)
+    SF-->>S: scalar and/or MultiPV
+    S->>R: insert if new and ply<=32 else upsert if exists
   end
-  C->>Out: move / checkpoint
+  S-->>Caller: PositionEval
 ```
 
-Enrich still pages 2000. Load FENs, EPD-normalize, `get_many` at 50k (or depth 12 for `eval`). Hits skip SF. Weak rows (1k leftovers from play) upgrade. Unknown EPDs run SF into **mc only**.
+`EnrichExpensive` becomes **one** service batch per page (not two transforms each talking to SF). It still writes `evaluation_*` and `candidate_evaluations` onto mc and still checkpoints. Load `ply` on the join.
 
-Play: one EPD per think at requested 1k. Stronger cached row → no SF, better numbers. Else 1k miss path.
-
----
-
-## 6. Ops
-
-No new Deployment. Cap 10k × 2 kinds is tens of MB. Inline evict on insert. Logs: hits, weak-miss (upgrade), hard-miss, admitted, skipped-admit, evicted.
-
-`STOCKFISH_VERSION` in the image: new version = new identity lane (old rows unused).
+Play / `live_state` / NN bot: `evaluate(...)` once per think.
 
 ---
 
-## 7. Rollout
+## 6. Architecture
 
-| Phase | What | Exit |
-|---|---|---|
-| **1** | Table + client + play insert + enrich upgrade-only | Play repeat/book can skip SF. Enrich of an unknown middlegame does not add a row. Enrich of a play-1k opening upgrades to 50k and play then hits. LRU evicts the coldest after cap. |
-| **2** | Backfill uses same client (`admit_new=False`) | Backfill cannot grow the registry. |
-| **3** | Optional tiny opening warmer (`admit_new=True`, curated) | Only if play cold-start feels empty. |
-| **4** | Service / Redis front | Only if hit-path IO matters. |
+Postgres table + this service. No microservice. Redis still the wrong registry (upgrade/upsert/ply). Speed = skip SF.
+
+DAG:
+
+```
+utils/chess_utils.StockfishEngine
+  ↑
+pipelines/fen_eval_cache.PositionEvalService
+  ↑
+preprocessing | backfill | live_state | neural_baseline_bot
+```
+
+---
+
+## 7. Ops / rollout
+
+Same as before: no new Deployment; `STOCKFISH_VERSION` lane-splits on upgrade; logs for hits, partials, upgrades, admits, skipped-admit, evicts.
+
+| Phase | What |
+|---|---|
+| **1** | Table + `PositionEvalService` + tests (LRU, ply, upgrade, partial SF, degrade) |
+| **2** | Reroute enrich + backfill + live_state + NN bot. Grep must show no remaining production `evaluate_*` / `evaluate_all_legal_after` outside the service. |
+| **3** | Optional opening warmer (still through the service) |
 
 ---
 
@@ -214,24 +209,24 @@ No new Deployment. Cap 10k × 2 kinds is tens of MB. Inline evict on insert. Log
 
 | Risk | Mitigation |
 |---|---|
-| Mixed 1k / 50k on the live bot | Accept: miss = 1k (playable); later upgrade = 50k (closer to train). Do not mix `eval` vs `candidates`. |
-| Preprocess insert-all | Forbidden (`admit_new=False`). |
-| “Higher” across depth vs nodes | Separate kinds; candidates compare nodes only. |
-| Train/live purity | Document the mix. If we must match 1k exactly, add a flag “exact budget only” later. Default is serve-if-stronger. |
-| Legal-move drift | `legal_uci_count` mismatch → miss + upsert. |
-| Cap too small | Env bump. |
+| Someone bypasses the service | Phase 2 grep + code review; engine evals are “private” by convention |
+| Two SF calls always | Partial hits; batch `evaluate_many` |
+| Ply 32 too wide | Env knob; LRU still drops uniques |
+| Scalar faked from MultiPV | Forbidden |
+| `choose_move` accidentally cached | Out of scope |
+| Utils importing pipelines | Service above the engine, not inside it |
 
 ---
 
 ## 9. Open questions
 
-1. Capacity 10_000 per kind-lane — OK?
-2. Schema `engine.position_evals` vs `games.position_evals`?
-3. Reprocess: still read/upgrade, or bypass?
-4. Exact-budget play flag now, or accept stronger-is-fine?
-5. Cold-start warmer for openings, or wait for play to fill?
+1. **Ply 32** vs 24 vs 40?
+2. Capacity 10_000?
+3. Schema name `engine.position_evals`?
+4. When play asks 1k and we hold 50k, serve 50k (recommended) or exact-match flag?
+5. Reprocess: still through the service (yes)?
 
-Resolved: no ply gate; one row per EPD+kind; weaker → compute requested and upsert; play inserts; enrich upgrades only.
+Resolved: one gateway; backlog = live as games; ply cap kept and raised; both payloads always; play is not a privileged writer.
 
 ---
 
@@ -239,28 +234,22 @@ Resolved: no ply gate; one row per EPD+kind; weaker → compute requested and up
 
 | Topic | Decision |
 |---|---|
-| Speed | From skipping SF. Postgres hit ≈ Redis hit for this purpose. Redis is a faster cache, worse upgrade/upsert store. |
-| Row shape | One row per EPD + kind. Quality columns, not key. |
-| Weaker stored | Compute higher requested, upsert in place. Works if we stay within kind. |
-| Stronger stored | Serve it (do not recompute). |
-| Admission | Play inserts. Preprocess does not. No ply. |
-| Eviction | LRU cap ~10k, move-to-front. |
-
----
-
-## ETA
-
-**Play:** first miss in a line pays 1k MultiPV; repeats / takebacks / next game in book are hits. After enrich has seen that book EPD, hits become 50k “for free.” That is the point.
-
-**737k backlog:** almost no pipeline speedup (enrich does not insert, so it only hits EPDs play already stored). Mc still gets every compute. Fine: the registry is for play.
+| API | `PositionEvalService.evaluate` / `evaluate_many` only |
+| Games | Same policy |
+| Insert | ply ≤ 32 |
+| Row | One EPD, scalar + candidates |
+| Weaker budget | Upsert in place |
+| Eviction | LRU ~10k |
+| Engine | Low-level only, used by the service |
 
 ---
 
 ## Implementation sketch (not this PR)
 
-1. `pipelines/fen_eval_cache` with quality compare + upsert + `admit_new`.
-2. Play: lookup → maybe SF → put admit.
-3. Enrich: lookup → SF misses/weak → put upgrade-only → existing mc checkpoint.
-4. Tests: weaker upsert, stronger hit, enrich does not insert, LRU cap, degrade.
+1. Table + service + unit tests for policy.
+2. Point enrich at `evaluate_many`; merge the two expensive transforms’ SF work.
+3. Point live_state + NN bot + backfill at `evaluate`.
+4. Grep-clean production eval call sites.
+5. Do not change payload JSON or default node constants.
 
-Do not change candidate JSON shape or train/play default node constants. Do not add a k8s Service.
+Do not add a k8s Service.
