@@ -6,7 +6,7 @@
 
 **Source brief:** `.agents/docs/brief-fen-eval-cache-service.md` on `feature/sf_lookup_service`.
 
-**Last updated:** 2026-09-13 (rev: LRU capacity + play as first-class consumer)
+**Last updated:** 2026-09-13 (rev: one row per EPD+kind; upgrade-in-place; no ply gate)
 
 ---
 
@@ -14,181 +14,126 @@
 
 ### Problem
 
-`EnrichCheap` / `EnrichExpensive` now page at `TransformStep.batch_size=2000` so fat FEN + MultiPV frames do not OOM the ~4GB VPS. FEN dedup lives **inside one `transform()` call**. The next page starts from zero. Play runs a **different** Stockfish budget (`LIVE_CANDIDATE_STOCKFISH_NODES=1000`) on the same positions and pays again.
+Preprocess pages at 2000 rows and only de-dupes FENs inside one page. Play pays Stockfish again at a **smaller** live budget (`LIVE_CANDIDATE_STOCKFISH_NODES=1000`) so a move is not minutes. Same boards keep showing up (openings, the current game, a line you play every week).
 
-The product is **not** “never compute a position twice.” It is a **hot-position registry**: skip Stockfish when the same EPD comes back soon (openings, the current game, a line you play every week). One-off middlegames may be recomputed. That is fine.
+The product is a **hot registry**, not “never compute twice.” Skip Stockfish when we already have a result that is **at least as strong** as the request. One-off middlegames may fall off the LRU and be recomputed.
 
 ### Goals
 
-- Fixed-capacity **LRU registry** of EPD → engine result, keyed by position + engine identity + budget.
-- **Play is a first-class consumer.** Cache the live 1k-node MultiPV so a book move or a repeat line is instant.
-- Preprocess **reads** the same idea at its own budget (50k / depth 12) so opening pages get cheaper. It must not flood the registry with the 737k-move tail.
-- Compute-on-miss: empty/unavailable cache never blocks pipeline or play.
-- Stay inside existing Stockfish budget contracts. Do not mix 50k train payloads with 1k live keys.
-- Fit import DAG, `metadata.yml`, `DatabaseClient`. Do not hold the world in RAM.
+- Fixed-capacity **LRU** of position → engine result.
+- **One row per position per result kind** (not one row per node budget). Stored `depth` / `num_nodes` are the **quality** of that row.
+- Request at budget D: hit if stored ≥ D; else compute at D and **upsert** (replace the weaker row).
+- **Play is the insert path** (that is the speed win). Preprocess **reads and upgrades** rows that already exist; it does not flood the LRU with the 737k tail.
+- Compute-on-miss. Empty cache never blocks play or pipeline.
+- Fit import DAG, `metadata.yml`, `DatabaseClient`.
 
-### Non-goals (first build)
+### Non-goals
 
-- Replacing Stockfish with a NN evaluator.
-- Cloud-managed cache (Redis Cloud, etc.).
-- Changing `candidate_evaluations` train/label semantics.
-- Caching cheap board metrics (legal moves, king safety, …).
-- Rewriting stored `games.moves.fen_*` strings.
-- “Higher budget satisfies lower” (50k row used as a 1k play hit).
-- Seeding the registry from the entire complete `move_characteristics` table (that is the opposite of LRU).
+- NN instead of Stockfish.
+- Cloud Redis. Local Redis as the *registry* (see §3).
+- Changing `candidate_evaluations` train/label JSON.
+- Caching cheap board metrics.
+- Rewriting stored `games.moves.fen_*`.
+- Ply-based admission (rejected).
+- Treating a scalar played-move eval and a MultiPV candidate map as the same row.
 
 ---
 
 ## 2. Cache key and value schema
 
-### Position key (not raw `board.fen()`)
+### Position key
 
-Moves store `board.fen()` (`move_extraction.py`), which includes **halfmove clock + fullmove number**. Same board in two games is often a different string.
+`position_key = chess.Board(fen).epd()` (placement, STM, castling, EP). Clocks stay on the move row / live board only.
 
-**Normalize with python-chess EPD (4 fields):** placement, side to move, castling, en passant.
+### Identity vs quality
 
-```python
-def position_key(fen: str) -> str:
-    return chess.Board(fen).epd()
-```
+**Identity (unique row):** `kind`, `engine`, `engine_version`, `payload_version`, `position_key`.
 
-Clocks do not change our Stockfish contract. Keep the original FEN on the mc / play board; normalize **only** for the cache key.
+**Quality (columns on the row, overwritten on upgrade):** `depth`, `num_nodes`.
 
-### Engine + budget identity
-
-| Field | Played-move eval | Pipeline candidates | Play candidates |
-|---|---|---|---|
-| `kind` | `eval` | `candidates` | `candidates` |
-| `engine` | `stockfish` | `stockfish` | `stockfish` |
-| `engine_version` | image SF version | same | same |
-| `depth` | `12` | `CANDIDATE_STOCKFISH_DEPTH` (12) | 12 |
-| `num_nodes` | `NULL` | `50000` | `1000` (or `live_candidate_stockfish_nodes()`) |
-| `payload_version` | `1` | `1` | `1` |
-| `position_key` | EPD | EPD | EPD |
-
-These combinations are **lanes**. LRU capacity is **per lane**, so a preprocess flood cannot evict play’s 1k-node openings (and a Stockfish upgrade is a new empty lane, not a wipe of the old one).
-
-`payload_version` bumps when mate/cp mapping or MultiPV shape changes. Do not put python-chess version in the key; detect legal-move drift on read.
-
-### Surrogate primary key
-
-```
-cache_key = sha256(
-  f"{kind}|{engine}|{engine_version}|{depth}|{nodes or ''}|{payload_version}|{position_key}"
-).hexdigest()
-```
-
-Store the component columns too. On read, reject a row whose stored EPD does not match the lookup EPD.
-
-### Value
-
-**`kind=eval`:** `eval_white_pov` (white-POV pawns).
-
-**`kind=candidates`:** existing `build_candidate_payload` JSONB + `legal_uci_count`. If `board.legal_moves.count() != legal_uci_count`, treat as miss and recompute.
-
-### Proposed table
-
-Schema **`engine`**. Table `engine.position_evals`.
-
-| Column | Type | Notes |
+| `kind` | What we store | “Higher” means |
 |---|---|---|
-| `cache_key` | `text` | PK |
-| `kind` | `text` | `eval` \| `candidates` |
-| `engine` | `text` | |
-| `engine_version` | `text` | |
-| `depth` | `int` | |
-| `num_nodes` | `int` | nullable |
-| `payload_version` | `int` | |
-| `position_key` | `text` | EPD |
-| `eval_white_pov` | `double precision` | null when `kind=candidates` |
-| `payload` | `jsonb` | null when `kind=eval` |
-| `legal_uci_count` | `int` | null when `kind=eval` |
-| `last_access_seq` | `bigint` | LRU cursor (see §2.1) |
-| `created_at` | `timestamptz` | default `now()` |
+| `eval` | `eval_white_pov` (played-move white-POV pawns) | larger `depth` |
+| `candidates` | `build_candidate_payload` JSONB + `legal_uci_count` | larger `num_nodes` |
 
-Indexes: PK; unique `(kind, engine, engine_version, depth, num_nodes, payload_version, position_key)`; **`(kind, engine, engine_version, depth, num_nodes, payload_version, last_access_seq)`** for eviction.
+`eval` and `candidates` stay **two rows** for the same EPD. A depth-12 scalar is not a 50k MultiPV map. Do not compare depth to nodes.
 
-`metadata.yml` + `TableDataClass` next to the client.
+`payload_version` still bumps if mate/cp mapping or JSON shape changes.
 
-### 2.1 LRU: “TTL” in new positions, not wall-clock
+`cache_key = sha256(kind|engine|engine_version|payload_version|position_key)`.
 
-Owner model (agreed):
+### Lookup / upgrade (the simple rule)
 
-1. Miss → run Stockfish → insert at the **top** of that lane.
-2. Hit → **move that row to the top** (queried again = hot).
-3. Lane is a **fixed-capacity ordered registry** (default **10_000** rows per lane, env `FEN_EVAL_CACHE_LANE_CAPACITY`).
-4. When a insert would exceed capacity, delete the **bottom** (least recently accessed). A one-off EPD that never comes back falls off after ~10k *other* EPDs have been admitted. Hot EPDs are touched on every lookup and never fall off.
+Caller asks for EPD + kind + requested budget `R` (`depth` for `eval`, `num_nodes` for `candidates`).
 
-This is **LRU**, not Redis-style time TTL. “After 10k new EPDs” is what happens once the lane is **full**. Do **not** expire a row after 10k inserts if the lane still has room (that would empty a young cache for no reason). Capacity-based LRU and “generation TTL of 10k” are the same only after the lane is full.
-
-Do **not** implement a linked list in Postgres. Use a monotonic sequence:
-
-```text
-get_many hits  → UPDATE last_access_seq = nextval(...) WHERE cache_key = ANY(...)
-put_many new   → INSERT ... last_access_seq = nextval(...)
-then           → DELETE FROM lane ORDER BY last_access_seq ASC
-                 LIMIT greatest(lane_count - capacity, 0)
-```
-
-One batched `UPDATE` per `get_many`, not one statement per FEN. Play can bump a single row per move.
-
-Approximate LRU (skip a bump if the row was already near the top) is an optional later tweak if the `UPDATE` shows up in traces. Start exact.
-
-### Admission (what we refuse to insert)
-
-LRU only stays “hot openings + recent play” if **garbage is not admitted**. A preprocess page of ~2k unique middlegames, written in full, pushes ~2k cold rows off the **preprocess lane**. After a few pages, last night’s openings are gone even if play’s lane is safe.
-
-| Source | On miss, after SF | On hit |
-|---|---|---|
-| **Play** | **Always insert** (tiny volume, this is the point) | Move to top |
-| **Preprocess / backfill** | Insert only if **ply ≤ N** (recommend **N = 16**, env) or the EPD is **already in the lane** (refresh) | Move to top |
-| **Seed job** | Only low-ply rows from existing mc, same N. Never dump all complete mc. | — |
-
-Ply is already on `games.moves`. `EnrichExpensive` must load `ply` (or `move_nr`) with the page to apply the gate. Play always has a ply.
-
-Recompute of a high-ply preprocess miss still writes **`move_characteristics`**. It just does not enter the registry.
-
-### Invalidation
-
-| Event | Action |
+| Stored row | Action |
 |---|---|
-| Depth / nodes / SF version / payload_version change | New lane; old lane ages out unused or is `DELETE`d |
-| Legal-move count mismatch | Miss + replace that row |
-| Full wipe | `TRUNCATE` (ops) |
-| Reprocess | Still **reads** LRU; high-ply still not admitted (open: bypass flag) |
+| None | Compute at `R`. **Insert only if the caller may admit** (§2.1). |
+| Present, quality ≥ `R` | **Hit.** Use it. Move to LRU top. Do not run SF. |
+| Present, quality < `R` | Compute at `R`. **Upsert** the same row (new payload + new quality). Move to top. |
 
-Same-key write: `ON CONFLICT` → bump `last_access_seq`, do **not** overwrite eval/payload unless an explicit reprocess flag says so (first result wins).
+That is not too simple **inside one kind**, if “higher” is a single number. It *is* too simple if we pretend every Stockfish call is one totally ordered “depth.”
+
+Complement of “found lower → compute higher”: **found higher → serve it.** A play 1k request against a 50k row is a hit. That is faster *and* closer to train labels (train is 50k). A play miss still computes 1k so the user is not stuck, then sits at 1k until preprocess (or a later 50k caller) upgrades the row.
+
+NULL `num_nodes` (depth-only MultiPV fallback) is weaker than any positive node budget.
+
+### 2.1 Who may insert a *new* row (no ply)
+
+Ply gate is out. Without some other gate, preprocess `put` of every miss still rotates a 10k LRU through unique middlegames and evicts play openings.
+
+**Rule:**
+
+| Caller | No row | Weaker row | Strong enough row |
+|---|---|---|---|
+| **Play** | Compute `R` (1k), **insert** | Upgrade to `R` (rare; play is the low budget) | Hit |
+| **Preprocess / backfill** | Compute `R` for **mc only**. **Do not insert.** | Compute `R`, **upsert** | Hit |
+
+The registry is “positions play (or a future explicit warmer) cared about,” optionally **strengthened** when enrich sees them again. Middlegames still land on `move_characteristics`. They do not get a registry slot unless play also hit that EPD.
+
+Optional later: a one-off warmer that inserts a small opening book. Not a dump of all complete mc.
+
+### LRU
+
+Same as before: move-to-front on get/upsert; fixed cap per **identity lane** `(kind, engine, engine_version, payload_version)` (default 10_000); evict least recently accessed when over cap. `last_access_seq`, not wall-clock TTL, not a linked list.
+
+Play and preprocess now **share** the `candidates` lane (one row per EPD). That is OK because preprocess does not insert new keys. Eviction is “cold play positions,” not “last 2000 backlog FENs.”
+
+### Table sketch
+
+`engine.position_evals`: identity columns + `depth` + `num_nodes` + payload/eval + `legal_uci_count` + `last_access_seq` + `created_at`.
+
+Unique `(kind, engine, engine_version, payload_version, position_key)`.
 
 ---
 
-## 3. Architecture options (ranked)
+## 3. Architecture and speed (Postgres vs Redis)
 
-Single Hetzner VPS, k3s, ~4GB RAM. Redis already exists as a **wall-clock TTL** user/admin cache (`cache_utils.py`). That is a different job.
+**The speed win is skipping Stockfish**, not the cache product.
 
-### Option A — Postgres table in the monolith
+Order of magnitude on this VPS:
 
-**Recommendation.** 10k candidate rows × ~2KB ≈ 20MB per lane. Several lanes still tiny. Disk LRU, queryable, survives Jobs, batch `ANY(...)`.
+| Step | Typical cost |
+|---|---|
+| Postgres `SELECT` by PK / unique EPD | ~1 ms |
+| Redis `GET` | sub-ms |
+| Live MultiPV @ 1k nodes | tens–hundreds of ms (often more with many legals) |
+| Pipeline MultiPV @ 50k nodes | seconds per FEN |
 
-### Option B — library client + same table
+A hit is “instant” next to a miss on either store. Redis is the **faster cache**. It is not the better **registry** here:
 
-How A is coded (`get_many` / `put_many` / `touch` / `evict_lane`). Not a sidecar process.
+- We need “find this EPD, compare quality, upsert in place.” That is a row update, not a blob GET/SET.
+- LRU + unique key + inspect `num_nodes` is normal SQL.
+- Redis on the same 4GB box is RAM-only (unless we add persistence) and already holds the user-games TTL cache.
+- 10k × 2KB would *fit* in Redis; the model would not (upgrade-in-place, shared play/preprocess row).
 
-### Option C — microservice
+**Recommendation stays Postgres + library client.** Revisit Redis if play traces show cache IO (not SF) on the hit path. A Redis *front* that only stores “already strong enough” blobs is optional later, not v1.
 
-Still later. Play latency is dominated by Stockfish on miss, not by a Postgres primary-key get. Split if Streamlit ever waits on cache IO or we grow a second host.
-
-Redis LRU is tempting (native `MAXMEMORY` + `allkeys-lru`) but candidate JSON on the same 4GB box competes with user-cache RAM. Postgres wins for v1. Optional Redis *front* later.
-
-### Package boundary
+No microservice now.
 
 ```
-utils (db, chess_utils, pipeline_utils)
-  ↑
-pipelines/fen_eval_cache     # table + client + LRU helpers
-  ↑
-pipelines/preprocessing      # EnrichExpensive (read + gated write)
-  ↑
-bots / play                  # same client, write-all-misses
+utils → pipelines/fen_eval_cache → preprocessing
+                                 → bots / play
 ```
 
 ---
@@ -198,134 +143,95 @@ bots / play                  # same client, write-all-misses
 ```python
 class FenEvalCacheClient:
     def get_many(self, keys: Sequence[CacheLookup]) -> dict[str, CacheHit]:
-        """Hits only. Touches LRU (batched). Errors → empty (all miss)."""
+        """Hit = stored quality >= requested. Touches LRU. Else omit (miss / too weak)."""
 
-    def put_many(self, rows: Sequence[CacheRow]) -> int:
-        """Insert new keys at top; ON CONFLICT touch only.
-        Then evict lane bottoms past capacity. Errors → 0."""
+    def put_many(self, rows: Sequence[CacheRow], *, admit_new: bool) -> int:
+        """Upsert if key exists (always, when new quality >= stored).
+        Insert if missing only when admit_new.
+        Evict lane bottom past capacity."""
 ```
 
-`CacheLookup` includes kind + budget + original FEN (+ optional `admit: bool` from the caller’s ply gate). Client does not guess ply.
+Play: `admit_new=True`. Enrich: `admit_new=False`.
 
-Failure: table missing / Postgres down → compute-on-miss, no crash. Feature flag `FEN_EVAL_CACHE=off|readwrite|readonly`.
+Degrade if Postgres is down. Flag `FEN_EVAL_CACHE=off|readwrite|readonly`.
 
 ---
 
-## 5. Write path
+## 5. Write / read path
 
 ```mermaid
 sequenceDiagram
-  participant P as Play or Enrich page
-  participant C as FenEvalCacheClient
-  participant PG as engine.position_evals
+  participant C as Play or Enrich
+  participant R as Registry
   participant SF as Stockfish
-  participant Out as mc row or play UI
+  participant Out as UI or mc
 
-  P->>C: get_many(EPDs + lane)
-  C->>PG: SELECT + bump last_access_seq on hits
-  PG-->>C: hits
-  C-->>P: hits / misses
-  P->>SF: miss FENs only
-  SF-->>P: scores / payloads
-  alt play OR preprocess ply <= N
-    P->>C: put_many(misses)
-    C->>PG: INSERT at top; DELETE lane bottom if over cap
-  else preprocess high ply
-    Note over C,PG: compute used for mc only; not admitted
+  C->>R: lookup EPD + kind + requested R
+  alt row quality >= R
+    R-->>C: hit (bump LRU)
+  else row quality < R
+    C->>SF: compute at R
+    SF-->>C: payload
+    C->>R: upsert same row, bump LRU
+  else no row
+    C->>SF: compute at R
+    SF-->>C: payload
+    alt play (admit_new)
+      C->>R: insert, evict if over cap
+    else enrich
+      Note over R: mc only; no new registry row
+    end
   end
-  P->>Out: existing checkpoint / live move
+  C->>Out: move / checkpoint
 ```
 
-Hot path across games:
+Enrich still pages 2000. Load FENs, EPD-normalize, `get_many` at 50k (or depth 12 for `eval`). Hits skip SF. Weak rows (1k leftovers from play) upgrade. Unknown EPDs run SF into **mc only**.
 
-```mermaid
-sequenceDiagram
-  participant G1 as Game / page A
-  participant Reg as Lane (cap 10k)
-  participant G2 as Game / page B
-  participant SF as Stockfish
-
-  G1->>Reg: miss opening EPD → SF → insert top
-  G1->>Reg: miss unique middlegame → SF
-  Note over G1,Reg: preprocess: middlegame not inserted
-  G2->>Reg: query same opening → hit, move to top
-  Note over G2,SF: no SF
-```
+Play: one EPD per think at requested 1k. Stronger cached row → no SF, better numbers. Else 1k miss path.
 
 ---
 
-## 6. Read path
+## 6. Ops
 
-### EnrichExpensive
+No new Deployment. Cap 10k × 2 kinds is tens of MB. Inline evict on insert. Logs: hits, weak-miss (upgrade), hard-miss, admitted, skipped-admit, evicted.
 
-Keep `batch_size=2000` keyset paging. After unique raw FENs:
-
-1. EPD-normalize (many raw FENs → one key).
-2. `get_many` (hits move to top).
-3. Stockfish on misses only.
-4. `put_many` only admitted misses (ply ≤ N).
-5. Stamp mc columns for **all** rows (admitted or not). Checkpoints unchanged.
-
-Load `ply` on the expensive join. Played-move eval: two EPDs per move. Candidates: `fen_before` only.
-
-### Play
-
-On each engine think: `get_many` one EPD at the **1k-node** lane. Hit → skip MultiPV. Miss → live SF → `put_many`. Takebacks / repeats / book lines hit. Opponent novelties miss once and then sit at the top for the rest of the game.
-
-Do not read the 50k preprocess lane from play (different numbers than train/live alignment for the 1k path).
-
-No process-wide unbounded dict. A tiny in-process LRU (dozens of positions) is optional in front of Postgres for a single game.
+`STOCKFISH_VERSION` in the image: new version = new identity lane (old rows unused).
 
 ---
 
-## 7. Ops
+## 7. Rollout
 
-- No new Deployment. `ensure_metadata` (or a gated migrate).
-- Capacity 10k × a few lanes is tens of MB, not 1GB. Do not raise Job RAM for the cache.
-- `STOCKFISH_VERSION` in the image so lanes split cleanly on apt drift.
-- Eviction is **inline** on `put_many` (same transaction as insert). No nightly janitor required. Optional maintenance: log `lane_count`, `evicted`.
-- Observability: `fen_cache_hits`, `fen_cache_misses`, `fen_cache_admitted`, `fen_cache_not_admitted`, `fen_cache_evicted`, `fen_cache_errors`, `fen_cache_legal_drift`.
-
----
-
-## 8. Rollout phases
-
-| Phase | What | Exit criteria |
+| Phase | What | Exit |
 |---|---|---|
-| **0 — measure** | Optional uniqueness SQL (still useful). More important: confirm play is the latency pain and pick N / capacity. | N and cap written down (16 / 10k unless owner says otherwise). |
-| **1 — registry + play + gated enrich** | Table + client + LRU. Wire play 1k lane (write all misses). Wire enrich read + ply gate. Tests: touch-on-hit, evict-bottom, lane isolation, admission skip, degrade. | Play book/repeat line skips SF. A 10k+1 insert drops the coldest. Preprocess page of high-ply misses does not grow the play lane. |
-| **2 — backfill uses the same client** | Same get + gated put. | Backfill cannot evict play. |
-| **3 — optional seed** | Low-ply-only seed from mc into the matching lanes. | Seed does not exceed cap; evicts only colder low-ply if over. |
-| **4 — service split** | Only if §3 triggers. | Written decision. |
+| **1** | Table + client + play insert + enrich upgrade-only | Play repeat/book can skip SF. Enrich of an unknown middlegame does not add a row. Enrich of a play-1k opening upgrades to 50k and play then hits. LRU evicts the coldest after cap. |
+| **2** | Backfill uses same client (`admit_new=False`) | Backfill cannot grow the registry. |
+| **3** | Optional tiny opening warmer (`admit_new=True`, curated) | Only if play cold-start feels empty. |
+| **4** | Service / Redis front | Only if hit-path IO matters. |
 
 ---
 
-## 9. Risks
+## 8. Risks
 
-| Risk | Why it matters | Mitigation |
-|---|---|---|
-| Preprocess write-all | 2k new EPDs/page evict openings in **that** lane | Ply admission; play on its own lane |
-| Same lane for 1k and 50k | Pipeline would evict play | `num_nodes` in the key |
-| Recency `UPDATE` amplification | Extra writes on every hit | Batched touch; skip later if needed |
-| Wall-clock TTL by mistake | Idle play would lose book after a week | Seq LRU only |
-| Evict when not full | Young cache empties | Capacity check, not “age > 10k” |
-| Stale budgets | Train/play mismatch | Exact lane match |
-| Legal-move drift | Wrong UCI set | `legal_uci_count` → miss |
-| Reprocess | Might want fresh SF | Optional bypass flag |
-| Cap too small | Opening repertoire + recent play do not fit | 10k is a lot of EPDs; raise env |
+| Risk | Mitigation |
+|---|---|
+| Mixed 1k / 50k on the live bot | Accept: miss = 1k (playable); later upgrade = 50k (closer to train). Do not mix `eval` vs `candidates`. |
+| Preprocess insert-all | Forbidden (`admit_new=False`). |
+| “Higher” across depth vs nodes | Separate kinds; candidates compare nodes only. |
+| Train/live purity | Document the mix. If we must match 1k exactly, add a flag “exact budget only” later. Default is serve-if-stronger. |
+| Legal-move drift | `legal_uci_count` mismatch → miss + upsert. |
+| Cap too small | Env bump. |
 
 ---
 
-## 10. Open questions for the owner
+## 9. Open questions
 
-1. **Capacity 10_000 per lane** — good default? (10k × ~2KB ≈ 20MB/lane.)
-2. **Ply gate N = 16** for preprocess admission — or 12 / 20 / “openings only if already seen twice”?
-3. **Schema name** `engine.position_evals` vs `games.position_evals`?
-4. **Reprocess** bypass cache or still read LRU?
-5. **SF version** pin in image vs apt drift as a new lane?
-6. **Play first in phase 1** (recommended) vs enrich-only first?
+1. Capacity 10_000 per kind-lane — OK?
+2. Schema `engine.position_evals` vs `games.position_evals`?
+3. Reprocess: still read/upgrade, or bypass?
+4. Exact-budget play flag now, or accept stronger-is-fine?
+5. Cold-start warmer for openings, or wait for play to fill?
 
-Resolved by this revision: eviction is LRU-by-access with a fixed cap, not wall-clock TTL; play is in v1; we do not store the full backlog.
+Resolved: no ply gate; one row per EPD+kind; weaker → compute requested and upsert; play inserts; enrich upgrades only.
 
 ---
 
@@ -333,31 +239,28 @@ Resolved by this revision: eviction is LRU-by-access with a fixed cap, not wall-
 
 | Topic | Decision |
 |---|---|
-| Product | Hot registry, not infinite memoization |
-| Eviction | Per-lane LRU, cap ~10k, move-to-front on query |
-| “TTL” | Count of **other admitted EPDs** after the lane is full, not seconds |
-| Play | Own 1k-node lane; write every miss |
-| Preprocess | Read all; write only ply ≤ N |
-| Microservice | Not now |
-| Storage | `engine.position_evals` on existing Postgres |
+| Speed | From skipping SF. Postgres hit ≈ Redis hit for this purpose. Redis is a faster cache, worse upgrade/upsert store. |
+| Row shape | One row per EPD + kind. Quality columns, not key. |
+| Weaker stored | Compute higher requested, upsert in place. Works if we stay within kind. |
+| Stronger stored | Serve it (do not recompute). |
+| Admission | Play inserts. Preprocess does not. No ply. |
+| Eviction | LRU cap ~10k, move-to-front. |
 
 ---
 
-## ETA impact (order of magnitude)
+## ETA
 
-**Play:** first miss in a line pays live 1k MultiPV; every repeat / takeback / next game in the same book is a hit. That is the speed win. Unrelated novelties still compute once.
+**Play:** first miss in a line pays 1k MultiPV; repeats / takebacks / next game in book are hits. After enrich has seen that book EPD, hits become 50k “for free.” That is the point.
 
-**737k preprocess backlog:** only **opening plies** hit or get admitted. Middlegames still run Stockfish. Expect a **modest** pipeline speedup (book pages, not 2× on the whole 18d) unless uniqueness on low ply is huge. The cache is for **play + opening reuse**, not for finishing the backlog.
-
-Phase 0 uniqueness SQL is still optional; it no longer gates the design.
+**737k backlog:** almost no pipeline speedup (enrich does not insert, so it only hits EPDs play already stored). Mc still gets every compute. Fine: the registry is for play.
 
 ---
 
-## Implementation sketch (when unblocked; not this PR)
+## Implementation sketch (not this PR)
 
-1. `pipelines/fen_eval_cache`: table with `last_access_seq`, client, lane evict, tests (LRU order, cap, lane isolation, admission, degrade).
-2. Play: get → SF miss → put at 1k lane.
-3. Enrich: load `ply`; get; SF misses; put if ply ≤ N.
-4. Logs + env: capacity, N, flag, `STOCKFISH_VERSION`.
+1. `pipelines/fen_eval_cache` with quality compare + upsert + `admit_new`.
+2. Play: lookup → maybe SF → put admit.
+3. Enrich: lookup → SF misses/weak → put upgrade-only → existing mc checkpoint.
+4. Tests: weaker upsert, stronger hit, enrich does not insert, LRU cap, degrade.
 
-Do not change `candidate_evaluations` JSON shape. Do not change train/play node constants. Do not add a k8s Service.
+Do not change candidate JSON shape or train/play default node constants. Do not add a k8s Service.
