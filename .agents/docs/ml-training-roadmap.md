@@ -4,9 +4,7 @@
 
 **Audience:** humans and coding agents working on `src/chess_teacher/pipelines/neural_network/`
 
-**Last updated:** 2026-09-04 (rev: shared train+promote object)
-
-**Train fetch / orchestration:** one shared train+promote object for baseline and personal. See [ml-train-queue.md](ml-train-queue.md). Do not add hash-scan cursors or `end_time` cutoffs as the train loader.
+**Last updated:** 2026-09-03 (rev: 2b experiment outcome tables; merge-ready)
 
 ---
 
@@ -18,10 +16,10 @@ Phases 1–3 are **offline proof**. Phase 4 is the **deliverable you orchestrate
 
 | Job | Orchestrated entrypoint | Behaviour |
 |-----|-------------------------|-----------|
-| Incremental baseline train | `scripts/entrypoints/baseline_training.py` | Same **train+promote object** as personal ([ml-train-queue.md](ml-train-queue.md)): assign → queue round → maybe promote. Mark `already_processed_baseline`. |
-| Promote candidate | `scripts/entrypoints/baseline_promotion.py` | Same object, step 8. Frozen registry val; disagree margin + agree guardrail. On success: reset personal **training** schemes. |
-| Catch up backlog | `scripts/ops/baseline_train_until_caught_up.py` | Loop of that same object |
-| User finetune | same object, user scope | Filter linked-account train; mark `already_processed_personal`; parent = last personal keras else `baseline_parent_id`; store that id on every personal row |
+| Incremental baseline train | `scripts/entrypoints/baseline_training.py` | `fetch_since(cutoff)` **excludes registry val/test**; finetune parent; log stratified metrics to MLflow |
+| Promote candidate | `scripts/entrypoints/baseline_promotion.py` | Score on **fixed registry val**; disagree guardrail; replace random eval |
+| Catch up backlog | `scripts/ops/baseline_train_until_caught_up.py` | Same train/promote logic as above |
+| User finetune (later) | new entrypoint / pipeline step | Per-user cutoff, recency, parent baseline |
 
 Offline **ops siblings** (`offline_baseline_*`, `offline_user_*`) must behave like production **before** Phase 4 wires them in — Phase 4 is a port, not a redesign.
 
@@ -42,11 +40,9 @@ These choices simplify the roadmap; revisit only if metrics or product needs cha
 | **User overlap train/val** | Acceptable for platform baseline. A few moves per user in val do not reveal full style; signal comes from aggregate volume. |
 | **Game-level split** | Required — never split moves within the same game. |
 | **Offline sample size** | Small `--limit` runs are smoke tests only. Serious comparisons need **≥10k moves** (preferably more val games, e.g. hundreds). |
-| **Incremental production training** | Registry work queue ([ml-train-queue.md](ml-train-queue.md)): `bucket='train'` + processed flag NULL, `ORDER BY game_id`, complete games. `games.end_time` is **not** the fetch cursor. |
-| **Recency (baseline)** | Optional **sample weights** within each new batch can emphasize fresher moves (`end_time`). Processed flags (not `end_time`) are what restrict each round to **unseen** train games. |
-| **Recency (user bots)** | Capped recency sample weights + same `baseline-v1` hash val as platform (Phase 3). |
-| **Baseline-disagree (user bots)** | Hard-mask vs `baseline_parent_id` stored on the personal row (promoted baseline that **started this scheme**), not vs last personal keras and not a live re-query of production each round. |
-| **User bot on baseline promote** | Reset personal **training** only (clear personal flags; new scheme parent = newly promoted baseline). Last personal **production** stays serving; it is not a train parent. Swap serving when the new personal candidate promotes. |
+| **Incremental production training** | Cutoff-based batches (see below) are the primary temporal strategy — not a separate “train on all history every time” design. |
+| **Recency (baseline)** | Optional **sample weights** within each new batch can emphasize fresher moves; the cutoff loader already restricts each round to **new** data since last train. |
+| **Recency (user bots)** | Strong recency weights + time-ordered user val split (Phase 3). |
 | **Baseline capacity** | Shared trunk must grow as platform user diversity grows — enables effective per-user finetune later (wider/deeper ≠ per-user input dims). |
 | **Input features** | Separate hypothesis: richer **cues** per position (phase-specific structure, etc.) — investigate before feat version bump. |
 | **Existing `baseline_models` (v50 / v51, ~2026-08)** | **POC only.** Deletable. Do **not** spend on `--full-val` or artifact archaeology vs those URIs. Optional cheap `--train-inline` vs production on the same `--limit` slice is nice-to-have, never a gate. New work is ranked on **registry val vs itself**. Phase 4 starts a **fresh** train/promote chain. |
@@ -55,36 +51,31 @@ These choices simplify the roadmap; revisit only if metrics or product needs cha
 
 ## Incremental training vs held-out eval (important)
 
-**Fetch is the registry work queue** ([ml-train-queue.md](ml-train-queue.md)): unprocessed train games in `game_id` order, complete games, mark after a successful fit. That replaced both oldest-first `fetch_since` (as a train cursor) and the hash-scan / `ingested_at` snapshot cursor. Val/test buckets and `game_id` order stay.
+Production baseline training is already **incremental by time**:
 
-Offline catch-up (baseline **and** user, each scoped to its own eligible games) trains in **`game_id` order**, not `end_time` order. Oldest-first `fetch_since` made each 10k batch a single era (e.g. 2021) while hash val mixed 2021-2026.
+```
+count_since(cutoff) >= MIN_NEW_MOVES (1000)
+  → fetch_since(cutoff) oldest-first, cap MAX_MOVES (10k)
+  → finetune from parent weights
+  → advance last_trained_data_cutoff
+```
 
-Hash-scan code (`hash_scan.py`, `HashScanCursor`, `seen_late`, epoch roll, `hash_scan_cursor.json`) is **deleted**. Do not reintroduce it.
-
-Three clocks stay separate:
-
-| Clock | Column | Job |
-|-------|--------|-----|
-| Event time | `games.end_time` | Recency **sample weights** only |
-| Arrival time | `games.raw_games.ingested_at` | Ingestion bookkeeping (not a train cursor) |
-| Scan order | `game_id` | Stable era mix; complete games; never split a game across batches |
-
-`--limit` on one-shot user/baseline **finetune** caps hash-train by sorted `game_id` (complete games), not oldest `end_time`. Catch-up uses `--batch-limit` + processed flags; `--limit` does not shrink the catch-up universe.
+Each training round sees only **new** moves since the last cutoff. That is the core “always learning from recent platform data” mechanism. You do **not** need a separate time-based val split to achieve incremental training — the cutoff pipeline already does that.
 
 Two concerns that stay **orthogonal**:
 
 | Concern | Mechanism | Purpose |
 |---------|-----------|---------|
-| **Incremental learning** | Registry queue (`game_id` order) + parent weights | Model adapts to new data; each batch is era-mixed |
+| **Incremental learning** | `fetch_since(cutoff)` + parent weights | Model adapts to new data over time |
 | **Honest offline metrics** | Persistent game hash → val / test | Know if model generalizes to held-out games it never trained on |
-| **Emphasize latest within a batch** | Capped recency sample weights on `end_time` | `w *= 1+(BOOST-1)*exp(-lam*age)` (user BOOST=2; missing `end_time` strength=0) |
+| **Emphasize latest within a batch** | Optional recency sample weights | Within one 10k batch, weight newer `end_time` higher (baseline: light; user: strong) |
 
-**Offline experiments** should mirror the Phase 4 target:
+**Offline experiments** should mirror production intelligently:
 
 - **Fixed val set** (persistent hash): score every candidate the same way — promotion-quality metric.
-- **Queue batch replay**: train next unprocessed `game_id` page, eval frozen val; repeat.
+- **Time-ordered batch replay** (Phase 2): simulate catch-up — train batch₁, eval val; train batch₁+₂, eval val; … — stress-tests incremental finetuning without replacing the fixed val set.
 
-Do **not** conflate “val must be future games” with “training must be incremental.” Hash val measures generalization; the queue (not a time-val split) is what walks new data.
+Do **not** conflate “val must be future games” with “training must be incremental.” Your pipeline already handles the latter; persistent hash val handles generalization measurement.
 
 ---
 
@@ -154,8 +145,8 @@ Use **registry val** + stratified metrics unless noted. Primary success metric f
 
 | # | Question | How we know |
 |---|----------|-------------|
-| E13 | Does user finetune beat baseline on **that user's val disagree**? | `offline_user_finetune_eval.py` on hash val (same `baseline-v1` salt; stratified t1) |
-| E14 | Does recency weighting improve recent-opening / recent-style positions? | Ablate λ / recency BOOST; optional opening-family slice. No recency-weighted val metric. |
+| E13 | Does user finetune beat baseline on **that user's val disagree**? | `offline_user_finetune_eval.py` |
+| E14 | Does recency weighting improve recent-opening / recent-style positions? | Ablate λ; optional opening-family slice |
 | E15 | Is a **wider baseline parent** required for user lift? | 2b 10k: **no** (keep 128/64). User finetune vs that parent first; only re-open width if user lift saturates. |
 
 ### Production readiness (Phase 4)
@@ -199,7 +190,7 @@ Siblings use **registry val** + **stratified metrics**; exclude val/test from tr
 | User model promotion / A-B vs baseline | `scripts/ops/offline_user_promotion.py` (proposed) | **3b** |
 | User retrain loop (new games since cutoff) | `scripts/ops/offline_user_catch_up.py` (proposed) | **3b** |
 
-User splits: **same hash as platform** (`game_split_bucket`, `baseline-v1`, 85/10/5). Do **not** write registry from the user path. Shared: `eval_metrics.py` (stratified t1), weight helpers, `BaselineTrainer` finetune from production parent.
+User splits: **time-ordered per account** (last 20% games = val), not platform hash registry. Shared: `eval_metrics.py`, weight helpers, `BaselineTrainer` finetune from production parent.
 
 ### Notebook (`training_develop.ipynb`)
 
@@ -210,7 +201,7 @@ Root notebook for interactive baseline work on develop. Extend incrementally —
 | **1 / 1b** ✅ | Cells: backfill status, registry split summary, call `evaluate_datums` on a loaded model URI |
 | **2a** ✅ (local notebook; file is gitignored) | Promotion-style compare on registry val; epoch sweep via `experiment_baseline_epochs.py` |
 | **2b** | Mini catch-up replay (1–3 batches) with val curve plot; **feat error analysis** (E10–E11) on endgame val failures |
-| **3** | User section: pick `account_id`, hash split, finetune, disagree metric vs baseline on user val |
+| **3** | User section: pick `account_id`, time split, finetune, disagree metric vs baseline on user val |
 | **4+** | Optional cells mirroring production promotion gates (read-only inspect before wiring) |
 
 Notebook may call pipeline functions **or** offline library helpers — prefer **offline helpers** for split-based experiments so cells match `scripts/tools/` behaviour.
@@ -247,7 +238,7 @@ Key files:
 | Model | Question it answers | Training data | Style / recency |
 |-------|---------------------|---------------|-----------------|
 | **Baseline** | “What would a typical platform user play?” | All users, incremental | Moderate SF-disagree boost (~1.5–2×); **no** heavy recency |
-| **User bot** | “What would *this user* play — especially when they deviate from the production baseline?” | One `account_id` | SF-style 2×; **baseline-disagree 4×**; **capped recency 2×** (no KL toward baseline) |
+| **User bot** | “What would *this user* play — especially when they deviate from the engine?” | One `account_id` | High SF-disagree boost (3–5×); **recency bias**; regularize toward baseline |
 
 Personalization quality is measured mainly on **SF-disagree** positions (user did not play engine-best). Baseline already does well on SF-agree lines; user bots must win on disagree subset without collapsing on agree.
 
@@ -376,7 +367,7 @@ game_split_assignments:
 
 **Assign rule:** same as `game_split_bucket()` — registry is the persistence layer, not a new policy.
 
-**Production assignment (user pipeline):** after `EnrichMoveCharacteristicsStep`, `PipelineRunner` runs `game_split_assignment` for that account. New eligible games enter the registry on the next user-pipeline run (cron / Streamlit; typically ≤1 day). `--full-val` is the official frozen val set plus that lag. One-shot `backfill_game_splits.py` remains for empty environments.
+**Production assignment (user pipeline):** after cheap + expensive move-characteristics enrichment, `PipelineRunner` runs `game_split_assignment` for that account. New eligible games enter the registry on the next user-pipeline run (cron / Streamlit; typically ≤1 day). `--full-val` is the official frozen val set plus that lag. One-shot `backfill_game_splits.py` remains for empty environments.
 
 **Phase 1b does not wire production training or promotion** — no `fetch_since` exclusion, no registry eval in `baseline_promotion`. Phase 4 adds those.
 
@@ -423,7 +414,7 @@ Split into **2a** (compare / tune on fixed val) then **2b** (incremental replay)
 
 | Item | Path | Notes |
 |------|------|-------|
-| **Catch-up sibling** | `scripts/ops/offline_baseline_catch_up.py` | Registry queue (`fetch_unprocessed_train_batch`), frozen val each round. Marks processed flags. No `ml.baseline_models` write. `--max-rounds 3` may exit 3 (backlog left). |
+| **Catch-up sibling** | `scripts/ops/offline_baseline_catch_up.py` | ✅ Replay `fetch_since`, exclude registry val/test, frozen val each round. `--max-rounds 3` first run: exit 3 (more eligible). |
 | **Arch sweep** | `scripts/tools/offline_baseline_arch_sweep.py` | ✅ Keep **128/64**. 256 lost on `disagree_t1`. |
 | **Feat investigation** | notebook + `scripts/tools/analyze_val_errors_by_phase.py` | ✅ E10–E11: opening weakest disagree, not endgame. |
 | **Feat v4 A/B** (only if investigation positive) | `candidate_eval.py` + version bump | **Not this PR.** Opening-weak, not endgame-weak. |
@@ -485,55 +476,19 @@ Decision: **no feat v4**. Opening is the weak disagree slice, not endgame. If cu
 
 **2a leftover (same sample, for the record):** `DEFAULT_EPOCHS=20` justified (grid 3-20 still climbing). Cheap inline@20 vs POC v50: `disagree_t1 +0.057` informational, not a gate.
 
-### Phase 2c — Board representation + training signal (offline)
-
-**Goal:** Raise the **ceiling** of the candidate-style baseline by (1) spatial board encoding / conv-style inductive bias and (2) better distributional training signal + metrics — without wiring production yet.
-
-**Why now (after 2b + queue catch-up):** Width did not help. Hand feat v4 skipped. Full-val train-queue catch-up (`64×20`, boost 1.0) plateaus ~**0.47 overall** by ~R7–R12; train top1 ≫ val top1 each round. Next lever is representation + objective, not another MLP HP grind. Park unfinished batch×epochs cells; re-run HP **after** 2c if needed.
-
-**Prerequisite:** Phase 1b registry val; offline catch-up sibling; frozen full val available.
-
-**Agent scope (one dedicated agent / branch):** research → design note → offline prototype → A/B on registry val. Stay in library + `scripts/tools|ops`. No Phase 4 entrypoint edits.
-
-| Track | Deliverable | Notes |
-|-------|-------------|-------|
-| **R1 Research** | `.agents/docs/ml-phase2c-board-encoder.md` | ✅ E19: AZ/Leela/Maia → candidate-rank transfer; plane set C=17; hybrid arch |
-| **R2 Board tensor** | `board_tensor.py` | ✅ `8×8×17` from fen_before; us-at-bottom; `BOARD_TENSOR_VERSION=1` |
-| **R3 Conv tower (hybrid)** | `board_encoder.py` | ✅ Fuse board+state (v1b); conv 32→64. Prior replace-state A/B negative. |
-| **R4 Sample weights** | `ply_weights.py` | ✅ Continuous forced downweight helpers; default off. Ablation A/B still open |
-| **R5 Targets / loss** | docs | ✅ Proposals in research note (soft / SF-mix / sliced). Not coded yet |
-| **R6 Metrics pack** | `eval_metrics.py` | ✅ Stratified top1+top3 in `format_eval_metrics`; Phase 4 gate proposal in note |
-| **R7 Offline A/B** | `offline_baseline_encoder_ab.py` | ✅ Fuse+64 catch-up A/B; restart on **registry train queue** (not end_time). |
-
-**Design principles**
-
-- Hybrid first: board encoder + candidate head beats “throw away SF candidates and learn full move space” for this product.
-- One change family per experiment: encoder **or** weights/loss, not both in the first A/B.
-- Full registry val for decisions (not 32-game 2b slice).
-- Train/catch-up uses **registry queue** (`game_id` order + `already_processed_*`); see `.agents/docs/ml-train-queue.md`.
-
-**Exit criteria (2c):**
-
-1. Research note with chosen plane set + hybrid arch (or explicit reject of conv with rationale).
-2. Working offline train/eval path that builds board tensors and runs a conv (or documented alternative) hybrid.
-3. At least one A/B vs current MLP on full registry val showing **clear** gain on primary metric (disagree or agreed weighted) **or** a documented negative result.
-4. Weight/loss/metric proposals written; production wiring deferred to Phase 4.
-
-**Out of scope for 2c:** user finetune (Phase 3); promoting to `ml.baseline_models` production; finishing parked HP cells unless used as control.
-
 ---
 
 ## Phase 3 — Personal bot experiments (offline)
 
-**Goal:** User finetune beats baseline on user’s **disagree** val positions. Same **tools → ops → entrypoint** progression as baseline. Scoring stays **stratified t1** (no recency-weighted val metric). Keep **128/64**. No KL. No production wiring.
+**Goal:** User finetune beats baseline on user’s **disagree** val positions. Same **tools → ops → entrypoint** progression as baseline.
 
 ### Phase 3a — Single-user train + eval
 
 | Item | Path | Notes |
 |------|------|-------|
-| Recency + baseline-disagree weights | `ply_weights.py` | Capped recency `w *= 1+(BOOST-1)*exp(-lam*age)` (BOOST=2, lam=0.02; missing `end_time` strength=0). **Baseline-disagree** hard-mask v1 BOOST=4 on user CLIs vs frozen production baseline (not last personal keras). Clip ply x SF first; then recency + baseline-disagree; mean-norm no clip. |
-| User hash split | `user_splits.py` | Same `game_split_bucket(..., salt=DEFAULT_SPLIT_SALT)` as platform (`baseline-v1`, 85/10/5). **Do not** write registry. **Do not** import `split_registry` / `offline_eval` / `offline_catch_up`. |
-| **Train+eval tool** | `scripts/tools/offline_user_finetune_eval.py` | Finetune from production baseline; report stratified t1 on **user hash val** |
+| Recency weights | Extend `ply_weights.py` or `recency_weights.py` | Strong for user; optional light baseline (Phase 2b) |
+| User time split | `user_splits.py` (proposed) | Per `account_id`: sort by `end_time`, last 20% games = val |
+| **Train+eval tool** | `scripts/tools/offline_user_finetune_eval.py` | Finetune from production baseline; report stratified metrics on **user val** |
 | Notebook | `training_develop.ipynb` | User section: account picker, split summary, finetune, disagree metric vs baseline |
 
 CLI example:
@@ -541,46 +496,44 @@ CLI example:
 ```text
 --account-id <uuid>
 --recency-lambda 0.02
---recency-boost 2.0
---style-disagree-boost 2.0
---baseline-disagree-boost 4.0
+--style-disagree-boost 4.0
 ```
 
-`--limit` caps **train game ids** before hydrate (sorted `game_id`, complete games; do not split the last game). Val/test stay full hash buckets.
-
-**Exit criteria (3a):** For 2-3 accounts with enough games: user bot beats baseline on `top1_sf_disagree` on user val without large drop on `top1_sf_agree`.
+**Exit criteria (3a):** For 2–3 accounts with enough games: user bot beats baseline on `top1_sf_disagree` on user val without large drop on `top1_sf_agree`.
 
 ### Phase 3b — User ops siblings
 
 | Item | Path | Notes |
 |------|------|-------|
-| **User promotion sibling** | `scripts/ops/offline_user_promotion.py` | User finetuned model vs baseline on **that user’s hash val** (disagree primary, stratified t1) |
-| **User catch-up sibling** | `scripts/ops/offline_user_catch_up.py` | Freeze registry val; queue walk of that user's linked-account train games; hydrate per batch; no `fetch_since`; personal processed flag |
+| **User promotion sibling** | `scripts/ops/offline_user_promotion.py` | User finetuned model vs baseline on **that user’s val** (disagree primary) |
+| **User catch-up sibling** | `scripts/ops/offline_user_catch_up.py` | Replay new user games since cutoff; recency weights; re-eval user val each round |
 | Notebook | `training_develop.ipynb` | Compare user bot vs baseline on sample positions; retrain loop demo |
 
 Min data gate: skip finetune if fewer than ~300 moves; serve baseline only.
 
 ### Training recipe (user scope)
 
-1. Load **production baseline B** as resume weights **and** frozen baseline-disagree target (`--parent-uri` / latest prod)
-2. Hash-partition account games (`baseline-v1`); hydrate val/test full; cap train ids if `--limit`; fetch train only
-3. Sample weights: clip ply x SF-style, then capped recency + **baseline-disagree vs B**, then mean-norm without clip
-4. Catch-up rounds: resume `fit` from last personal keras; **predict the disagree mask from B only**
-5. No KL. Regularize toward baseline later (Phase 5 inference blend)
+1. Load **production baseline** as parent (frozen or very low LR)
+2. Train on `TrainingDataStore.fetch_for_account(account_id)` — train portion only
+3. Sample weights: `ply × style_disagree × recency`
+4. Regularize toward baseline for low game counts (KL blend or small α at inference)
 
 ### User val split (within one account)
 
-- Same hash as platform: `game_split_bucket(game_id, salt=DEFAULT_SPLIT_SALT)` (`baseline-v1`, 85/10/5)
-- Time split is **out**. Reuse `splits.game_split_bucket` / `split_datums_by_game`. Do not write the registry from the user path.
+- Sort games by `games.end_time`
+- **Last 20% of games** → user val
+- **First 80%** → user train
+
+Time-based split fits “recent style” better than platform hash for a single user.
 
 ### Recency bias (user finetune)
 
 ```
-strength = exp(-lam * age_days)   # 0 if end_time missing (not newest)
-w *= 1 + (BOOST - 1) * strength   # BOOST default 2.0; 1.0 = off
+recency_weight = exp(λ * days_since_game)
+w = normalize(ply_weight * style_disagree_weight * recency_weight)
 ```
 
-Do **not** multiply raw `exp` into `w`. Tune `lam` on user val disagree t1 (starting lam=0.02).
+- Tune `λ` on user val disagree metric (starting range λ ≈ 0.01–0.03)
 
 **Optional later (Phase 3c):** opening-family boost from user’s recent games.
 
@@ -589,69 +542,6 @@ Do **not** multiply raw `exp` into `w`. Tune `lam` on user val disagree t1 (star
 ## Phase 4 — Wire into production (orchestration-ready)
 
 **Only after Phases 2–3 validated on develop data.** Merge proven **library + sibling** behaviour into entrypoints — offline ops siblings remain for sandbox experiments. **This phase delivers what you orchestrate on the platform.**
-
-### Baseline and user train / promote schema
-
-User training **depends on** the platform baseline chain. A personal bot is a lineage **keyed to one production baseline version**. Catch-up trains on top of the last personal keras; **baseline-disagree** always points at that lineage’s frozen baseline, not at yesterday’s personal bot.
-
-| Object | What it is | Used for |
-|--------|------------|----------|
-| Production baseline **B** | Current promoted platform model | User lineage start; frozen disagree-mask; fallback inference |
-| Resume keras **U_B** | Last checkpoint in the user@B lineage | Next personal `fit` |
-| Baseline-disagree target | Always **B** for lineage U_B | Sample weights (hard mask v1) |
-| Live serving | **U_B** if present, else **B** | Play vs the user until a newer lineage swaps in |
-
-```mermaid
-flowchart TB
-  subgraph platform ["Platform baseline"]
-    BT["train candidate from current prod"]
-    BP["promote on registry val"]
-    BC["catch-up more batches"]
-    BT --> BP --> BC --> BT
-  end
-
-  B["prod baseline B"]
-  Bp["prod baseline B-prime"]
-  BP -->|"swap prod pointer"| Bp
-
-  subgraph liveB ["Live while B is prod"]
-    UB["user bot U_B"]
-    serveB["serve: U_B else B"]
-    UB --> serveB
-  end
-
-  subgraph shadow ["After B-prime promotes: keep U_B live"]
-    UBp["new lineage U_B-prime from B-prime"]
-    trainBp["catch-up on U_B-prime; disagree vs B-prime"]
-    UBp --> trainBp
-    promoBp["promote U_B-prime on user hash val vs B-prime"]
-    trainBp --> promoBp
-  end
-
-  B --> UB
-  B -->|"frozen disagree mask"| UB
-  Bp --> UBp
-  serveB -->|"stay live until swap"| serveBp["serve: U_B-prime else B-prime"]
-  promoBp -->|"ready"| serveBp
-```
-
-**Platform loop:** incremental queue train from current prod (unprocessed registry train) → score on **registry val** → promote if gates pass → catch-up more queue rounds. Prod pointer moves B → B′. Same one-round function for daily train and catch-up ([ml-train-queue.md](ml-train-queue.md)).
-
-**User loop, while B is prod:**
-
-1. Start lineage from **B** (`--parent-uri` / latest prod).
-2. Finetune / catch-up: `weights_path` = last U_B keras; `baseline_weights_path` = **B**.
-3. Promote U_B on **that user’s hash val** vs B (disagree t1 primary).
-4. Serve U_B; fallback B.
-
-**When platform promotes B → B′:**
-
-1. **Do not kill U_B.** It stays the live personal bot (alternative to B′ for that user).
-2. Start a **new** lineage U_B′ from B′. Disagree-mask vs B′ only. Catch-up independently.
-3. Swap serving to U_B′ only after it promotes (beats B′ on user val). Until then inference is still U_B (or B′ fallback if no U_B).
-4. After swap, U_B can retire (keep artifact for rollback).
-
-User jobs must **read the current prod baseline pointer** to know whether to continue U_B catch-up or spawn U_B′. Do not mix resume keras from U_B with a B′ disagree-mask.
 
 ### Pipeline consolidation (Phase 4)
 
@@ -670,7 +560,7 @@ When wiring neural-network work into orchestration, **collapse today’s fragmen
 **Target shape — at most two orchestrated neural-network pipelines:**
 
 1. **Platform baseline** — train (+ optional promote / catch-up in one job or chained entrypoints sharing one `Pipeline` name). Registry train exclusion, registry val eval, MLflow, cutoff updates.
-2. **User finetune** (Phase 4+) — per-user scope, hash split, recency + **baseline-disagree** weights, lineage keyed to a production baseline version — **only if** it stays a distinct product operation from platform baseline.
+2. **User finetune** (Phase 4+) — per-user scope, time split, recency weights — **only if** it stays a distinct product operation from platform baseline.
 
 Everything else (`split_registry` assign, metric helpers, split filters) stays **library code** invoked from preprocessing or baseline steps — not its own `Pipeline(name=…)` or cron job.
 
@@ -690,25 +580,24 @@ Everything else (`split_registry` assign, metric helpers, split filters) stays *
 |-----------|--------|
 | **Orchestration** | Consolidate NN entrypoints per [Pipeline consolidation](#pipeline-consolidation-phase-4); remove `run_assign_game_splits_pipeline()` as a standalone pipeline |
 | `AssignGameSplitsStep` | Move to preprocessing tail (or inline registry call); keep `backfill_game_splits.py` for empty envs only |
-| `LoadNewDataStep` | Registry train queue (`fetch_unprocessed_train_batch`); mark `already_processed_baseline` after fit (`split_version=baseline-v1`) |
+| `LoadNewDataStep` | Exclude val/test `game_id`s via **split registry** (`split_version=baseline-v1`) |
 | `RandomEvalSetProvider` | Replace with registry-backed val provider (same fixed games every promotion) |
 | `DecidePromotionStep` | Primary: val overall top1; guardrail: val disagree top1 must not drop > X |
 | `TrainIncrementalStep` | Optional early stopping on registry val; log `split_version` + val metrics to MLflow |
 | `baseline_promotion.py` / catch-up ops | Use same scorers/splits as `offline_baseline_*` siblings; prefer one baseline job chain over many pipeline names |
-| User finetune | Second orchestrated pipeline **only if** still distinct from platform baseline — port from Phase 3 ops siblings. Lineage per `(account_id, baseline_version)`; keep live U_B while training U_B′ |
-| Inference | Live user bot if exists (may still be U_B after B′ promotes); else current production baseline |
+| User finetune | Second orchestrated pipeline **only if** still distinct from platform baseline — port from Phase 3 ops siblings |
+| Inference | User model if exists, else baseline |
 | Notebook | Document production vs offline paths; cells call production pipelines where appropriate |
 
 Test set: manual / release-tag evaluation only — never promotion or epoch tuning.
 
-**Note:** Train fetch is the registry work queue ([ml-train-queue.md](ml-train-queue.md)), not `fetch_since` and not hash-scan. Phase 4 remaining work is registry promotion eval, not a new train loader.
+**Note:** Incremental cutoff loading stays as-is; Phase 4 adds registry train exclusion + registry promotion eval atop existing `fetch_since`.
 
 ---
 
 ## Phase 5 — Product polish (later)
 
-- Re-train user bot when N new games since cutoff (same lineage, frozen baseline-disagree)
-- When platform baseline promotes: keep live U_B; train U_B′ in parallel; swap after user promote
+- Re-train user bot when N new games since cutoff
 - Inference blend by game count: `(1−α)·baseline + α·user`
 - UI: personalized vs baseline fallback
 - “Recent opening” messaging when recency + opening weights apply
@@ -734,12 +623,9 @@ Test set: manual / release-tag evaluation only — never promotion or epoch tuni
 | 5b3 | Feat v4 A/B (if investigation positive) | library | No | skipped |
 | 5c | Phase-stratified eval (optional) | library | No | done |
 | 5d | Notebook: batch replay + feat error analysis | notebook | No | |
-| **5e** | **Phase 2c:** research note (board/move conv practice) | docs | No | done (`.agents/docs/ml-phase2c-board-encoder.md`) |
-| **5f** | **Phase 2c:** board tensor + hybrid conv tower + offline A/B | library + tools | No | in progress (queue catch-up) |
-| **5g** | **Phase 2c:** forced/disagree weights + loss/metric pack | library | No | proposals + helpers; ablations pending |
-| 6 | Recency + baseline-disagree weights | library | No | done (user path; trainer `baseline_disagree_boost=1`; mask from frozen baseline keras) |
-| 7a | `user_splits.py` + `offline_user_finetune_eval.py` | library + tools | No | done (hash `baseline-v1`; train-id cap) |
-| 7b | `offline_user_promotion.py` + `offline_user_catch_up.py` | **ops** | No | done (frozen hash val; registry train queue) |
+| 6 | Recency weights (+ optional baseline batch) | library | No | |
+| 7a | `user_splits.py` + `offline_user_finetune_eval.py` | library + tools | No | |
+| 7b | `offline_user_promotion.py` + `offline_user_catch_up.py` | **ops** | No | |
 | 7c | Notebook: user finetune section | notebook | No | |
 | 8 | Promotion + train exclusion via registry | entrypoints | **Yes** | |
 | 8b | Consolidate NN pipelines; fold split assign into preprocess | entrypoints + runner | **Yes** | |
@@ -756,7 +642,7 @@ When asked to implement part of this roadmap:
 2. Respect phase boundaries — **Phases 1–3 = library + tools/ops + notebook**, except **split assignment** in the user `PipelineRunner` (interim). Do **not** change `run_baseline_training_pipeline()` / `run_baseline_promotion_pipeline()` until Phase 4. In Phase 4, **consolidate** NN orchestration per [Pipeline consolidation](#pipeline-consolidation-phase-4) — no standalone `game_split_assignment` pipeline
 3. Reuse `BaselineTrainer`, `TrainingBatch`, `candidate_style_sample_weights`, `offline_eval` helpers, promotion scorers where possible
 4. Split by **`game_id`**, not by move index; prefer **registry** for platform baseline
-5. User bots: **hash split per account** (`game_split_bucket` / `DEFAULT_SPLIT_SALT`) in Phase 3 — do not write registry from the user path
+5. User bots: **time split per account** in Phase 3 — not platform hash registry
 6. Report **stratified** metrics (overall / SF-agree / SF-disagree) in every eval script and notebook cell
 7. **Ops siblings** mimic `scripts/entrypoints/` and `scripts/ops/` shape but stay split-based and non-promoting until Phase 4
 8. **Notebook:** add cells that call the same library functions as scripts — no notebook-only training logic
@@ -771,7 +657,7 @@ When asked to implement part of this roadmap:
 1. **Terminal-only** — `backfill_game_splits.py` then `offline_baseline_train_eval.py` ✅
 2. **Phase 2a** — epoch sweep + promotion sibling + `DEFAULT_EPOCHS=20` (justified pick) ✅
 3. **Phase 2b** — tools + 10k experiments ✅ (keep 128/64; feat v4 skipped). Next: Phase 3 or larger-val HP revisit.
-4. **Phase 3** — user tools + user ops siblings + notebook user section (hash val, capped recency, baseline-disagree)
+4. **Phase 3** — user tools + user ops siblings + notebook user section
 5. **Phase 4** — merge into entrypoints; **consolidate** NN pipelines (≤2); fold split assign into preprocess; **orchestrated** train / promote / catch-up
 6. **Phase 5** — product polish
 

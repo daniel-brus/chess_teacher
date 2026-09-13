@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from datetime import datetime
@@ -1202,6 +1203,104 @@ class TrainingDataStore:
         rows = self._query_moves_sql(sql, params)
         return int(rows[0]["n"]) if rows else 0
 
+    def count_since(
+        self,
+        cutoff: datetime | None,
+        *,
+        extra_where: str | None = None,
+    ) -> int:
+        """Count platform moves with characteristics and ``games.end_time`` after cutoff.
+
+        ``extra_where`` is an optional SQL fragment (no leading AND) appended as
+        ``AND (...)``. Default ``None`` leaves production callers unchanged.
+        """
+        self._ensure_training_tables()
+        sql = f"SELECT COUNT(*) AS n{_SQL_MOVES_WITH_CHARS}"
+        params: dict[str, Any] = {}
+        if cutoff is not None:
+            sql += " AND g.end_time > :cutoff"
+            params["cutoff"] = cutoff
+        sql = _with_extra_where(sql, extra_where)
+        count_t0 = time.monotonic()
+        rows = self._query_moves_sql(sql, params)
+        n = int(rows[0]["n"]) if rows else 0
+        logger.info(
+            "count_since cutoff=%s extra_where=%s n=%s duration_s=%.2f",
+            cutoff,
+            extra_where or "-",
+            n,
+            time.monotonic() - count_t0,
+        )
+        return n
+
+    def fetch_since(
+        self,
+        cutoff: datetime | None,
+        *,
+        limit: int | None = None,
+        extra_where: str | None = None,
+    ) -> tuple[list[TrainingDatum], datetime | None]:
+        """Load new rows ordered by ``games.end_time`` (oldest first).
+
+        Returns ``(datums, max_end_time)``.
+
+        When ``limit`` truncates mid-``end_time`` group (all moves in a game share
+        ``games.end_time``), the batch is expanded to include **every** move at
+        that boundary timestamp so the next cutoff ``end_time > max`` cannot skip
+        the rest of the game / same-second games.
+
+        ``extra_where`` is applied to the main query and the boundary expand.
+        Default ``None`` leaves production callers unchanged.
+        """
+        self._ensure_training_tables()
+        sql = f"SELECT m.move_id AS move_id, g.end_time AS end_time{_SQL_MOVES_WITH_CHARS}"
+        params: dict[str, Any] = {}
+        if cutoff is not None:
+            sql += " AND g.end_time > :cutoff"
+            params["cutoff"] = cutoff
+        sql = _with_extra_where(sql, extra_where)
+        sql += " ORDER BY g.end_time ASC, m.game_id ASC, m.move_nr ASC"
+        if limit is not None:
+            sql += " LIMIT :limit"
+            params["limit"] = limit
+
+        logger.info(
+            "Querying training move ids (cutoff=%s limit=%s)…",
+            cutoff,
+            limit,
+        )
+        fetch_t0 = time.monotonic()
+        rows = self._query_moves_sql(sql, params)
+        if not rows:
+            logger.info(
+                "Querying training move ids found 0 rows duration_s=%.2f",
+                time.monotonic() - fetch_t0,
+            )
+            return [], None
+
+        # LIMIT may cut inside a shared end_time group - finish that group.
+        if limit is not None and len(rows) >= limit:
+            max_end_time = max(r["end_time"] for r in rows if r["end_time"] is not None)
+            prefix = [r for r in rows if r["end_time"] is not None and r["end_time"] < max_end_time]
+            expand_sql = _with_extra_where(
+                f"SELECT m.move_id AS move_id, g.end_time AS end_time{_SQL_MOVES_WITH_CHARS}"
+                " AND g.end_time = :boundary",
+                extra_where,
+            )
+            expand_sql += " ORDER BY m.game_id ASC, m.move_nr ASC"
+            at_boundary = self._query_moves_sql(expand_sql, {"boundary": max_end_time})
+            rows = prefix + list(at_boundary)
+
+        move_ids = [str(r["move_id"]) for r in rows]
+        end_times = [r["end_time"] for r in rows if r["end_time"] is not None]
+        max_end_time = max(end_times) if end_times else None
+        logger.info(
+            "Fetched training move ids=%s duration_s=%.2f; hydrating…",
+            len(move_ids),
+            time.monotonic() - fetch_t0,
+        )
+        return self._datums_for_move_ids(move_ids), max_end_time
+
     def fetch_unprocessed_train_batch(
         self,
         *,
@@ -1544,14 +1643,35 @@ def fetch_training_data_for_account(
     return TrainingDataStore(db_client).fetch_for_account(account_id, limit=limit)
 
 
+def count_new_moves_since(
+    cutoff: datetime | None,
+    *,
+    db_client: DatabaseClient | None = None,
+    extra_where: str | None = None,
+) -> int:
+    return TrainingDataStore(db_client).count_since(cutoff, extra_where=extra_where)
+
+
+def fetch_training_data_since(
+    cutoff: datetime | None,
+    *,
+    db_client: DatabaseClient | None = None,
+    limit: int | None = None,
+    extra_where: str | None = None,
+) -> tuple[list[TrainingDatum], datetime | None]:
+    return TrainingDataStore(db_client).fetch_since(cutoff, limit=limit, extra_where=extra_where)
+
+
 __all__ = [
     "FeatureNormalizer",
     "TrainingBatch",
     "TrainingDataStore",
     "TrainingDatum",
     "TrainingDatumBuilder",
+    "count_new_moves_since",
     "derive_move_identity",
     "fetch_training_data_for_account",
+    "fetch_training_data_since",
     "fetch_training_datum",
     "move_in_database_to_training_datum",
     "remap_characteristics_to_user_pov",

@@ -14,13 +14,13 @@ from chess_teacher.bots.move_analysis import (
     build_bot_move_analysis,
     empty_bot_move_analysis,
 )
+from chess_teacher.pipelines.fen_eval_cache.service import get_position_eval_service
 from chess_teacher.pipelines.neural_network.board_encoder import (
     model_is_hybrid_board_compatible,
 )
 from chess_teacher.pipelines.neural_network.board_tensor import fen_to_board_tensor
 from chess_teacher.pipelines.neural_network.candidate_eval import (
     CANDIDATE_STOCKFISH_DEPTH,
-    evaluate_all_legal_after,
     live_candidate_stockfish_nodes,
     live_candidate_tensors,
 )
@@ -68,19 +68,6 @@ def model_expects_board_input(model: object) -> bool:
         return len(list(inputs)) >= 3
     except TypeError:
         return False
-
-
-def _root_eval_white_pov_from_candidates(
-    evals: dict[str, float],
-    *,
-    color_is_white: bool,
-) -> float | None:
-    """Approx current-position white-POV eval from MultiPV after-move scores."""
-    if not evals:
-        return None
-    values = list(evals.values())
-    # Best line for STM ≈ root eval (white POV): max if White, min if Black.
-    return float(max(values) if color_is_white else min(values))
 
 
 class NeuralBaselineBot(ChessBot):
@@ -148,12 +135,17 @@ class NeuralBaselineBot(ChessBot):
         fen = board.fen(en_passant="fen")
         color_is_white = board.turn == chess.WHITE
 
-        # One MultiPV at live node budget (not train/backfill 50k).
-        evals = evaluate_all_legal_after(self._engine, fen, num_nodes=self.candidate_nodes)
+        evaluated = get_position_eval_service().evaluate(
+            fen,
+            board.ply(),
+            eval_depth=CANDIDATE_STOCKFISH_DEPTH,
+            candidate_nodes=self.candidate_nodes,
+        )
+        evals = evaluated.candidate_evals
         t_sf = time.perf_counter()
 
         last_uci = board.peek().uci() if board.move_stack else None
-        root_eval_white = _root_eval_white_pov_from_candidates(evals, color_is_white=color_is_white)
+        root_eval_white = evaluated.eval_white_pov
         opponent_move_was_capture = False
         if board.move_stack:
             probe = board.copy(stack=True)

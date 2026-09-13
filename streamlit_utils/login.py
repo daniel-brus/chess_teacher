@@ -5,6 +5,8 @@ from chess_teacher.utils.db.client import get_db_client
 from chess_teacher.utils.exception_utils import AuthError
 from chess_teacher.utils.general_utils import get_current_datetime
 from chess_teacher.utils.logging import get_logger
+from streamlit_utils.legal import render_legal_links
+from streamlit_utils.page_config import APP_DESCRIPTION, APP_NAME
 from streamlit_utils.session_state import get_current_user, set_current_user, st_user_is_logged_in
 from streamlit_utils.theme import apply_app_theme
 
@@ -59,9 +61,15 @@ class LoginScreen:
         if not st_user_is_logged_in():
             self.logger.info("Login screen started.")
             apply_app_theme(None)
-            st.header("Log in to app")
-            if st.button("Log in with Google"):
+            st.header(f"Log in to {APP_NAME}")
+            st.markdown(APP_DESCRIPTION)
+            if st.button("Log in with Google", type="primary", width="stretch"):
                 st.login("google")
+            st.caption(
+                "By continuing you agree to the Terms of use. We only use essential "
+                "cookies for sign-in. See the Privacy policy for details."
+            )
+            render_legal_links()
             st.stop()
         else:
             if st.session_state.get("current_user", {}):

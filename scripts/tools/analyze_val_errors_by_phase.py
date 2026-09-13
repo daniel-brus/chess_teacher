@@ -3,8 +3,6 @@
 Load a model URI + frozen registry val, score overall + opening/middle/endgame
 slices, then shortlist endgame + SF-disagree + top1-miss rows (FEN, ply, game_id).
 
-`--limit` is a lowest-``game_id`` val prefix (complete games). `--full-val` loads all val.
-
 Does not bump feat versions or train.
 
 Run (dev)::
@@ -58,6 +56,7 @@ def run_analyze_val_errors_by_phase(
         split_version=split_version,
         limit=None if full_val else limit,
         full=full_val,
+        assign_if_missing=False,
     )
     if len(val) < 10:
         logger.error("Val set too small: %s moves", len(val))

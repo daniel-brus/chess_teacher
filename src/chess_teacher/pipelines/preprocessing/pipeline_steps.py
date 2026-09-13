@@ -37,7 +37,11 @@ from chess_teacher.pipelines.preprocessing.transformations import (
 from chess_teacher.platform.account import Account
 from chess_teacher.utils.db.client import DatabaseClient, MergeStrategy
 from chess_teacher.utils.exception_utils import PipelineError
-from chess_teacher.utils.general_utils import generate_ident_is_literal, quote_ident
+from chess_teacher.utils.general_utils import (
+    generate_ident_is_literal,
+    quote_ident,
+    quote_literal,
+)
 from chess_teacher.utils.pipeline_utils.pipeline_base import PipelineContext
 from chess_teacher.utils.pipeline_utils.pipeline_steps import (
     LoadingStrategy,
@@ -51,6 +55,10 @@ from chess_teacher.utils.pipeline_utils.transformations import (
 
 # Cap peak RAM for fat raw_response / PGN frames on small VPS nodes.
 _PREPROCESS_GAME_BATCH_SIZE = 500
+# Move-level enrich: keyset pages via TransformStep.batch_size (parent already
+# implements pagination). Keep well under node RAM when FENs + board metrics
+# (or Stockfish MultiPV payloads) are held in-process.
+_PREPROCESS_MOVE_BATCH_SIZE = 2000
 
 
 class RawGamesToGamesStep(TransformStep):
@@ -154,6 +162,7 @@ class EnrichCheapMoveCharacteristicsStep(TransformStep):
             ],
             loading_strategy=LoadingStrategy.MERGE,
             merge_strategy=merge_strategy,
+            batch_size=_PREPROCESS_MOVE_BATCH_SIZE,
         )
 
 
@@ -164,6 +173,9 @@ class EnrichExpensiveMoveCharacteristicsStep(TransformStep):
     full_reload recompute expensive columns for all rows in account scope.
     Never uses ``on=move_id`` (that would skip existing incomplete rows).
     Never uses full_sync (would risk deleting cheap-only columns).
+
+    Custom join loader still honors ``TransformStep`` keyset batching via
+    ``batch_size`` + ``after_key`` on ``move_id``.
     """
 
     _LOAD_COLUMNS: tuple[str, ...] = (
@@ -173,6 +185,7 @@ class EnrichExpensiveMoveCharacteristicsStep(TransformStep):
         "fen_before",
         "fen_after",
         "move_uci",
+        "ply",
     )
 
     def __init__(self, *, mode: PipelineMode = PipelineMode.INCREMENTAL) -> None:
@@ -183,6 +196,7 @@ class EnrichExpensiveMoveCharacteristicsStep(TransformStep):
             source_data_class=Move,
             target_data_class=MoveCharacteristics,
             on=None,
+            source_column="move_id",
             source_columns=list(self._LOAD_COLUMNS),
             transformations=[
                 StockfishEvaluationTransformation(depth=12, log_progress_percent=5),
@@ -190,6 +204,7 @@ class EnrichExpensiveMoveCharacteristicsStep(TransformStep):
             ],
             loading_strategy=LoadingStrategy.MERGE,
             merge_strategy=MergeStrategy.upsert(),
+            batch_size=_PREPROCESS_MOVE_BATCH_SIZE,
         )
 
     def _load_records(
@@ -200,7 +215,6 @@ class EnrichExpensiveMoveCharacteristicsStep(TransformStep):
         after_key: str | None = None,
     ) -> pl.DataFrame:
         """Load moves joined to incomplete (or all) move_characteristics rows."""
-        del after_key
         moves_meta = Move.get_metadata()
         mc_meta = MoveCharacteristics.get_metadata()
         moves_sql = moves_meta.qualified_name_sql()
@@ -226,14 +240,19 @@ class EnrichExpensiveMoveCharacteristicsStep(TransformStep):
             )
         if self._mode in (PipelineMode.INCREMENTAL, PipelineMode.RETRY):
             clauses.append(MoveCharacteristics.sql_expensive_incomplete("mc"))
+        if after_key is not None:
+            clauses.append(f"m.{quote_ident('move_id')} > {quote_literal(after_key)}")
         if clauses:
             sql += "\nWHERE " + " AND ".join(f"({c})" for c in clauses)
+        sql += f"\nORDER BY m.{quote_ident('move_id')}"
+        if self.batch_size is not None:
+            sql += f"\nLIMIT {int(self.batch_size)}"
         sql += ";"
 
         rows = db_client.engine.execute_parameterized_query(sql, {})
         self.logger.info(
             f"[{self.name}] Loaded {len(rows)} move row(s) for expensive enrichment "
-            f"(mode={self._mode.value})."
+            f"(mode={self._mode.value}, after_key={after_key!r})."
         )
         if not rows:
             return pl.DataFrame({column: [] for column in self._LOAD_COLUMNS})

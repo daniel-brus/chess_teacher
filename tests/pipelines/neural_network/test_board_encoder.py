@@ -15,7 +15,9 @@ from chess_teacher.pipelines.neural_network.tf_runtime import ensure_tensorflow_
 
 def test_hybrid_build_shapes_and_compat() -> None:
     ensure_tensorflow_logging()
-    trainer = HybridBoardTrainer(epochs=1, batch_size=4, hidden=32, score_hidden=16, conv_filters=16)
+    trainer = HybridBoardTrainer(
+        epochs=1, batch_size=4, hidden=32, score_hidden=16, conv_filters=16
+    )
     state_dim = 20
     model = trainer.build(state_dim=state_dim)
     assert model_is_hybrid_board_compatible(

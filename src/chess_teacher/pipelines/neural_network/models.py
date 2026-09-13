@@ -204,6 +204,7 @@ class BaselineModel(TableDataClass):
 @dataclass(frozen=True)
 class TrainingState(TableDataClass):
     scope: str
+    last_trained_data_cutoff: datetime | None = None
     last_min_data_check_at: datetime | None = None
 
     @classmethod
@@ -237,6 +238,14 @@ class TrainingState(TableDataClass):
     def with_check_at(self, checked_at: datetime | None = None) -> TrainingState:
         return TrainingState(
             scope=self.scope,
+            last_trained_data_cutoff=self.last_trained_data_cutoff,
+            last_min_data_check_at=checked_at or get_current_datetime(),
+        )
+
+    def with_cutoff(self, cutoff: datetime, *, checked_at: datetime | None = None) -> TrainingState:
+        return TrainingState(
+            scope=self.scope,
+            last_trained_data_cutoff=cutoff,
             last_min_data_check_at=checked_at or get_current_datetime(),
         )
 

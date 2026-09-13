@@ -51,6 +51,7 @@ def test_cheap_step_excludes_stockfish_transforms() -> None:
     assert "CandidateEvaluationsTransformation" not in names
     assert "MaterialBalanceTransformation" in names
     assert "MoveFlagsTransformation" in names
+    assert step.batch_size == 2000
 
 
 def test_expensive_step_only_stockfish_transforms() -> None:
@@ -60,6 +61,8 @@ def test_expensive_step_only_stockfish_transforms() -> None:
     assert names.count("CandidateEvaluationsTransformation") == 1
     assert "MaterialBalanceTransformation" not in names
     assert step.on is None
+    assert step.batch_size == 2000
+    assert step.source_column == "move_id"
 
 
 def test_expensive_load_filters_incomplete_in_incremental() -> None:
@@ -78,6 +81,7 @@ def test_expensive_load_filters_incomplete_in_incremental() -> None:
                 "fen_before": "fen-a",
                 "fen_after": "fen-b",
                 "move_uci": "e2e4",
+                "ply": 4,
             }
         ]
 
@@ -89,6 +93,26 @@ def test_expensive_load_filters_incomplete_in_incremental() -> None:
     assert "evaluation_after IS NULL" in captured_sql[0]
     assert "candidate_evaluations IS NULL" in captured_sql[0]
     assert "acct-1" in captured_sql[0]
+    assert "ORDER BY" in captured_sql[0]
+    assert "LIMIT 2000" in captured_sql[0]
+
+
+def test_expensive_load_keyset_pagination() -> None:
+    step = EnrichExpensiveMoveCharacteristicsStep(mode=PipelineMode.INCREMENTAL)
+    db_client = MagicMock()
+    db_client.table_exists.return_value = True
+    captured_sql: list[str] = []
+
+    def capture_query(sql: str, _params: dict) -> list[dict]:
+        captured_sql.append(sql)
+        return []
+
+    db_client.engine.execute_parameterized_query.side_effect = capture_query
+    context = PipelineContext(user_id="u1", account_id="acct-1")
+    step._load_records(db_client, context, after_key="move-100")
+    assert 'm."move_id" >' in captured_sql[0]
+    assert "move-100" in captured_sql[0]
+    assert "LIMIT 2000" in captured_sql[0]
 
 
 def test_expensive_load_skips_incomplete_filter_on_reprocess() -> None:

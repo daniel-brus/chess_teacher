@@ -1,8 +1,8 @@
-"""Offline catch-up sibling: queue replay on registry train, frozen val.
+"""Offline catch-up sibling: incremental replay on registry train, frozen val.
 
 Mimics production catch-up *shape* (count -> fetch batch -> finetune parent ->
-mark processed) but never writes TrainingState or ``ml.baseline_models``.
-Val is loaded once and reused every round.
+advance cutoff) but stays split-hygienic and never writes TrainingState or
+``ml.baseline_models``. Val is loaded once and reused every round.
 
 Does not import or call production train / promote / catch-up entrypoints.
 """
@@ -10,21 +10,20 @@ Does not import or call production train / promote / catch-up entrypoints.
 from __future__ import annotations
 
 import argparse
-import json
 import tempfile
-import time
 from contextlib import nullcontext
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from chess_teacher.pipelines.neural_network.create_training_set import TrainingDataStore
 from chess_teacher.pipelines.neural_network.eval_metrics import (
     EvalMetrics,
-    evaluate_packed,
+    evaluate_datums,
     format_eval_metrics,
-    pack_datums_for_eval,
 )
 from chess_teacher.pipelines.neural_network.mlflow_utils import MLflowTracker
+from chess_teacher.pipelines.neural_network.models import TrainingState
 from chess_teacher.pipelines.neural_network.offline_eval import load_registry_val_datums
 from chess_teacher.pipelines.neural_network.pipeline_steps import (
     MAX_MOVES_PER_BASELINE_BATCH,
@@ -39,6 +38,13 @@ from chess_teacher.utils.logging import get_logger
 logger = get_logger()
 
 
+def _parse_start_cutoff(raw: str) -> datetime:
+    text = raw.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    return datetime.fromisoformat(text)
+
+
 def _keras_parent_path(parent_uri: str | None) -> Path | None:
     if not parent_uri:
         return None
@@ -48,22 +54,15 @@ def _keras_parent_path(parent_uri: str | None) -> Path | None:
     return path
 
 
-def _print_val_curve(rows: list[tuple[int, str, int, EvalMetrics]]) -> None:
-    print("\n=== offline catch-up val curve (frozen val, no promote DB write) ===")
+def _print_val_curve(rows: list[tuple[int, datetime | None, int, EvalMetrics]]) -> None:
+    print("\n=== offline catch-up val curve (frozen val, no DB write) ===")
     if not rows:
         print("no rounds")
         return
-    for round_i, last_id, n_train, metrics in rows:
+    for round_i, cutoff, n_train, metrics in rows:
         print(
-            f"round={round_i} last_game_id={last_id} train_n={n_train} "
-            f"{format_eval_metrics('val', metrics)}"
+            f"round={round_i} cutoff={cutoff} train_n={n_train} {format_eval_metrics('val', metrics)}"
         )
-
-
-def _append_curve_jsonl(path: Path, row: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(row) + "\n")
 
 
 def run_offline_catch_up(
@@ -74,12 +73,18 @@ def run_offline_catch_up(
     max_rounds: int,
     min_new_moves: int,
     batch_limit: int,
+    start_cutoff: datetime | None,
+    start_from_production_cutoff: bool,
     parent_uri: str | None,
     epochs: int,
     style_disagree_boost: float,
     style_disagree_scale: float,
     output_dir: str | Path | None,
 ) -> int:
+    if start_cutoff is not None and start_from_production_cutoff:
+        logger.error("Pass only one of --start-cutoff or --start-from-production-cutoff.")
+        return 1
+
     db = get_db_client()
     logger.info(
         "Loading frozen registry val full=%s val_limit=%s split_version=%s (once)...",
@@ -92,16 +97,17 @@ def run_offline_catch_up(
         split_version=split_version,
         limit=None if full_val else val_limit,
         full=full_val,
+        assign_if_missing=False,
     )
     if len(val) < 10:
         logger.error("Val set too small: %s moves", len(val))
         return 1
-    packed_val = pack_datums_for_eval(val)
-    logger.info(
-        "Packed frozen val once n_input=%s kept=%s",
-        packed_val.n_input,
-        len(packed_val.kept_datums),
-    )
+
+    cutoff: datetime | None = start_cutoff
+    if start_from_production_cutoff:
+        state = TrainingState.for_baseline(db)
+        cutoff = state.last_trained_data_cutoff
+        logger.info("Read-only production cutoff=%s (TrainingState not written)", cutoff)
 
     try:
         parent = _keras_parent_path(parent_uri)
@@ -111,6 +117,7 @@ def run_offline_catch_up(
 
     store = TrainingDataStore(db)
     registry = get_split_registry(db, split_version=split_version)
+    exclude_sql = registry.exclude_holdout_games_sql()
     max_rounds = max(1, int(max_rounds))
     trainer = BaselineTrainer(
         epochs=epochs,
@@ -118,7 +125,7 @@ def run_offline_catch_up(
         style_disagree_scale=style_disagree_scale,
     )
 
-    curve: list[tuple[int, str, int, EvalMetrics]] = []
+    curve: list[tuple[int, datetime | None, int, EvalMetrics]] = []
     out_ctx: Any
     if output_dir is not None:
         out_root = Path(output_dir)
@@ -131,91 +138,69 @@ def run_offline_catch_up(
         root_path = Path(root)
         round_i = 0
         while round_i < max_rounds:
-            n_before = store.count_unprocessed_train(split_version=split_version)
+            n_before = store.count_since(cutoff, extra_where=exclude_sql)
             logger.info(
-                "Offline catch-up check round=%s unprocessed_train=%s min=%s batch_cap=%s",
+                "Offline catch-up check round=%s eligible=%s cutoff=%s min=%s batch_cap=%s",
                 round_i + 1,
                 n_before,
+                cutoff,
                 min_new_moves,
                 batch_limit,
             )
             if n_before < min_new_moves:
                 logger.info(
-                    "Caught up: unprocessed_train=%s < min=%s (remainder left for later).",
+                    "Caught up: eligible=%s < min=%s (remainder left for later).",
                     n_before,
                     min_new_moves,
                 )
                 _print_val_curve(curve)
                 return 0
 
-            datums, game_ids = store.fetch_unprocessed_train_batch(
-                split_version=split_version,
+            datums, max_t = store.fetch_since(
+                cutoff,
                 limit=batch_limit,
+                extra_where=exclude_sql,
             )
-            if not datums or not game_ids:
+            split = registry.split_datums(datums, assign_if_missing=False)
+            train = split.train_datums
+            if not train:
                 logger.error(
-                    "Pending=%s but unprocessed train batch empty.",
-                    n_before,
+                    "No train datums after registry split (assign_if_missing=False). "
+                    "Backfill ml.game_split_assignments first."
                 )
                 _print_val_curve(curve)
-                return 2
+                return 1
 
             round_i += 1
-            last_id = game_ids[-1]
             logger.info(
-                "=== offline catch-up round %s/%s train_n=%s games=%s parent=%s last_game_id=%s ===",
+                "=== offline catch-up round %s/%s train_n=%s parent=%s ===",
                 round_i,
                 max_rounds,
-                len(datums),
-                len(game_ids),
+                len(train),
                 parent,
-                last_id,
             )
-            t0 = time.monotonic()
-            model, _metrics = trainer.fit(datums, weights_path=parent)
+            model, _metrics = trainer.fit(train, weights_path=parent)
+            val_metrics = evaluate_datums(model, val)
             save_path = root_path / f"round_{round_i}" / "model.keras"
             BaselineTrainer.save(model, save_path)
-            val_metrics = evaluate_packed(model, packed_val)
-            marked = registry.mark_processed(game_ids)
-            if marked <= 0:
-                logger.error(
-                    "Fit succeeded but mark_processed updated 0 rows (games=%s) - "
-                    "stop to avoid infinite loop.",
-                    len(game_ids),
-                )
-                _print_val_curve(curve)
-                return 2
             parent = save_path
-            elapsed_s = time.monotonic() - t0
-            curve.append((round_i, last_id, len(datums), val_metrics))
+            curve.append((round_i, max_t, len(train), val_metrics))
             print(format_eval_metrics(f"round{round_i}", val_metrics))
 
-            n_after = store.count_unprocessed_train(split_version=split_version)
-            _append_curve_jsonl(
-                root_path / "val_curve.jsonl",
-                {
-                    "round": round_i,
-                    "last_game_id": last_id,
-                    "train_n": len(datums),
-                    "games": len(game_ids),
-                    "marked": marked,
-                    "pending_before": n_before,
-                    "pending_after": n_after,
-                    "elapsed_s": round(elapsed_s, 1),
-                    "metrics": val_metrics.as_dict(),
-                },
-            )
-            if n_after >= n_before:
+            n_after = store.count_since(max_t, extra_where=exclude_sql)
+            if n_after >= n_before and max_t == cutoff:
                 logger.error(
-                    "Train succeeded but unprocessed count did not drop "
-                    "(before=%s after=%s) - stop to avoid infinite loop.",
+                    "Train succeeded but eligible count did not drop "
+                    "(before=%s after=%s cutoff=%s) - stop to avoid infinite loop.",
                     n_before,
                     n_after,
+                    cutoff,
                 )
                 _print_val_curve(curve)
                 return 2
+            cutoff = max_t
 
-        logger.error("Hit max_rounds=%s with unprocessed still above min - stopping.", max_rounds)
+        logger.error("Hit max_rounds=%s with eligible still above min - stopping.", max_rounds)
         _print_val_curve(curve)
         return 3
 
@@ -242,6 +227,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-rounds", type=int, default=50)
     parser.add_argument("--min-new-moves", type=int, default=MIN_NEW_MOVES_BASELINE)
     parser.add_argument("--batch-limit", type=int, default=MAX_MOVES_PER_BASELINE_BATCH)
+    cutoff_group = parser.add_mutually_exclusive_group()
+    cutoff_group.add_argument(
+        "--start-cutoff",
+        type=str,
+        default=None,
+        help="ISO datetime; exclusive games.end_time lower bound.",
+    )
+    cutoff_group.add_argument(
+        "--start-from-production-cutoff",
+        action="store_true",
+        help="Read TrainingState.for_baseline cutoff only (no write).",
+    )
     parser.add_argument(
         "--parent-uri",
         type=str,
@@ -257,6 +254,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_arg_parser().parse_args()
+    start_cutoff: datetime | None = None
+    if args.start_cutoff:
+        try:
+            start_cutoff = _parse_start_cutoff(str(args.start_cutoff))
+        except ValueError:
+            logger.error("Invalid --start-cutoff %r (use ISO datetime).", args.start_cutoff)
+            return 1
     return run_offline_catch_up(
         split_version=str(args.split_version),
         val_limit=max(50, int(args.val_limit)),
@@ -264,6 +268,8 @@ def main() -> int:
         max_rounds=max(1, int(args.max_rounds)),
         min_new_moves=max(1, int(args.min_new_moves)),
         batch_limit=max(1, int(args.batch_limit)),
+        start_cutoff=start_cutoff,
+        start_from_production_cutoff=bool(args.start_from_production_cutoff),
         parent_uri=str(args.parent_uri) if args.parent_uri else None,
         epochs=max(1, int(args.epochs)),
         style_disagree_boost=float(args.style_disagree_boost),

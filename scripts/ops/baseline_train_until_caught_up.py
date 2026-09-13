@@ -1,6 +1,6 @@
-"""CLI: train (+ promote) until unprocessed train moves are below the floor.
+"""CLI: train (+ promote) until baseline eligible backlog is below the floor.
 
-Stops when unprocessed train moves ``< MIN_NEW_MOVES_BASELINE`` (default 1000).
+Stops when ``count_since(cutoff) < MIN_NEW_MOVES_BASELINE`` (default 1000).
 
 Run (dev)::
 

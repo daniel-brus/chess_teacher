@@ -27,6 +27,7 @@ from chess_teacher.utils.table_data_class import TableDataClass
 
 DEFAULT_CRON_TIME = time(3, 0)
 DEFAULT_TIMEZONE = "Europe/Amsterdam"
+MAX_DISPLAY_NAME_LENGTH = 80
 DISPATCH_INTERVAL_MINUTES = 30
 DISPATCH_INTERVAL = timedelta(minutes=DISPATCH_INTERVAL_MINUTES)
 PIPELINE_RUN_COOLDOWN = timedelta(hours=24)
@@ -35,6 +36,20 @@ PIPELINE_RUN_COOLDOWN = timedelta(hours=24)
 PIPELINE_RUN_COOLDOWN_MARGIN = DISPATCH_INTERVAL
 
 logger = get_logger()
+
+
+def normalize_display_name(name: str | None) -> str | None:
+    """Strip, collapse whitespace, and validate a user display name."""
+    if name is None:
+        return None
+    if any(ord(char) < 32 for char in name):
+        raise ValueError("Display name cannot include control characters.")
+    cleaned = " ".join(name.split())
+    if not cleaned:
+        return None
+    if len(cleaned) > MAX_DISPLAY_NAME_LENGTH:
+        raise ValueError(f"Display name must be {MAX_DISPLAY_NAME_LENGTH} characters or fewer.")
+    return cleaned
 
 
 def dispatch_cron_time_options() -> tuple[time, ...]:
@@ -148,13 +163,15 @@ class User(TableDataClass):
     ) -> Self:
         """Replace this user's avatar with an uploaded image; persist to storage and DB."""
         upload_bytes = data if isinstance(data, bytes) else data.read()
-        clear_upload_image_cache(self.picture)
-        profile_pictures.delete(self.picture)
+        old_picture = self.picture
         picture_url = profile_pictures.save(
             user_id=self.user_id,
             data=upload_bytes,
             original_filename=original_filename,
         )
+        if old_picture and old_picture != picture_url:
+            clear_upload_image_cache(old_picture)
+            profile_pictures.delete(old_picture)
         clear_upload_image_cache(picture_url)
         self.upsert_field(db_client, "picture", picture_url)
         self.picture = picture_url
@@ -176,6 +193,7 @@ class User(TableDataClass):
 
     def update_name(self, db_client: DatabaseClient, name: str | None) -> Self:
         """Update this user's display name."""
+        name = normalize_display_name(name)
         self.upsert_field(db_client, "name", name)
         self.name = name
         return self

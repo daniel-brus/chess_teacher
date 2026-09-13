@@ -6,6 +6,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 
 import streamlit as st
+from streamlit.errors import StreamlitPageNotFoundError
 
 from streamlit_utils.theme import divider_border, divider_rgba, divider_width_px
 
@@ -30,6 +31,14 @@ def ingest_css(css: str) -> None:
     if "<style" not in body:
         body = f"<style>\n{body}\n</style>"
     st.markdown(body, unsafe_allow_html=True)
+
+
+def app_page_link(path: str, label: str, *, width: str = "stretch") -> None:
+    """Link to a registered ``st.navigation`` page; fall back when run standalone (AppTest)."""
+    try:
+        st.page_link(path, label=label, width=width)
+    except StreamlitPageNotFoundError:
+        st.markdown(f"**{label}**")
 
 
 def shell_css() -> str:
@@ -71,7 +80,7 @@ section[data-testid="stSidebar"] [data-testid="stSidebarContent"] {
 }
 
 section[data-testid="stSidebar"] [data-testid="stSidebarUserContent"] {
-    padding-bottom: 5rem;
+    padding-bottom: 7rem;
     box-sizing: border-box;
 }
 

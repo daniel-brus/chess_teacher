@@ -56,7 +56,7 @@ tables:
   training_state:
     schema: ml
     table: training_state
-    comment: Per-chain bookkeeping (min-data check time)
+    comment: Per-chain bookkeeping for incremental training cutoffs
     primary_key:
       - scope
     columns:
@@ -64,6 +64,10 @@ tables:
         data_type: text
         nullable: false
         comment: baseline or user:{user_id}
+      - name: last_trained_data_cutoff
+        data_type: timestamptz
+        nullable: true
+        comment: Last games.end_time consumed by training
       - name: last_min_data_check_at
         data_type: timestamptz
         nullable: true
