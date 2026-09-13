@@ -30,6 +30,14 @@ from chess_teacher.pipelines.neural_network.candidate_eval import (
     MAX_CANDIDATES,
     MOVE_FEAT_DIM,
 )
+from chess_teacher.pipelines.neural_network.candidate_losses import (
+    DEFAULT_SF_MIX_ALPHA,
+    DEFAULT_SOFT_TEMPERATURE_PAWNS,
+    LossKind,
+    masked_candidate_top_k,
+    pack_candidate_targets_for_loss,
+    resolve_candidate_loss,
+)
 from chess_teacher.pipelines.neural_network.create_training_set import (
     TrainingBatch,
     TrainingDatum,
@@ -47,10 +55,7 @@ from chess_teacher.pipelines.neural_network.ply_weights import (
 from chess_teacher.pipelines.neural_network.tf_runtime import ensure_tensorflow_logging
 from chess_teacher.pipelines.neural_network.train import (
     BaselineTrainer,
-    _masked_candidate_sparse_ce,
-    _masked_candidate_top_k,
     candidate_style_custom_objects,
-    pack_candidate_targets,
 )
 from chess_teacher.utils.general_utils import get_current_datetime
 from chess_teacher.utils.logging import get_logger
@@ -163,6 +168,9 @@ class HybridBoardTrainer:
         baseline_disagree_boost: float = 1.0,
         recency_boost: float = DEFAULT_RECENCY_BOOST,
         forced_scale_pawns: float | None = None,
+        loss_kind: LossKind = "sparse",
+        soft_temperature_pawns: float = DEFAULT_SOFT_TEMPERATURE_PAWNS,
+        sf_mix_alpha: float = DEFAULT_SF_MIX_ALPHA,
     ) -> None:
         self.epochs = epochs
         self.batch_size = batch_size
@@ -183,8 +191,16 @@ class HybridBoardTrainer:
         )
         self.baseline_disagree_boost = float(baseline_disagree_boost)
         self.recency_boost = float(recency_boost)
-        self.forced_scale_pawns = (
-            None if forced_scale_pawns is None else float(forced_scale_pawns)
+        self.forced_scale_pawns = None if forced_scale_pawns is None else float(forced_scale_pawns)
+        self.loss_kind: LossKind = str(loss_kind)  # type: ignore[assignment]
+        self.soft_temperature_pawns = float(soft_temperature_pawns)
+        self.sf_mix_alpha = float(sf_mix_alpha)
+
+    def _loss_fn(self) -> Any:
+        return resolve_candidate_loss(
+            self.loss_kind,
+            max_candidates=self.max_candidates,
+            sf_mix_alpha=self.sf_mix_alpha,
         )
 
     def build(self, state_dim: int) -> Any:
@@ -241,10 +257,10 @@ class HybridBoardTrainer:
         )
         model.compile(
             optimizer=keras.optimizers.Adam(1e-3),
-            loss=_masked_candidate_sparse_ce(self.max_candidates),
+            loss=self._loss_fn(),
             metrics=[
-                _masked_candidate_top_k(1, self.max_candidates),
-                _masked_candidate_top_k(3, self.max_candidates),
+                masked_candidate_top_k(1, self.max_candidates),
+                masked_candidate_top_k(3, self.max_candidates),
             ],
         )
         return model
@@ -286,10 +302,10 @@ class HybridBoardTrainer:
             ensure_tensorflow_logging()
             model.compile(
                 optimizer=keras.optimizers.Adam(1e-3),
-                loss=_masked_candidate_sparse_ce(self.max_candidates),
+                loss=self._loss_fn(),
                 metrics=[
-                    _masked_candidate_top_k(1, self.max_candidates),
-                    _masked_candidate_top_k(3, self.max_candidates),
+                    masked_candidate_top_k(1, self.max_candidates),
+                    masked_candidate_top_k(3, self.max_candidates),
                 ],
             )
             return model
@@ -311,19 +327,17 @@ class HybridBoardTrainer:
                 max_candidates=self.max_candidates,
                 move_feat_dim=self.move_feat_dim,
             ):
-                logger.warning(
-                    "Parent weights not hybrid board+state compatible; cold-starting"
-                )
+                logger.warning("Parent weights not hybrid board+state compatible; cold-starting")
                 return self.build(state_dim)
             from tensorflow import keras  # type: ignore[import-untyped]
 
             ensure_tensorflow_logging()
             model.compile(
                 optimizer=keras.optimizers.Adam(1e-3),
-                loss=_masked_candidate_sparse_ce(self.max_candidates),
+                loss=self._loss_fn(),
                 metrics=[
-                    _masked_candidate_top_k(1, self.max_candidates),
-                    _masked_candidate_top_k(3, self.max_candidates),
+                    masked_candidate_top_k(1, self.max_candidates),
+                    masked_candidate_top_k(3, self.max_candidates),
                 ],
             )
             return model
@@ -363,13 +377,17 @@ class HybridBoardTrainer:
         batch = TrainingBatch(datums)
         feats, mask, labels, kept = batch.candidate_style_targets()
         if not kept:
-            raise ValueError(
-                "HybridBoardTrainer.fit: no datums with usable candidate_evaluations"
-            )
+            raise ValueError("HybridBoardTrainer.fit: no datums with usable candidate_evaluations")
         kept_datums = [datums[i] for i in kept]
         x_board = pack_board_tensors(kept_datums)
         x_state = TrainingBatch(kept_datums).state_matrix()
-        y = pack_candidate_targets(labels, mask)
+        y = pack_candidate_targets_for_loss(
+            loss_kind=self.loss_kind,
+            labels=labels,
+            mask=mask,
+            move_feats=feats,
+            soft_temperature_pawns=self.soft_temperature_pawns,
+        )
         disagree_mask = user_not_sf_best_mask(feats, labels)
         strength = user_sf_disagree_strength(feats, labels, scale_pawns=self.style_disagree_scale)
         plies = [d.ply for d in kept_datums]

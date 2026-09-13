@@ -180,6 +180,11 @@ Still categorical over masked candidates.
 | **C SF-policy mix** | `loss = (1−α)·CE_user + α·CE_sf_best` | Regularize toward engine |
 | **D Sliced CE** | Separate agree/disagree heads or weighted CE terms | If single CE underfits disagree |
 
+**Impl (offline):** ``candidate_losses.py`` — A/B/C packing + Keras losses;
+``BaselineTrainer`` / ``HybridBoardTrainer`` take ``loss_kind=sparse|soft|sf_mix``,
+``soft_temperature_pawns``, ``sf_mix_alpha``. Default remains **sparse**. Next: smoke
+A/B on registry val (guardrail: agree_t1, esp. sparse-material slices).
+
 Pick by registry-val disagree (guardrail: agree must not collapse). **Do not** change loss in the same run as the first encoder A/B.
 
 ---

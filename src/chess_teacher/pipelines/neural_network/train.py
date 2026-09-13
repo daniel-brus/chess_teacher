@@ -19,6 +19,17 @@ from chess_teacher.pipelines.neural_network.candidate_eval import (
     MAX_CANDIDATES,
     MOVE_FEAT_DIM,
 )
+from chess_teacher.pipelines.neural_network.candidate_losses import (
+    DEFAULT_SF_MIX_ALPHA,
+    DEFAULT_SOFT_TEMPERATURE_PAWNS,
+    LossKind,
+    candidate_loss_custom_objects,
+    masked_candidate_sparse_ce,
+    masked_candidate_top_k,
+    pack_candidate_targets_for_loss,
+    pack_sparse_candidate_targets,
+    resolve_candidate_loss,
+)
 from chess_teacher.pipelines.neural_network.create_training_set import (
     TrainingBatch,
     TrainingDatum,
@@ -64,51 +75,14 @@ def _import_keras():
 # Re-export for pipeline / MLflow params.
 HEAD_TYPE_POLICY = "policy"  # legacy marker only; trainer no longer builds this head.
 
-
-def _masked_candidate_sparse_ce(max_candidates: int = MAX_CANDIDATES):
-    """``y_true`` is ``(batch, MAX+1)`` = candidate mask floats + class index."""
-    tf = _import_tensorflow()
-
-    def loss_fn(y_true: Any, y_pred: Any) -> Any:
-        mask = y_true[:, :max_candidates]
-        indices = tf.cast(y_true[:, max_candidates], tf.int32)
-        neg_inf = tf.constant(-1.0e9, dtype=y_pred.dtype)
-        masked_logits = tf.where(mask > 0.5, y_pred, neg_inf)
-        return tf.keras.losses.sparse_categorical_crossentropy(
-            indices, masked_logits, from_logits=True
-        )
-
-    loss_fn.__name__ = "masked_candidate_sparse_ce"
-    return loss_fn
-
-
-def _masked_candidate_top_k(k: int, max_candidates: int = MAX_CANDIDATES):
-    tf = _import_tensorflow()
-
-    def metric_fn(y_true: Any, y_pred: Any) -> Any:
-        mask = y_true[:, :max_candidates]
-        indices = tf.cast(y_true[:, max_candidates], tf.int32)
-        neg_inf = tf.constant(-1.0e9, dtype=y_pred.dtype)
-        masked_logits = tf.where(mask > 0.5, y_pred, neg_inf)
-        return tf.keras.metrics.sparse_top_k_categorical_accuracy(indices, masked_logits, k=k)
-
-    metric_fn.__name__ = f"masked_cand_top{k}"
-    return metric_fn
-
-
-def pack_candidate_targets(labels: np.ndarray, mask: np.ndarray) -> np.ndarray:
-    """Pack ``(N,)`` labels + ``(N, MAX)`` mask into ``(N, MAX+1)`` float32."""
-    y_index = np.asarray(labels, dtype=np.float32).reshape(-1, 1)
-    m = np.asarray(mask, dtype=np.float32)
-    return np.concatenate([m, y_index], axis=1)
+# Backward-compatible aliases — E22 implementations live in ``candidate_losses``.
+_masked_candidate_sparse_ce = masked_candidate_sparse_ce
+_masked_candidate_top_k = masked_candidate_top_k
+pack_candidate_targets = pack_sparse_candidate_targets
 
 
 def candidate_style_custom_objects(max_candidates: int = MAX_CANDIDATES) -> dict[str, Any]:
-    return {
-        "masked_candidate_sparse_ce": _masked_candidate_sparse_ce(max_candidates),
-        "masked_cand_top1": _masked_candidate_top_k(1, max_candidates),
-        "masked_cand_top3": _masked_candidate_top_k(3, max_candidates),
-    }
+    return candidate_loss_custom_objects(max_candidates)
 
 
 def load_candidate_style_keras(
@@ -251,6 +225,9 @@ class BaselineTrainer:
         baseline_disagree_boost: float = 1.0,
         recency_boost: float = DEFAULT_RECENCY_BOOST,
         forced_scale_pawns: float | None = None,
+        loss_kind: LossKind = "sparse",
+        soft_temperature_pawns: float = DEFAULT_SOFT_TEMPERATURE_PAWNS,
+        sf_mix_alpha: float = DEFAULT_SF_MIX_ALPHA,
     ) -> None:
         self.epochs = epochs
         self.batch_size = batch_size
@@ -270,8 +247,16 @@ class BaselineTrainer:
         )
         self.baseline_disagree_boost = float(baseline_disagree_boost)
         self.recency_boost = float(recency_boost)
-        self.forced_scale_pawns = (
-            None if forced_scale_pawns is None else float(forced_scale_pawns)
+        self.forced_scale_pawns = None if forced_scale_pawns is None else float(forced_scale_pawns)
+        self.loss_kind: LossKind = str(loss_kind)  # type: ignore[assignment]
+        self.soft_temperature_pawns = float(soft_temperature_pawns)
+        self.sf_mix_alpha = float(sf_mix_alpha)
+
+    def _loss_fn(self) -> Any:
+        return resolve_candidate_loss(
+            self.loss_kind,
+            max_candidates=self.max_candidates,
+            sf_mix_alpha=self.sf_mix_alpha,
         )
 
     def build(self, input_dim: int) -> Any:
@@ -305,7 +290,7 @@ class BaselineTrainer:
         )
         model.compile(
             optimizer=keras.optimizers.Adam(1e-3),
-            loss=_masked_candidate_sparse_ce(self.max_candidates),
+            loss=self._loss_fn(),
             metrics=[
                 _masked_candidate_top_k(1, self.max_candidates),
                 _masked_candidate_top_k(3, self.max_candidates),
@@ -352,7 +337,7 @@ class BaselineTrainer:
             ensure_tensorflow_logging()
             model.compile(
                 optimizer=keras.optimizers.Adam(1e-3),
-                loss=_masked_candidate_sparse_ce(self.max_candidates),
+                loss=self._loss_fn(),
                 metrics=[
                     _masked_candidate_top_k(1, self.max_candidates),
                     _masked_candidate_top_k(3, self.max_candidates),
@@ -392,7 +377,7 @@ class BaselineTrainer:
             ensure_tensorflow_logging()
             model.compile(
                 optimizer=keras.optimizers.Adam(1e-3),
-                loss=_masked_candidate_sparse_ce(self.max_candidates),
+                loss=self._loss_fn(),
                 metrics=[
                     _masked_candidate_top_k(1, self.max_candidates),
                     _masked_candidate_top_k(3, self.max_candidates),
@@ -441,7 +426,13 @@ class BaselineTrainer:
             len(datums) - len(kept_datums),
         )
         x_state = TrainingBatch(kept_datums).state_matrix()
-        y = pack_candidate_targets(labels, mask)
+        y = pack_candidate_targets_for_loss(
+            loss_kind=self.loss_kind,
+            labels=labels,
+            mask=mask,
+            move_feats=feats,
+            soft_temperature_pawns=self.soft_temperature_pawns,
+        )
         disagree_mask = user_not_sf_best_mask(feats, labels)
         strength = user_sf_disagree_strength(feats, labels, scale_pawns=self.style_disagree_scale)
         plies = [d.ply for d in kept_datums]
