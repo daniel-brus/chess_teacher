@@ -61,7 +61,7 @@ class StockfishEvaluationTransformation(FenCharacteristicTransformation):
         requests = [
             FenEvalRequest(
                 fen,
-                ply=self._fen_ply.get(_safe_epd(fen)),
+                ply=_ply_for_fen(fen, self._fen_ply),
                 eval_depth=self.depth,
                 candidate_nodes=CANDIDATE_STOCKFISH_NODES,
             )
@@ -84,14 +84,20 @@ def _safe_epd(fen: str) -> str | None:
         return None
 
 
-def _resolve_ply(row: dict[str, object], fen: str, fen_ply: dict[str, int | None]) -> int | None:
-    ply_raw = row.get("ply")
-    if ply_raw is not None:
-        return int(ply_raw)
+def _ply_for_fen(fen: str, fen_ply: dict[str, int | None]) -> int | None:
     epd = _safe_epd(fen)
     if epd is None:
         return None
     return fen_ply.get(epd)
+
+
+def _resolve_ply(row: dict[str, object], fen: str, fen_ply: dict[str, int | None]) -> int | None:
+    ply_raw = row.get("ply")
+    if isinstance(ply_raw, int):
+        return ply_raw
+    if isinstance(ply_raw, str) and ply_raw:
+        return int(ply_raw)
+    return _ply_for_fen(fen, fen_ply)
 
 
 def _min_ply_by_epd(df: pl.DataFrame) -> dict[str, int | None]:

@@ -4,6 +4,11 @@ import chess
 import polars as pl
 import pytest
 
+from chess_teacher.pipelines.fen_eval_cache.service import (
+    PositionEvalService,
+    reset_position_eval_service_for_tests,
+)
+from chess_teacher.pipelines.fen_eval_cache.store import MemoryEvalStore
 from chess_teacher.pipelines.preprocessing.fen_characteristic import (
     DualSidedFenCharacteristicTransformation,
     FenCharacteristicTransformation,
@@ -24,11 +29,6 @@ from chess_teacher.pipelines.preprocessing.move_characteristics.move_context imp
 from chess_teacher.pipelines.preprocessing.move_characteristics.move_flags import (
     MoveFlagsTransformation,
 )
-from chess_teacher.pipelines.fen_eval_cache.service import (
-    PositionEvalService,
-    reset_position_eval_service_for_tests,
-)
-from chess_teacher.pipelines.fen_eval_cache.store import MemoryEvalStore
 from chess_teacher.pipelines.preprocessing.move_characteristics.stockfish_evaluation import (
     StockfishEvaluationTransformation,
 )

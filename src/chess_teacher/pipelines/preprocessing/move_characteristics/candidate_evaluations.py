@@ -7,6 +7,7 @@ Last transform in :class:`~chess_teacher.pipelines.preprocessing.pipeline_steps.
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -87,7 +88,7 @@ class CandidateEvaluationsTransformation(DataFrameTransformation):
 
     def _rows_for_fen_payloads(
         self,
-        fen_payloads: dict[str, dict[str, Any] | None],
+        fen_payloads: Mapping[str, dict[str, Any] | None],
     ) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
         for fen, payload in fen_payloads.items():

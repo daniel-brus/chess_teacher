@@ -184,11 +184,11 @@ class PositionEvalService:
         computed = self._compute_jobs(to_compute)
         writes: list[StoredEval] = []
         for job in to_compute:
-            result = computed.get(job.epd)
-            if result is None:
+            computed_result = computed.get(job.epd)
+            if computed_result is None:
                 continue
-            out[job.epd] = result
-            stored = _to_stored(result, engine=self.engine_name)
+            out[job.epd] = computed_result
+            stored = _to_stored(computed_result, engine=self.engine_name)
             self._memory.upsert_many([stored])
             if _should_persist(job.ply, self.max_ply, existing=job.existing is not None):
                 writes.append(stored)
