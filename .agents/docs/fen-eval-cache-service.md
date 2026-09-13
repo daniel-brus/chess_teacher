@@ -6,7 +6,7 @@
 
 **Source brief:** `.agents/docs/brief-fen-eval-cache-service.md` on `feature/sf_lookup_service`.
 
-**Last updated:** 2026-09-13
+**Last updated:** 2026-09-13 (rev: LRU capacity + play as first-class consumer)
 
 ---
 
@@ -14,31 +14,28 @@
 
 ### Problem
 
-`EnrichCheap` / `EnrichExpensive` now page at `TransformStep.batch_size=2000` so fat FEN + MultiPV frames do not OOM the ~4GB VPS. FEN dedup lives **inside one `transform()` call** (`FenCharacteristicTransformation._collect_unique_fens`, `CandidateEvaluationsTransformation` `fen_to_moves`). The next 2000-row page starts from zero.
+`EnrichCheap` / `EnrichExpensive` now page at `TransformStep.batch_size=2000` so fat FEN + MultiPV frames do not OOM the ~4GB VPS. FEN dedup lives **inside one `transform()` call**. The next page starts from zero. Play runs a **different** Stockfish budget (`LIVE_CANDIDATE_STOCKFISH_NODES=1000`) on the same positions and pays again.
 
-One heavy account: ~737k incomplete expensive rows. Candidate MultiPV at `CANDIDATE_STOCKFISH_NODES=50_000` dominates wall-clock (~18d estimate). Played-move depth-12 eval is the same FEN-per-page pattern but much cheaper per position.
-
-Today results land on **`games.move_characteristics` per `move_id`**, not per position. The same opening FEN is re-searched on every page, every pipeline run, every account, and again in `scripts/ops/backfill_candidate_evals.py`.
-
-Checkpoints (`fen_checkpoint.py`, `FEN_EVAL_CHECKPOINT_PERCENT` / `CANDIDATE_EVAL_CHECKPOINT_PERCENT`) write **partial mc columns** so a crash does not lose a page. They do not share compute across pages or jobs.
+The product is **not** “never compute a position twice.” It is a **hot-position registry**: skip Stockfish when the same EPD comes back soon (openings, the current game, a line you play every week). One-off middlegames may be recomputed. That is fine.
 
 ### Goals
 
-- Durable **position → engine result** store, keyed by normalized position + engine identity + budget (not bare FEN, not `move_id`).
-- First consumer: `EnrichExpensiveMoveCharacteristicsStep` (played-move eval + MultiPV candidates).
-- Compute-on-miss: empty/unavailable cache never blocks a pipeline.
-- Stay inside existing Stockfish budget contracts (`depth=12` played-move; `CANDIDATE_STOCKFISH_DEPTH` + `CANDIDATE_STOCKFISH_NODES` for candidates).
-- Fit import DAG, `metadata.yml`, `DatabaseClient`, k8s Jobs. Do not recreate OOMs by holding the world in RAM.
+- Fixed-capacity **LRU registry** of EPD → engine result, keyed by position + engine identity + budget.
+- **Play is a first-class consumer.** Cache the live 1k-node MultiPV so a book move or a repeat line is instant.
+- Preprocess **reads** the same idea at its own budget (50k / depth 12) so opening pages get cheaper. It must not flood the registry with the 737k-move tail.
+- Compute-on-miss: empty/unavailable cache never blocks pipeline or play.
+- Stay inside existing Stockfish budget contracts. Do not mix 50k train payloads with 1k live keys.
+- Fit import DAG, `metadata.yml`, `DatabaseClient`. Do not hold the world in RAM.
 
 ### Non-goals (first build)
 
 - Replacing Stockfish with a NN evaluator.
 - Cloud-managed cache (Redis Cloud, etc.).
 - Changing `candidate_evaluations` train/label semantics.
-- Caching cheap board metrics (legal moves, king safety, …). Those are CPU-cheap vs MultiPV.
+- Caching cheap board metrics (legal moves, king safety, …).
 - Rewriting stored `games.moves.fen_*` strings.
-- A live play/bots consumer in phase 1 (design the key so it can join later).
-- Exact-match “higher budget satisfies lower” (would mix 50k train payloads with 1k live play).
+- “Higher budget satisfies lower” (50k row used as a 1k play hit).
+- Seeding the registry from the entire complete `move_characteristics` table (that is the opposite of LRU).
 
 ---
 
@@ -46,7 +43,7 @@ Checkpoints (`fen_checkpoint.py`, `FEN_EVAL_CHECKPOINT_PERCENT` / `CANDIDATE_EVA
 
 ### Position key (not raw `board.fen()`)
 
-Moves store `board.fen()` (`move_extraction.py`), which includes **halfmove clock + fullmove number**. Same placement/STM/castling/EP at a different ply is a different string. Per-page dedup already uses those raw strings; a durable cache that does the same leaves a lot of transposition hits on the table.
+Moves store `board.fen()` (`move_extraction.py`), which includes **halfmove clock + fullmove number**. Same board in two games is often a different string.
 
 **Normalize with python-chess EPD (4 fields):** placement, side to move, castling, en passant.
 
@@ -55,27 +52,23 @@ def position_key(fen: str) -> str:
     return chess.Board(fen).epd()
 ```
 
-Stockfish eval at our budgets does not use clocks (50-move / repetition draws are not in the search contract). Keep the original FEN on the mc row; normalize **only** for the cache key.
-
-Invalid FEN → no cache read/write; existing transforms already warn and skip/raise.
+Clocks do not change our Stockfish contract. Keep the original FEN on the mc / play board; normalize **only** for the cache key.
 
 ### Engine + budget identity
 
-Bare FEN is not a key. A row is identified by:
+| Field | Played-move eval | Pipeline candidates | Play candidates |
+|---|---|---|---|
+| `kind` | `eval` | `candidates` | `candidates` |
+| `engine` | `stockfish` | `stockfish` | `stockfish` |
+| `engine_version` | image SF version | same | same |
+| `depth` | `12` | `CANDIDATE_STOCKFISH_DEPTH` (12) | 12 |
+| `num_nodes` | `NULL` | `50000` | `1000` (or `live_candidate_stockfish_nodes()`) |
+| `payload_version` | `1` | `1` | `1` |
+| `position_key` | EPD | EPD | EPD |
 
-| Field | Played-move eval | Candidates |
-|---|---|---|
-| `kind` | `eval` | `candidates` |
-| `engine` | `stockfish` | `stockfish` |
-| `engine_version` | Debian/image SF version string (see ops) | same |
-| `depth` | `12` (today’s `StockfishEvaluationTransformation`) | `CANDIDATE_STOCKFISH_DEPTH` (12) |
-| `num_nodes` | `NULL` (depth-limited `get_evaluation()`) | `CANDIDATE_STOCKFISH_NODES` (50000) |
-| `payload_version` | `1` | `1` |
-| `position_key` | EPD | EPD |
+These combinations are **lanes**. LRU capacity is **per lane**, so a preprocess flood cannot evict play’s 1k-node openings (and a Stockfish upgrade is a new empty lane, not a wipe of the old one).
 
-`payload_version` bumps when mate/cp mapping, MultiPV shape, or UCI legality convention changes (`evaluation_to_white_pov_pawns`, `build_candidate_payload`). Do **not** silently reuse v1 rows after a contract change.
-
-Do **not** put python-chess version in the key for v1. Detect legal-move drift on read instead (below).
+`payload_version` bumps when mate/cp mapping or MultiPV shape changes. Do not put python-chess version in the key; detect legal-move drift on read.
 
 ### Surrogate primary key
 
@@ -85,40 +78,21 @@ cache_key = sha256(
 ).hexdigest()
 ```
 
-Store the component columns too (debug, invalidation, `WHERE kind = 'candidates'`). SHA-256 collision risk is negligible; still store `position_key` and reject a row whose stored EPD does not match the lookup EPD (belt and suspenders).
+Store the component columns too. On read, reject a row whose stored EPD does not match the lookup EPD.
 
 ### Value
 
-**`kind=eval`**
+**`kind=eval`:** `eval_white_pov` (white-POV pawns).
 
-- `eval_white_pov double precision NOT NULL` — same white-POV pawns as `evaluation_before` / `evaluation_after`.
-
-**`kind=candidates`**
-
-- `payload jsonb NOT NULL` — exact `build_candidate_payload` shape already on mc:
-
-```json
-{
-  "depth": 12,
-  "num_nodes": 50000,
-  "method": "multipv_nodes",
-  "evals_white_pov": {"e2e4": 0.32, "...": 0.0}
-}
-```
-
-- `legal_uci_count int` — `len(evals_white_pov)` at write. On read, if `chess.Board(fen).legal_moves.count() != legal_uci_count`, treat as **miss** and recompute (python-chess / variant drift). Do not patch the payload.
-
-Optional later: `hit_count`, `last_hit_at` for popularity eviction. Skip in phase 1 (extra writes on the hot path).
+**`kind=candidates`:** existing `build_candidate_payload` JSONB + `legal_uci_count`. If `board.legal_moves.count() != legal_uci_count`, treat as miss and recompute.
 
 ### Proposed table
 
-New schema **`engine`** (computed engine artifacts; not `other` reference data, not per-move `games`).
-
-`engine.position_evals`
+Schema **`engine`**. Table `engine.position_evals`.
 
 | Column | Type | Notes |
 |---|---|---|
-| `cache_key` | `text` | PK, sha256 hex |
+| `cache_key` | `text` | PK |
 | `kind` | `text` | `eval` \| `candidates` |
 | `engine` | `text` | |
 | `engine_version` | `text` | |
@@ -129,239 +103,188 @@ New schema **`engine`** (computed engine artifacts; not `other` reference data, 
 | `eval_white_pov` | `double precision` | null when `kind=candidates` |
 | `payload` | `jsonb` | null when `kind=eval` |
 | `legal_uci_count` | `int` | null when `kind=eval` |
+| `last_access_seq` | `bigint` | LRU cursor (see §2.1) |
 | `created_at` | `timestamptz` | default `now()` |
 
-Indexes: PK on `cache_key`; unique `(kind, engine, engine_version, depth, num_nodes, payload_version, position_key)`; optional `(kind, engine_version)` for wipe-on-upgrade.
+Indexes: PK; unique `(kind, engine, engine_version, depth, num_nodes, payload_version, position_key)`; **`(kind, engine, engine_version, depth, num_nodes, payload_version, last_access_seq)`** for eviction.
 
-`metadata.yml` + `TableDataClass` next to the client (see §3). Follow existing preprocessing metadata style.
+`metadata.yml` + `TableDataClass` next to the client.
+
+### 2.1 LRU: “TTL” in new positions, not wall-clock
+
+Owner model (agreed):
+
+1. Miss → run Stockfish → insert at the **top** of that lane.
+2. Hit → **move that row to the top** (queried again = hot).
+3. Lane is a **fixed-capacity ordered registry** (default **10_000** rows per lane, env `FEN_EVAL_CACHE_LANE_CAPACITY`).
+4. When a insert would exceed capacity, delete the **bottom** (least recently accessed). A one-off EPD that never comes back falls off after ~10k *other* EPDs have been admitted. Hot EPDs are touched on every lookup and never fall off.
+
+This is **LRU**, not Redis-style time TTL. “After 10k new EPDs” is what happens once the lane is **full**. Do **not** expire a row after 10k inserts if the lane still has room (that would empty a young cache for no reason). Capacity-based LRU and “generation TTL of 10k” are the same only after the lane is full.
+
+Do **not** implement a linked list in Postgres. Use a monotonic sequence:
+
+```text
+get_many hits  → UPDATE last_access_seq = nextval(...) WHERE cache_key = ANY(...)
+put_many new   → INSERT ... last_access_seq = nextval(...)
+then           → DELETE FROM lane ORDER BY last_access_seq ASC
+                 LIMIT greatest(lane_count - capacity, 0)
+```
+
+One batched `UPDATE` per `get_many`, not one statement per FEN. Play can bump a single row per move.
+
+Approximate LRU (skip a bump if the row was already near the top) is an optional later tweak if the `UPDATE` shows up in traces. Start exact.
+
+### Admission (what we refuse to insert)
+
+LRU only stays “hot openings + recent play” if **garbage is not admitted**. A preprocess page of ~2k unique middlegames, written in full, pushes ~2k cold rows off the **preprocess lane**. After a few pages, last night’s openings are gone even if play’s lane is safe.
+
+| Source | On miss, after SF | On hit |
+|---|---|---|
+| **Play** | **Always insert** (tiny volume, this is the point) | Move to top |
+| **Preprocess / backfill** | Insert only if **ply ≤ N** (recommend **N = 16**, env) or the EPD is **already in the lane** (refresh) | Move to top |
+| **Seed job** | Only low-ply rows from existing mc, same N. Never dump all complete mc. | — |
+
+Ply is already on `games.moves`. `EnrichExpensive` must load `ply` (or `move_nr`) with the page to apply the gate. Play always has a ply.
+
+Recompute of a high-ply preprocess miss still writes **`move_characteristics`**. It just does not enter the registry.
 
 ### Invalidation
 
 | Event | Action |
 |---|---|
-| Depth / node budget change | New key; old rows unused |
-| Mate/cp or payload shape change | Bump `payload_version` |
-| Stockfish binary upgrade that should not mix | New `engine_version`; keep old rows or `DELETE WHERE engine_version = …` |
-| Legal-move count mismatch | Per-row miss + overwrite |
-| Full wipe | `TRUNCATE engine.position_evals` (ops, not app default) |
+| Depth / nodes / SF version / payload_version change | New lane; old lane ages out unused or is `DELETE`d |
+| Legal-move count mismatch | Miss + replace that row |
+| Full wipe | `TRUNCATE` (ops) |
+| Reprocess | Still **reads** LRU; high-ply still not admitted (open: bypass flag) |
 
-Never overwrite a filled row with a **lower** budget. Phase 1 write is `INSERT … ON CONFLICT DO NOTHING` (first writer wins). Reprocess / `full_reload` still recomputes mc rows; it may **read** the cache unless we add an explicit bypass flag (open question).
+Same-key write: `ON CONFLICT` → bump `last_access_seq`, do **not** overwrite eval/payload unless an explicit reprocess flag says so (first result wins).
 
 ---
 
 ## 3. Architecture options (ranked)
 
-Single Hetzner VPS, k3s, ~4GB RAM, no swap. Pipeline Jobs have **no resource requests** today (`orchestration/k8s/job/pipeline.yaml`) → BestEffort, OOM-killable. Redis already exists (`REDIS_URL`) as a **TTL user/admin cache**, not a durable compute store.
+Single Hetzner VPS, k3s, ~4GB RAM. Redis already exists as a **wall-clock TTL** user/admin cache (`cache_utils.py`). That is a different job.
 
 ### Option A — Postgres table in the monolith
 
-Library + `engine.position_evals` in the same app/DB the pipelines already use.
+**Recommendation.** 10k candidate rows × ~2KB ≈ 20MB per lane. Several lanes still tiny. Disk LRU, queryable, survives Jobs, batch `ANY(...)`.
 
-**Pros:** no new process, no new ingress, Doppler/k8s surface unchanged; queryable; survives job death; batch `WHERE cache_key = ANY(...)`; disk-backed (candidates are ~1–2KB JSON, must not live entirely in Redis RAM); matches `metadata.yml` / `DatabaseClient` / checkpoint habits.
+### Option B — library client + same table
 
-**Cons:** cache IO shares the primary Postgres with games/mc/train; a huge table can bloat the same instance.
+How A is coded (`get_many` / `put_many` / `touch` / `evict_lane`). Not a sidecar process.
 
-### Option B — sidecar / library + shared DB
+### Option C — microservice
 
-Same storage as A. Packaging is a narrow client (`get_many` / `put_many`) so transforms do not grow ad-hoc SQL. Not a second container.
+Still later. Play latency is dominated by Stockfish on miss, not by a Postgres primary-key get. Split if Streamlit ever waits on cache IO or we grow a second host.
 
-**This is how A should be coded.** Rank B as the *implementation shape* of A, not a separate deploy.
+Redis LRU is tempting (native `MAXMEMORY` + `allkeys-lru`) but candidate JSON on the same 4GB box competes with user-cache RAM. Postgres wins for v1. Optional Redis *front* later.
 
-### Option C — dedicated microservice + API + storage
-
-Own Deployment, HTTP/gRPC, own volume or DB, client in pipelines only (DAG-safe).
-
-**Pros:** isolate play latency later; independent scale/restart.
-
-**Cons now:** another Python process on a 4GB node; another manifest + probe + secret; failure mode the pipeline must ignore anyway (compute-on-miss); batch enrich wants set-oriented SQL, not 2000 HTTP GETs (or we build a batch API that is just a DB proxy). No second host to share with.
-
-### Recommendation
-
-**Monolith Postgres table now (A), implemented as a library client (B). Microservice later, not now.**
-
-Split to C when **any** of these is true:
-
-1. Play/bots need sub-10ms lookups at interactive QPS and cache IO shows up on Streamlit latency.
-2. `engine.position_evals` is large enough that autovacuum / backup / bloat hurts games OLTP (order-of-magnitude: tens of millions of candidate rows, multi-GB JSONB).
-3. A second machine should share the cache (we do not have that).
-4. We want a standalone warmer that must not import the pipeline stack.
-
-Redis is **not** the durable store. It is RAM-bound on the same VPS; `cache_utils.py` is TTL user-cache. An optional tiny Redis LRU in front of Postgres is a phase-3 optimization, not v1.
-
-### Package boundary (import DAG)
+### Package boundary
 
 ```
 utils (db, chess_utils, pipeline_utils)
   ↑
-pipelines/fen_eval_cache     # table + client + key helpers  (NEW)
+pipelines/fen_eval_cache     # table + client + LRU helpers
   ↑
-pipelines/preprocessing      # EnrichExpensive transforms
+pipelines/preprocessing      # EnrichExpensive (read + gated write)
   ↑
-bots / play                  # later, same client
+bots / play                  # same client, write-all-misses
 ```
-
-`utils` must not import the cache. Do not hang this off `cache_utils.py` (wrong lifetime and key style). A microservice, if ever, is **outside** the DAG; pipelines keep an HTTP client only.
-
-Suggested files (when implementing):
-
-- `src/chess_teacher/pipelines/fen_eval_cache/metadata.yml`
-- `tables.py` — `PositionEval`
-- `keys.py` — `position_key`, `build_cache_key`, `engine_version()`
-- `client.py` — `FenEvalCacheClient`
 
 ---
 
 ## 4. API / client contract
 
-In-process, sync, batch-first. No HTTP in v1.
-
 ```python
 class FenEvalCacheClient:
     def get_many(self, keys: Sequence[CacheLookup]) -> dict[str, CacheHit]:
-        """cache_key → hit. Missing keys omitted. Lookup/parse errors → omit (miss)."""
+        """Hits only. Touches LRU (batched). Errors → empty (all miss)."""
 
     def put_many(self, rows: Sequence[CacheRow]) -> int:
-        """INSERT ON CONFLICT DO NOTHING. Returns inserted count. Errors → log, return 0."""
+        """Insert new keys at top; ON CONFLICT touch only.
+        Then evict lane bottoms past capacity. Errors → 0."""
 ```
 
-`CacheLookup` carries kind + budget + **original FEN** (normalize inside). `CacheHit` for `eval` is a float; for `candidates` the payload dict.
+`CacheLookup` includes kind + budget + original FEN (+ optional `admit: bool` from the caller’s ply gate). Client does not guess ply.
 
-### Sync vs async populate
-
-**Sync populate on miss** in the enrich transform: the page already has a ProcessPool + Stockfish. Adding a network hop to a warmer would not shorten the 18d backlog.
-
-Background warmer / one-off seed is a **separate Job** (see §5), not an async queue in the request path.
-
-### Failure modes
-
-| Failure | Read | Write |
-|---|---|---|
-| Table missing (pre-migrate) | Miss all; log once | No-op |
-| Postgres timeout / down | Miss all; compute | No-op |
-| Corrupt JSONB / EPD mismatch / legal-count drift | Miss that key | — |
-| Partial `put_many` | — | Accept; next run fills |
-
-Cache is never on the critical path for correctness. Mc checkpoints stay the crash-safety net for **account-facing** columns.
-
-### Feature flag
-
-`FEN_EVAL_CACHE=off|readwrite|readonly` (env, default `readwrite` once shipped). `off` for bisect. `readonly` for a reprocess that must not pollute a new budget (rare).
+Failure: table missing / Postgres down → compute-on-miss, no crash. Feature flag `FEN_EVAL_CACHE=off|readwrite|readonly`.
 
 ---
 
 ## 5. Write path
 
-Who fills the cache:
-
-1. **Enrich miss (primary).** After Stockfish returns, `put_many` the new evals/payloads. Same process as today’s pool; no extra SF.
-2. **Seed from existing mc (phase 1b, no SF).** One-off `scripts/ops/seed_fen_eval_cache.py` (k8s `run_script_job.py`): join `games.moves` + complete `candidate_evaluations` / `evaluation_*`, normalize FEN, insert. Fast, resumable, `ON CONFLICT DO NOTHING`.
-3. **Backfill job.** Point `backfill_candidate_evals.py` at the same client so a standalone Job also writes/reads the cache. Do not invent a third Stockfish wrapper.
-
-Do not write from cheap enrich. Do not write live play 1k-node payloads into the 50k key.
-
 ```mermaid
 sequenceDiagram
-  participant E as EnrichExpensive page
+  participant P as Play or Enrich page
   participant C as FenEvalCacheClient
   participant PG as engine.position_evals
-  participant SF as Stockfish pool
-  participant MC as games.move_characteristics
+  participant SF as Stockfish
+  participant Out as mc row or play UI
 
-  E->>C: get_many(unique EPDs + budget)
-  C->>PG: SELECT WHERE cache_key = ANY(...)
+  P->>C: get_many(EPDs + lane)
+  C->>PG: SELECT + bump last_access_seq on hits
   PG-->>C: hits
-  C-->>E: hits + implicit misses
-  E->>SF: evaluate(miss FENs only)
-  SF-->>E: scores / payloads
-  E->>C: put_many(miss results)
-  C->>PG: INSERT ON CONFLICT DO NOTHING
-  E->>MC: merge page + %-checkpoints (existing)
+  C-->>P: hits / misses
+  P->>SF: miss FENs only
+  SF-->>P: scores / payloads
+  alt play OR preprocess ply <= N
+    P->>C: put_many(misses)
+    C->>PG: INSERT at top; DELETE lane bottom if over cap
+  else preprocess high ply
+    Note over C,PG: compute used for mc only; not admitted
+  end
+  P->>Out: existing checkpoint / live move
 ```
 
-Across batches (same job or later account):
+Hot path across games:
 
 ```mermaid
 sequenceDiagram
-  participant P1 as Page 1 (moves 1–2000)
-  participant P2 as Page N (later / other account)
-  participant PG as engine.position_evals
+  participant G1 as Game / page A
+  participant Reg as Lane (cap 10k)
+  participant G2 as Game / page B
   participant SF as Stockfish
 
-  P1->>PG: miss opening EPDs
-  P1->>SF: compute
-  P1->>PG: store
-  P2->>PG: hit same opening EPDs
-  Note over P2,SF: no SF for those FENs
-  P2->>SF: only novel middlegame misses
+  G1->>Reg: miss opening EPD → SF → insert top
+  G1->>Reg: miss unique middlegame → SF
+  Note over G1,Reg: preprocess: middlegame not inserted
+  G2->>Reg: query same opening → hit, move to top
+  Note over G2,SF: no SF
 ```
 
 ---
 
-## 6. Read path into `EnrichExpensive*`
+## 6. Read path
 
-Keep `TransformStep` keyset paging (`batch_size=2000`, `after_key` on `move_id`). Do not load all incomplete rows. Do not join the full cache table into the page SQL (that pulls JSONB you may not need and fights the RAM cap).
+### EnrichExpensive
 
-Inside each transform, after collecting unique **raw** FENs:
+Keep `batch_size=2000` keyset paging. After unique raw FENs:
 
-1. Map each raw FEN → `position_key` (EPD). Several raw FENs can share one EPD (clocks).
-2. `get_many` those EPDs.
-3. Send **only miss FENs** into the existing serial/parallel evaluators (`_evaluate_unique_fens` / `_run_fen_pool`).
-4. `put_many` miss results (best-effort).
-5. Stamp columns from EPD → raw FEN → rows (same as today’s score dict).
-6. Existing `bind_checkpoint` → mc merge unchanged.
+1. EPD-normalize (many raw FENs → one key).
+2. `get_many` (hits move to top).
+3. Stockfish on misses only.
+4. `put_many` only admitted misses (ply ≤ N).
+5. Stamp mc columns for **all** rows (admitted or not). Checkpoints unchanged.
 
-Played-move eval looks up **two** EPDs per move (`fen_before`, `fen_after`). Candidates look up **`fen_before` only**.
+Load `ply` on the expensive join. Played-move eval: two EPDs per move. Candidates: `fen_before` only.
 
-Do not share one in-memory dict of all candidate payloads for a 737k-move job. 50% unique × ~2KB ≈ hundreds of MB plus Stockfish workers (`STOCKFISH_HASH_MB=32` each) will OOM. Pattern:
+### Play
 
-- **DB is the cross-page store.**
-- Optional **small process LRU** (e.g. 5–10k candidate payloads, all scalar evals) so a page does not re-GET openings it just wrote. Cap it. Parent process only; workers stay stateless.
+On each engine think: `get_many` one EPD at the **1k-node** lane. Hit → skip MultiPV. Miss → live SF → `put_many`. Takebacks / repeats / book lines hit. Opponent novelties miss once and then sit at the top for the rest of the game.
 
-Cheap fen metrics: skip. Optional later if profiling says otherwise.
+Do not read the 50k preprocess lane from play (different numbers than train/live alignment for the 1k path).
 
-`EnrichExpensive` incremental filter stays `sql_expensive_incomplete` (`evaluation_after` OR `candidate_evaluations` IS NULL). Cache hits still produce mc columns so the row can complete.
+No process-wide unbounded dict. A tiny in-process LRU (dozens of positions) is optional in front of Postgres for a single game.
 
 ---
 
 ## 7. Ops
 
-### Deploy
-
-No new Deployment in v1. Table is created the same way other `metadata.yml` tables are (`ensure_metadata` on first use, or an explicit migrate if you prefer a gated rollout). Pipeline / script Jobs already mount `chess-teacher-env`.
-
-### Resources
-
-- Do not raise Job memory blindly. Cache **reduces** SF CPU; peak RAM should stay “one page + pool + small LRU”.
-- `put_many` / `get_many` batches: one SQL per page per kind (≤ ~4k eval keys, ≤ ~2k candidate keys). Fine.
-- Stockfish threads/hash unchanged (`STOCKFISH_THREADS_PER_ENGINE`, `STOCKFISH_HASH_MB`).
-
-### `engine_version`
-
-Pin the string at write time. Prefer `STOCKFISH_VERSION` env set in the image (`stockfish --version` at Docker build) over parsing at every transform. If unset, client can exec once per process and cache. Debian `apt stockfish` can drift across image rebuilds — that is **desired** key split so mixed binaries do not share rows.
-
-### Retention / eviction
-
-Phase 1: **no LRU eviction.** Size math (order-of-magnitude):
-
-- 500k candidate rows × 2KB JSONB ≈ 1GB disk
-- 500k eval rows × ~200B ≈ 100MB
-- Indexes on the order of 100–200MB
-
-Acceptable on VPS disk; do not put this in Redis.
-
-Add eviction when disk or autovacuum hurts: popularity (`hit_count`) or “unused since”, **never** delete rows that are the only copy of a budget you still train on. mc remains the account-facing store; cache is expendable compute.
-
-### Observability
-
-Structured logs (existing `WorkerSafeLogger` style), per page / transform:
-
-- `fen_cache_hits`, `fen_cache_misses`, `fen_cache_hit_ratio`
-- `fen_cache_put_ok`, `fen_cache_put_skipped` (conflicts)
-- `fen_cache_errors` (read/write degraded)
-- `fen_cache_legal_drift`
-- Keep existing unique_fens / duration_s / host-pressure lines
-
-Optional later: a tiny maintenance view (row counts by `kind`, `engine_version`). Not a new dashboard for v1.
+- No new Deployment. `ensure_metadata` (or a gated migrate).
+- Capacity 10k × a few lanes is tens of MB, not 1GB. Do not raise Job RAM for the cache.
+- `STOCKFISH_VERSION` in the image so lanes split cleanly on apt drift.
+- Eviction is **inline** on `put_many` (same transaction as insert). No nightly janitor required. Optional maintenance: log `lane_count`, `evicted`.
+- Observability: `fen_cache_hits`, `fen_cache_misses`, `fen_cache_admitted`, `fen_cache_not_admitted`, `fen_cache_evicted`, `fen_cache_errors`, `fen_cache_legal_drift`.
 
 ---
 
@@ -369,14 +292,11 @@ Optional later: a tiny maintenance view (row counts by `kind`, `engine_version`)
 
 | Phase | What | Exit criteria |
 |---|---|---|
-| **0 — measure** | Prod SQL: incomplete count, `COUNT(DISTINCT fen_before)`, `COUNT(DISTINCT epd(fen_before))` for the heavy account (and platform-wide). No cache code required. Optional: log unique-FEN / page today. | Numbers in this doc’s §ETA updated from guess → measurement. Go/no-go on phase 1. |
-| **1 — durable store + enrich** | `engine.position_evals` + client + wire `StockfishEvaluationTransformation` and `CandidateEvaluationsTransformation`. Flag `readwrite`. Tests: hit/miss, conflict, degrade, EPD collapse, legal drift. | One replayed page shows hits on the next page; no mc schema change; pipeline still completes with cache down. |
-| **1b — seed** | `seed_fen_eval_cache.py` from existing complete mc. | Seed Job finishes; subsequent enrich hit ratio jumps on common openings. |
-| **2 — backfill shares client** | `backfill_candidate_evals.py` uses the same get/put. | Standalone Job and pipeline do not double-compute the same EPD. |
-| **3 — play/bots (optional)** | Live MultiPV at `LIVE_CANDIDATE_STOCKFISH_NODES` (1k) is a **different key**. Only worth it if the same position is hit often at that budget. | Play latency/error unchanged on cache miss. |
-| **4 — service split** | Only if §3 triggers fire. Extract client to HTTP; table can stay Postgres. | Written decision, not a default next step. |
-
-Phase 0 in-process “page cache → job-wide dict” **without** Postgres is **not** recommended as a shipped milestone: candidate payloads for a full 737k account do not fit RAM. A **capped LRU** can ship with phase 1 as an implementation detail, not a separate product.
+| **0 — measure** | Optional uniqueness SQL (still useful). More important: confirm play is the latency pain and pick N / capacity. | N and cap written down (16 / 10k unless owner says otherwise). |
+| **1 — registry + play + gated enrich** | Table + client + LRU. Wire play 1k lane (write all misses). Wire enrich read + ply gate. Tests: touch-on-hit, evict-bottom, lane isolation, admission skip, degrade. | Play book/repeat line skips SF. A 10k+1 insert drops the coldest. Preprocess page of high-ply misses does not grow the play lane. |
+| **2 — backfill uses the same client** | Same get + gated put. | Backfill cannot evict play. |
+| **3 — optional seed** | Low-ply-only seed from mc into the matching lanes. | Seed does not exceed cap; evicts only colder low-ply if over. |
+| **4 — service split** | Only if §3 triggers. | Written decision. |
 
 ---
 
@@ -384,27 +304,28 @@ Phase 0 in-process “page cache → job-wide dict” **without** Postgres is **
 
 | Risk | Why it matters | Mitigation |
 |---|---|---|
-| Stale budgets | Mixing depth/nodes/SF versions poisons train/play alignment | Key includes engine + budget + `payload_version`; exact match only |
-| Hash collisions | Wrong eval on a move | SHA-256 + store/verify `position_key` |
-| Legal-move set drift | MultiPV UCI set ≠ current `board.legal_moves` | `legal_uci_count` check → miss |
-| Clockful FEN as key | Terrible hit rate | EPD normalize |
-| Multi-tenant pollution | N/A today (one platform DB). Future: still **position-global** (same SF result for all users). Do not key by `account_id`. | Global cache is correct |
-| VPS cost / OOM | JSONB + SF workers + page frames | Batch SQL; capped LRU; no Redis-as-source-of-truth; no full-cache load |
-| Postgres bloat | JSONB updates / dead tuples | Insert-only conflict-do-nothing; no hit-count updates in v1 |
-| Reprocess reads old cache | `full_reload` might not re-search SF | Flag or bypass on reprocess (open question) |
-| Seed copies bad mc JSON | Garbage in → durable garbage | Seed uses `parse_candidate_evaluations`; skip invalid |
+| Preprocess write-all | 2k new EPDs/page evict openings in **that** lane | Ply admission; play on its own lane |
+| Same lane for 1k and 50k | Pipeline would evict play | `num_nodes` in the key |
+| Recency `UPDATE` amplification | Extra writes on every hit | Batched touch; skip later if needed |
+| Wall-clock TTL by mistake | Idle play would lose book after a week | Seq LRU only |
+| Evict when not full | Young cache empties | Capacity check, not “age > 10k” |
+| Stale budgets | Train/play mismatch | Exact lane match |
+| Legal-move drift | Wrong UCI set | `legal_uci_count` → miss |
+| Reprocess | Might want fresh SF | Optional bypass flag |
+| Cap too small | Opening repertoire + recent play do not fit | 10k is a lot of EPDs; raise env |
 
 ---
 
 ## 10. Open questions for the owner
 
-1. **Phase 0 on prod:** OK to run the uniqueness SQL on the heavy account (read-only VPS `db-*`) before any schema work?
-2. **Schema name:** `engine.position_evals` (recommended) vs `games.position_evals` vs `other.fen_eval_cache`?
-3. **Reprocess / full_reload:** should those **bypass** the cache (always recompute + optionally overwrite) or treat cache as source of truth?
-4. **SF version policy:** pin Debian Stockfish in the image and set `STOCKFISH_VERSION` at build, or accept apt drift as automatic key split?
-5. **Seed job:** run 1b immediately after phase 1, or wait until enrich-only is proven on one account?
-6. **Play:** keep out of v1 (recommended), or also cache 1k-node live MultiPV under its own key?
-7. **Overwrite rule:** confirm `ON CONFLICT DO NOTHING` (first wins) vs “replace if same key” on explicit reprocess.
+1. **Capacity 10_000 per lane** — good default? (10k × ~2KB ≈ 20MB/lane.)
+2. **Ply gate N = 16** for preprocess admission — or 12 / 20 / “openings only if already seen twice”?
+3. **Schema name** `engine.position_evals` vs `games.position_evals`?
+4. **Reprocess** bypass cache or still read LRU?
+5. **SF version** pin in image vs apt drift as a new lane?
+6. **Play first in phase 1** (recommended) vs enrich-only first?
+
+Resolved by this revision: eviction is LRU-by-access with a fixed cap, not wall-clock TTL; play is in v1; we do not store the full backlog.
 
 ---
 
@@ -412,60 +333,31 @@ Phase 0 in-process “page cache → job-wide dict” **without** Postgres is **
 
 | Topic | Decision |
 |---|---|
-| Microservice now? | **No.** Postgres table + library client. Split when §3 triggers fire. |
+| Product | Hot registry, not infinite memoization |
+| Eviction | Per-lane LRU, cap ~10k, move-to-front on query |
+| “TTL” | Count of **other admitted EPDs** after the lane is full, not seconds |
+| Play | Own 1k-node lane; write every miss |
+| Preprocess | Read all; write only ply ≤ N |
+| Microservice | Not now |
 | Storage | `engine.position_evals` on existing Postgres |
-| Key | EPD + kind + engine + version + depth + nodes + payload_version |
-| Populate | Enrich miss (sync) + optional mc seed Job |
-| RAM | Never materialize the full candidate cache in-process |
-| First consumer | `EnrichExpensive` only |
 
 ---
 
-## ETA impact on the ~737k-move backlog (order of magnitude)
+## ETA impact (order of magnitude)
 
-**What the ~18d is:** ~737k incomplete mc rows × ~1 MultiPV-all @ 50k nodes on `fen_before`, already de-duped **per 2000-row page**. ~369 pages. Intra-page reuse is modest (many distinct games per page). Played-move depth-12 is second-order.
+**Play:** first miss in a line pays live 1k MultiPV; every repeat / takeback / next game in the same book is a hit. That is the speed win. Unrelated novelties still compute once.
 
-**What a durable EPD cache can save**
+**737k preprocess backlog:** only **opening plies** hit or get admitted. Middlegames still run Stockfish. Expect a **modest** pipeline speedup (book pages, not 2× on the whole 18d) unless uniqueness on low ply is huge. The cache is for **play + opening reuse**, not for finishing the backlog.
 
-| Effect | Rough unique-search factor vs today |
-|---|---|
-| Cross-page reuse of openings on **one** account | **1.3–2×** fewer MultiPV searches |
-| Plus EPD (strip clocks / transpositions) | extra **~10–30%** on top of raw-FEN unique |
-| Seed from **other accounts’** complete mc | helps **new** accounts a lot; helps this backlog only for positions already computed elsewhere |
-| In-process uncapped dict | **do not do this** (OOM) |
-
-Honest range for **this** 737k backlog, cache starts empty, no seed: **~1.5–2.5×** wall-clock (18d → **~7–12d**), not 10×. Middlegames are mostly novel. Openings are the repeat.
-
-With a successful **seed** from already-complete rows (same or other accounts), hit rate on the first N opening plies can jump; still expect middlegame misses. Unlikely to drop below **~5–8d** unless uniqueness is much higher than this guess.
-
-**Phase 0 SQL** (adjust for the account id) is the only way to tighten this:
-
-```sql
--- incomplete expensive rows vs unique raw FEN vs unique EPD-ish prefix
--- (EPD in SQL is approximate: first 4 FEN fields; confirm with python for EP encoding)
-SELECT
-  COUNT(*) AS incomplete_moves,
-  COUNT(DISTINCT m.fen_before) AS uniq_fen_before,
-  COUNT(DISTINCT split_part(m.fen_before, ' ', 1) || ' ' ||
-                 split_part(m.fen_before, ' ', 2) || ' ' ||
-                 split_part(m.fen_before, ' ', 3) || ' ' ||
-                 split_part(m.fen_before, ' ', 4)) AS uniq_epd_before
-FROM games.moves m
-JOIN games.move_characteristics mc ON mc.move_id = m.move_id
-WHERE m.account_id = $1
-  AND (mc.evaluation_after IS NULL OR mc.candidate_evaluations IS NULL);
-```
-
-If `uniq_epd_before / incomplete_moves` is **> 0.8**, treat the cache as a **correctness/platform** feature (cross-account + restarts) more than a backlog silver bullet. If **< 0.5**, it is also the backlog lever.
+Phase 0 uniqueness SQL is still optional; it no longer gates the design.
 
 ---
 
 ## Implementation sketch (when unblocked; not this PR)
 
-1. `pipelines/fen_eval_cache` table + client + tests (degrade, EPD, conflict, drift).
-2. Hook eval + candidate transforms: get → compute misses → put → existing checkpoint.
-3. Env flag + `STOCKFISH_VERSION` in image/configmap.
-4. Seed script + optional backfill client share.
-5. Hit-ratio logs; owner reviews one production account page-over-page.
+1. `pipelines/fen_eval_cache`: table with `last_access_seq`, client, lane evict, tests (LRU order, cap, lane isolation, admission, degrade).
+2. Play: get → SF miss → put at 1k lane.
+3. Enrich: load `ply`; get; SF misses; put if ply ≤ N.
+4. Logs + env: capacity, N, flag, `STOCKFISH_VERSION`.
 
 Do not change `candidate_evaluations` JSON shape. Do not change train/play node constants. Do not add a k8s Service.
