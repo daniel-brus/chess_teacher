@@ -147,6 +147,26 @@ forcedness is only a soft training weight; style signal lives in SF-disagree eva
 
 **Ablate:** encoder fixed → forced scale on/off / tune scale; report agree_t1/t3 + disagree_t1/t3.
 
+### E21 protocol (this branch) + play finding
+
+**Play (hybrid queue ~R10):** preferred opening imprints well; later phases look soft /
+unprincipled. Read as style-disagree pressure + under-weighted “forced/only-move”
+positions more than “need bigger conv.”
+
+**A/B (one change family = forced scale):**
+
+| Knob | Control | Treatment |
+|------|---------|-----------|
+| Encoder | **hybrid** (preferred) or MLP | same |
+| Style disagree boost/scale | 2.0 / 2.0 | same |
+| ``forced_scale_pawns`` | off | `1.5` (then tune 1.0 / 2.0 if needed) |
+| Data | registry train queue, shared batches, mark once | same |
+| Val | full registry, pack once | same |
+
+CLI: `scripts/tools/offline_forced_weight_ab.py`. Primary: `disagree_t1` (on−off);
+guardrail: `agree_t1` must not collapse. **E22 loss** only after E21 shows a clear
+tradeoff win. **E23** gate wording after metrics track “still plays chess.”
+
 ---
 
 ## E22 — Target / loss proposals

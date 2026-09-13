@@ -12,6 +12,8 @@ promotes a greenfield design. Not production-wired yet.
 from __future__ import annotations
 
 import time
+from collections.abc import Mapping
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -33,9 +35,12 @@ from chess_teacher.pipelines.neural_network.create_training_set import (
     TrainingDatum,
 )
 from chess_teacher.pipelines.neural_network.ply_weights import (
+    DEFAULT_RECENCY_BOOST,
+    baseline_disagree_strength,
     candidate_style_sample_weights,
     style_disagree_boost_from_env,
     style_disagree_scale_from_env,
+    user_finetune_sample_weights,
     user_not_sf_best_mask,
     user_sf_disagree_strength,
 )
@@ -47,6 +52,7 @@ from chess_teacher.pipelines.neural_network.train import (
     candidate_style_custom_objects,
     pack_candidate_targets,
 )
+from chess_teacher.utils.general_utils import get_current_datetime
 from chess_teacher.utils.logging import get_logger
 from chess_teacher.utils.process_utils import snapshot_host_pressure
 
@@ -154,6 +160,9 @@ class HybridBoardTrainer:
         move_feat_dim: int = MOVE_FEAT_DIM,
         style_disagree_boost: float | None = None,
         style_disagree_scale: float | None = None,
+        baseline_disagree_boost: float = 1.0,
+        recency_boost: float = DEFAULT_RECENCY_BOOST,
+        forced_scale_pawns: float | None = None,
     ) -> None:
         self.epochs = epochs
         self.batch_size = batch_size
@@ -171,6 +180,11 @@ class HybridBoardTrainer:
             style_disagree_scale_from_env()
             if style_disagree_scale is None
             else float(style_disagree_scale)
+        )
+        self.baseline_disagree_boost = float(baseline_disagree_boost)
+        self.recency_boost = float(recency_boost)
+        self.forced_scale_pawns = (
+            None if forced_scale_pawns is None else float(forced_scale_pawns)
         )
 
     def build(self, state_dim: int) -> Any:
@@ -240,7 +254,45 @@ class HybridBoardTrainer:
         *,
         state_dim: int,
         weights_path: Path | None = None,
+        require_compatible_parent: bool = False,
     ) -> Any:
+        if require_compatible_parent:
+            if weights_path is None or not weights_path.is_file():
+                raise FileNotFoundError(
+                    "require_compatible_parent=True needs an existing Keras weights file"
+                )
+            logger.info("Loading required hybrid parent weights from %s", weights_path)
+            try:
+                model = load_hybrid_board_keras(
+                    weights_path,
+                    max_candidates=self.max_candidates,
+                    compile_model=False,
+                )
+            except Exception as exc:
+                raise RuntimeError(
+                    f"Failed to load parent hybrid Keras weights from {weights_path}"
+                ) from exc
+            if not model_is_hybrid_board_compatible(
+                model,
+                max_candidates=self.max_candidates,
+                move_feat_dim=self.move_feat_dim,
+            ):
+                raise RuntimeError(
+                    "Parent weights not hybrid board+state compatible "
+                    f"(output_shape={getattr(model, 'output_shape', None)})"
+                )
+            from tensorflow import keras  # type: ignore[import-untyped]
+
+            ensure_tensorflow_logging()
+            model.compile(
+                optimizer=keras.optimizers.Adam(1e-3),
+                loss=_masked_candidate_sparse_ce(self.max_candidates),
+                metrics=[
+                    _masked_candidate_top_k(1, self.max_candidates),
+                    _masked_candidate_top_k(3, self.max_candidates),
+                ],
+            )
+            return model
         if weights_path is not None and weights_path.is_file():
             logger.info("Loading hybrid board weights from %s", weights_path)
             try:
@@ -290,6 +342,11 @@ class HybridBoardTrainer:
         datums: list[TrainingDatum],
         *,
         weights_path: Path | None = None,
+        baseline_weights_path: Path | None = None,
+        recency_lambda: float | None = None,
+        end_time_by_game_id: Mapping[str, datetime] | None = None,
+        now: datetime | None = None,
+        require_parent_weights: bool = False,
     ) -> tuple[Any, dict[str, float]]:
         if not datums:
             raise ValueError("HybridBoardTrainer.fit requires a non-empty batch")
@@ -315,32 +372,96 @@ class HybridBoardTrainer:
         y = pack_candidate_targets(labels, mask)
         disagree_mask = user_not_sf_best_mask(feats, labels)
         strength = user_sf_disagree_strength(feats, labels, scale_pawns=self.style_disagree_scale)
-        sample_w = candidate_style_sample_weights(
-            [d.ply for d in kept_datums],
-            feats,
-            labels,
-            style_disagree_boost=self.style_disagree_boost,
-            style_disagree_scale=self.style_disagree_scale,
-        )
+        plies = [d.ply for d in kept_datums]
+        mapping = end_time_by_game_id or {}
+        aligned: list[datetime | None] = []
+        missing = 0
+        for d in kept_datums:
+            end = mapping.get(d.game_id)
+            if end is None:
+                missing += 1
+                aligned.append(None)
+            else:
+                aligned.append(end)
+
+        use_baseline = self.baseline_disagree_boost != 1.0
+        use_recency = recency_lambda is not None
+        model = None
+        baseline_strength = None
+        if use_baseline:
+            if baseline_weights_path is None:
+                raise ValueError("baseline_disagree_boost != 1.0 requires baseline_weights_path")
+            baseline_model = self.load_or_build(
+                state_dim=int(x_state.shape[1]),
+                weights_path=baseline_weights_path,
+                require_compatible_parent=True,
+            )
+            logits = np.asarray(
+                baseline_model.predict(
+                    {"board": x_board, "state": x_state, "move_feats": feats},
+                    verbose=0,
+                ),
+                dtype=np.float64,
+            )
+            baseline_strength = baseline_disagree_strength(logits, mask, labels)
+            if weights_path is not None and weights_path == baseline_weights_path:
+                model = baseline_model
+
+        if use_recency or use_baseline:
+            if use_recency and missing:
+                logger.warning(
+                    "recency: %s/%s kept datums missing end_time; strength=0",
+                    missing,
+                    len(kept_datums),
+                )
+            recency_now = now if now is not None else get_current_datetime()
+            sample_w = user_finetune_sample_weights(
+                plies,
+                feats,
+                labels,
+                aligned,
+                recency_lambda=float(recency_lambda) if use_recency else 0.0,
+                recency_boost=self.recency_boost if use_recency else 1.0,
+                style_disagree_boost=self.style_disagree_boost,
+                style_disagree_scale=self.style_disagree_scale,
+                baseline_disagree_strength=baseline_strength,
+                baseline_disagree_boost=self.baseline_disagree_boost,
+                now=recency_now,
+            )
+        else:
+            sample_w = candidate_style_sample_weights(
+                plies,
+                feats,
+                labels,
+                style_disagree_boost=self.style_disagree_boost,
+                style_disagree_scale=self.style_disagree_scale,
+                candidate_mask=mask,
+                forced_scale_pawns=self.forced_scale_pawns,
+            )
         disagree_frac = float(np.mean(disagree_mask))
         mean_strength = float(np.mean(strength))
 
-        model = self.load_or_build(
-            state_dim=int(x_state.shape[1]),
-            weights_path=weights_path,
-        )
+        if model is None:
+            model = self.load_or_build(
+                state_dim=int(x_state.shape[1]),
+                weights_path=weights_path,
+                require_compatible_parent=require_parent_weights,
+            )
         fit_started = snapshot_host_pressure()
         logger.info(
             "Starting hybrid Keras fit samples=%s epochs=%s batch_size=%s "
-            "conv_filters=%s hidden=%s state_dim=%s disagree_frac=%.3f "
+            "conv_filters=%s style_disagree_boost=%s scale_pawns=%s "
+            "forced_scale_pawns=%s disagree_frac=%.3f mean_strength=%.3f "
             "parent=%s %s",
             len(kept_datums),
             self.epochs,
             min(self.batch_size, len(kept_datums)),
             self.conv_filters,
-            self.hidden,
-            int(x_state.shape[1]),
+            self.style_disagree_boost,
+            self.style_disagree_scale,
+            self.forced_scale_pawns,
             disagree_frac,
+            mean_strength,
             weights_path,
             fit_started.format_fields(),
         )
@@ -384,9 +505,15 @@ class HybridBoardTrainer:
         metrics["encoder_fuses_state"] = 1.0
         metrics["style_disagree_boost"] = float(self.style_disagree_boost)
         metrics["style_disagree_scale"] = float(self.style_disagree_scale)
+        metrics["baseline_disagree_boost"] = float(self.baseline_disagree_boost)
         metrics["sf_disagree_frac"] = disagree_frac
         metrics["sf_disagree_mean_strength"] = mean_strength
         metrics["epochs"] = float(self.epochs)
+        if self.forced_scale_pawns is not None:
+            metrics["forced_scale_pawns"] = float(self.forced_scale_pawns)
+        if recency_lambda is not None:
+            metrics["recency_lambda"] = float(recency_lambda)
+            metrics["recency_boost"] = float(self.recency_boost)
         fit_ended = snapshot_host_pressure()
         logger.info(
             "Hybrid Keras fit finished duration_s=%.2f delta_rss_mb=%.1f n_samples=%s %s",

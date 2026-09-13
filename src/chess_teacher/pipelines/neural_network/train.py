@@ -250,6 +250,7 @@ class BaselineTrainer:
         style_disagree_scale: float | None = None,
         baseline_disagree_boost: float = 1.0,
         recency_boost: float = DEFAULT_RECENCY_BOOST,
+        forced_scale_pawns: float | None = None,
     ) -> None:
         self.epochs = epochs
         self.batch_size = batch_size
@@ -269,6 +270,9 @@ class BaselineTrainer:
         )
         self.baseline_disagree_boost = float(baseline_disagree_boost)
         self.recency_boost = float(recency_boost)
+        self.forced_scale_pawns = (
+            None if forced_scale_pawns is None else float(forced_scale_pawns)
+        )
 
     def build(self, input_dim: int) -> Any:
         keras = _import_keras()
@@ -500,6 +504,8 @@ class BaselineTrainer:
                 labels,
                 style_disagree_boost=self.style_disagree_boost,
                 style_disagree_scale=self.style_disagree_scale,
+                candidate_mask=mask,
+                forced_scale_pawns=self.forced_scale_pawns,
             )
         disagree_frac = float(np.mean(disagree_mask))
         mean_strength = float(np.mean(strength))
@@ -512,13 +518,14 @@ class BaselineTrainer:
             )
         logger.info(
             "Starting Keras fit samples=%s epochs=%s batch_size=%s "
-            "style_disagree_boost=%s scale_pawns=%s disagree_frac=%.3f "
-            "mean_strength=%.3f…",
+            "style_disagree_boost=%s scale_pawns=%s forced_scale_pawns=%s "
+            "disagree_frac=%.3f mean_strength=%.3f…",
             len(kept_datums),
             self.epochs,
             min(self.batch_size, len(kept_datums)),
             self.style_disagree_boost,
             self.style_disagree_scale,
+            self.forced_scale_pawns,
             disagree_frac,
             mean_strength,
         )

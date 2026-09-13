@@ -34,3 +34,15 @@ def test_hybrid_build_shapes_and_compat() -> None:
 
 def test_default_conv_filters_bumped() -> None:
     assert HybridBoardTrainer.DEFAULT_CONV_FILTERS == 64
+
+
+def test_hybrid_weight_knobs_match_baseline_surface() -> None:
+    trainer = HybridBoardTrainer(
+        forced_scale_pawns=1.5,
+        baseline_disagree_boost=1.25,
+        recency_boost=1.5,
+    )
+    assert trainer.forced_scale_pawns == 1.5
+    assert trainer.baseline_disagree_boost == 1.25
+    assert trainer.recency_boost == 1.5
+    assert trainer.forced_scale_pawns is not None
