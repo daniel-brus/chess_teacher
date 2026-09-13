@@ -157,7 +157,7 @@ class LiveStateEncoder:
                     get_position_eval_service()
                     .evaluate(
                         fen,
-                        ply=board.ply(),
+                        board.ply(),
                         eval_depth=self._engine.depth,
                         candidate_nodes=live_candidate_stockfish_nodes(),
                     )

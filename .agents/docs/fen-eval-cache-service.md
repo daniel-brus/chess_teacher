@@ -2,7 +2,7 @@
 
 **Status:** implemented. `PositionEvalService` is the only application path for scalar / MultiPV evals.
 
-**Last updated:** 2026-09-13 (rev: EPD PK + lookup/LRU indexes)
+**Last updated:** 2026-09-13 (rev: required ply + store-if-any-early)
 
 ---
 
@@ -52,10 +52,10 @@ Batch enrich should use one `WHERE epd = ANY(...)` (or `IN`), not a per-FEN roun
 `PositionEvalService` in `pipelines/fen_eval_cache`.
 
 ```text
-evaluate(fen, ply, eval_depth, candidate_nodes) → {eval_white_pov, candidates}
+evaluate(fen, ply) → {eval_white_pov, candidates}
 ```
 
-Plus a batch variant for enrich pages. Same rules.
+`ply` is required. Depth / nodes are optional kwargs (defaults: 12 / 50k). Batch `evaluate_many` uses the **minimum ply** per EPD, so a page stores the row if **any** occurrence is ≤ 32.
 
 Callers: expensive enrich, backfill, live play, NN bot. Nothing else talks to `StockfishEngine` for evals. (`choose_move` for the Stockfish opponent is not an eval; leave it.)
 
@@ -68,7 +68,7 @@ Callers: expensive enrich, backfill, live play, NN bot. Nothing else talks to `S
 1. Normalize `fen` → `epd`. Look up `epd` (PK).
 2. **Hit** if the row exists, `eval_depth` ≥ requested depth, and `candidate_nodes` ≥ requested nodes. Return it. Touch `last_used`.
 3. **Too weak:** rerun only the weak search(es) at the requested budget. Upsert those columns.
-4. **No row:** run both searches. Insert if **ply ≤ 32**; otherwise return without storing.
+4. **No row:** run both searches. Insert if the request’s ply ≤ 32 (for a batch: if **any** ply for that EPD is ≤ 32).
 5. Ply unknown or ply > 32: still compute for the caller. No new row; still upgrade if the row already exists.
 
 Depth and nodes are independent budgets, same rule as cheap vs expensive MultiPV: a stronger stored value satisfies a weaker ask; a weaker store is overwritten. Play might ask depth 12 / 1k nodes; enrich depth 12 / 50k. If we later want depth 20 scalars, that is just a higher `eval_depth` ask.

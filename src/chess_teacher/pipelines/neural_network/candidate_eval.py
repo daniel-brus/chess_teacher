@@ -271,13 +271,13 @@ def evaluate_all_legal_after(
     engine: StockfishEngine | None,
     fen_before: str,
     *,
+    ply: int,
     num_nodes: int | None = CANDIDATE_STOCKFISH_NODES,
-    ply: int | None = None,
 ) -> dict[str, float]:
     """Score every legal move on ``fen_before``; return ``{uci: eval_white_pov}``.
 
-    Always goes through ``PositionEvalService``. ``engine`` is unused (kept for
-    call-site compatibility).
+    Always goes through ``PositionEvalService.evaluate(fen, ply)``. ``engine`` is
+    unused (kept for call-site compatibility).
     """
     del engine
     from chess_teacher.pipelines.fen_eval_cache.service import get_position_eval_service
@@ -285,7 +285,7 @@ def evaluate_all_legal_after(
     try:
         result = get_position_eval_service().evaluate(
             fen_before,
-            ply=ply,
+            ply,
             eval_depth=CANDIDATE_STOCKFISH_DEPTH,
             candidate_nodes=int(num_nodes or 0),
         )
@@ -578,7 +578,7 @@ def live_candidate_tensors(
     """
     fen = board.fen(en_passant="fen")
     if evals is None:
-        evals = evaluate_all_legal_after(engine, fen, num_nodes=num_nodes)
+        evals = evaluate_all_legal_after(engine, fen, ply=board.ply(), num_nodes=num_nodes)
     color_is_white = board.turn == chess.WHITE
     legal = tuple(m.uci() for m in board.legal_moves)
     rows = candidate_move_rows(evals, color_is_white=color_is_white, legal_ucis=legal)

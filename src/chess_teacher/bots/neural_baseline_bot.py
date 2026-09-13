@@ -92,7 +92,7 @@ class NeuralBaselineBot(ChessBot):
 
         evaluated = get_position_eval_service().evaluate(
             fen,
-            ply=board.ply(),
+            board.ply(),
             eval_depth=CANDIDATE_STOCKFISH_DEPTH,
             candidate_nodes=self.candidate_nodes,
         )

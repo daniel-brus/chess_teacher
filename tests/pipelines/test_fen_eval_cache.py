@@ -73,6 +73,51 @@ def test_weaker_store_is_upgraded() -> None:
     assert cand_calls == [1000, 50_000]
 
 
+def test_evaluate_needs_only_fen_and_ply() -> None:
+    service = PositionEvalService(
+        store=MemoryEvalStore(),
+        compute_scalar=lambda _fen: 0.1,
+        compute_candidates=lambda _fen, _nodes: {"e2e4": 0.0},
+        max_ply=32,
+        n_workers=1,
+    )
+    result = service.evaluate(_START, 8)
+    assert result.eval_white_pov == pytest.approx(0.1)
+    assert result.candidate_nodes == 50_000
+
+
+def test_store_if_any_ply_on_the_page_is_early() -> None:
+    store = MemoryEvalStore()
+    service = PositionEvalService(
+        store=store,
+        compute_scalar=lambda _fen: 0.3,
+        compute_candidates=lambda _fen, _nodes: {"e2e4": 0.1},
+        max_ply=32,
+        n_workers=1,
+    )
+    service.evaluate_many([
+        FenEvalRequest(_START, ply=80, eval_depth=12, candidate_nodes=1000),
+        FenEvalRequest(_START_LATER_CLOCKS, ply=4, eval_depth=12, candidate_nodes=1000),
+    ])
+    assert position_key(_START) in store.get_many([position_key(_START)])
+
+
+def test_late_only_page_does_not_insert() -> None:
+    store = MemoryEvalStore()
+    service = PositionEvalService(
+        store=store,
+        compute_scalar=lambda _fen: 0.3,
+        compute_candidates=lambda _fen, _nodes: {"e2e4": 0.1},
+        max_ply=32,
+        n_workers=1,
+    )
+    service.evaluate_many([
+        FenEvalRequest(_START, ply=80, eval_depth=12, candidate_nodes=1000),
+        FenEvalRequest(_START_LATER_CLOCKS, ply=40, eval_depth=12, candidate_nodes=1000),
+    ])
+    assert store.get_many([position_key(_START)]) == {}
+
+
 def test_high_ply_does_not_insert_but_memory_hits() -> None:
     calls = {"n": 0}
 

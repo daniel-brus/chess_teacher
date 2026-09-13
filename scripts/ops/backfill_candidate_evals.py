@@ -23,6 +23,7 @@ from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from multiprocessing import shared_memory
 from typing import Any
 
+from chess_teacher.pipelines.fen_eval_cache.service import DEFAULT_MAX_PLY
 from chess_teacher.pipelines.neural_network.candidate_eval import (
     CANDIDATE_STOCKFISH_DEPTH,
     CANDIDATE_STOCKFISH_NODES,
@@ -130,12 +131,14 @@ def _process_rows(
         move_id = row["move_id"]
         try:
             ply_raw = row.get("ply")
-            ply = int(ply_raw) if ply_raw is not None and str(ply_raw) != "" else None
+            ply = (
+                int(ply_raw) if ply_raw is not None and str(ply_raw) != "" else DEFAULT_MAX_PLY + 1
+            )
             evals = evaluate_all_legal_after(
                 None,  # type: ignore[arg-type]
                 row["fen_before"],
-                num_nodes=num_nodes,
                 ply=ply,
+                num_nodes=num_nodes,
             )
             if not evals:
                 _worker_logger.warning(

@@ -25,6 +25,7 @@ logger = get_logger()
 
 DEFAULT_ENGINE_NAME = "stockfish"
 DEFAULT_EVAL_DEPTH = 12
+DEFAULT_CANDIDATE_NODES = 50_000
 DEFAULT_MAX_PLY = 32
 DEFAULT_CAPACITY = 10_000
 _UNSET = object()
@@ -107,11 +108,12 @@ class PositionEvalService:
     def evaluate(
         self,
         fen: str,
+        ply: int,
         *,
-        ply: int | None,
         eval_depth: int = DEFAULT_EVAL_DEPTH,
-        candidate_nodes: int,
+        candidate_nodes: int = DEFAULT_CANDIDATE_NODES,
     ) -> PositionEval:
+        """Always pass ply. Depth / nodes default to the pipeline budget."""
         results = self.evaluate_many([
             FenEvalRequest(fen, ply=ply, eval_depth=eval_depth, candidate_nodes=candidate_nodes)
         ])
@@ -302,6 +304,7 @@ class _ComputeJob:
 
 
 def _group_requests(requests: Sequence[FenEvalRequest]) -> dict[str, _ComputeJob]:
+    """One job per EPD. Ply is the minimum seen (store if any ply <= cap)."""
     grouped: dict[str, _ComputeJob] = {}
     for request in requests:
         try:
@@ -335,6 +338,7 @@ def _group_requests(requests: Sequence[FenEvalRequest]) -> dict[str, _ComputeJob
 
 
 def _should_persist(ply: int | None, max_ply: int, *, existing: bool) -> bool:
+    """Insert a new row if this EPD was seen at ply <= cap (min ply of the batch)."""
     if existing:
         return True
     if ply is None:
