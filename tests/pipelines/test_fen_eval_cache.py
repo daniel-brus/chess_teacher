@@ -102,6 +102,52 @@ def test_store_if_any_ply_on_the_page_is_early() -> None:
     assert position_key(_START) in store.get_many([position_key(_START)])
 
 
+def test_none_ply_does_not_insert() -> None:
+    store = MemoryEvalStore()
+    service = PositionEvalService(
+        store=store,
+        compute_scalar=lambda _fen: 0.4,
+        compute_candidates=lambda _fen, _nodes: {},
+        max_ply=32,
+        n_workers=1,
+    )
+    result = service.evaluate(_START)
+    assert result.eval_white_pov == pytest.approx(0.4)
+    assert store.get_many([position_key(_START)]) == {}
+
+
+def test_none_ply_plus_early_on_page_stores() -> None:
+    store = MemoryEvalStore()
+    service = PositionEvalService(
+        store=store,
+        compute_scalar=lambda _fen: 0.4,
+        compute_candidates=lambda _fen, _nodes: {},
+        max_ply=32,
+        n_workers=1,
+    )
+    service.evaluate_many([
+        FenEvalRequest(_START, ply=None, eval_depth=12, candidate_nodes=1000),
+        FenEvalRequest(_START_LATER_CLOCKS, ply=4, eval_depth=12, candidate_nodes=1000),
+    ])
+    assert position_key(_START) in store.get_many([position_key(_START)])
+
+
+def test_epd_input_matches_fen_key() -> None:
+    store = MemoryEvalStore()
+    service = PositionEvalService(
+        store=store,
+        compute_scalar=lambda _fen: 0.5,
+        compute_candidates=lambda _fen, _nodes: {},
+        max_ply=32,
+        n_workers=1,
+    )
+    service.evaluate(_START, ply=2, eval_depth=12, candidate_nodes=100)
+    epd = position_key(_START)
+    again = service.evaluate(epd, ply=2, eval_depth=12, candidate_nodes=100)
+    assert again.eval_white_pov == pytest.approx(0.5)
+    assert epd in store.get_many([epd])
+
+
 def test_late_only_page_does_not_insert() -> None:
     store = MemoryEvalStore()
     service = PositionEvalService(

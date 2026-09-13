@@ -9,7 +9,6 @@ from chess_teacher.pipelines.fen_eval_cache.keys import position_key
 from chess_teacher.pipelines.fen_eval_cache.service import (
     DEFAULT_EVAL_DEPTH,
     FenEvalRequest,
-    cache_max_ply,
     get_position_eval_service,
 )
 from chess_teacher.pipelines.neural_network.candidate_eval import CANDIDATE_STOCKFISH_NODES
@@ -85,16 +84,14 @@ def _safe_epd(fen: str) -> str | None:
         return None
 
 
-def _resolve_ply(row: dict[str, object], fen: str, fen_ply: dict[str, int | None]) -> int:
+def _resolve_ply(row: dict[str, object], fen: str, fen_ply: dict[str, int | None]) -> int | None:
     ply_raw = row.get("ply")
     if ply_raw is not None:
         return int(ply_raw)
     epd = _safe_epd(fen)
-    if epd is not None:
-        mapped = fen_ply.get(epd)
-        if mapped is not None:
-            return mapped
-    return cache_max_ply() + 1
+    if epd is None:
+        return None
+    return fen_ply.get(epd)
 
 
 def _min_ply_by_epd(df: pl.DataFrame) -> dict[str, int | None]:

@@ -2,7 +2,7 @@
 
 **Status:** implemented. `PositionEvalService` is the only application path for scalar / MultiPV evals.
 
-**Last updated:** 2026-09-13 (rev: required ply + store-if-any-early)
+**Last updated:** 2026-09-13 (rev: ply=None skips insert; callers pass FEN)
 
 ---
 
@@ -52,10 +52,10 @@ Batch enrich should use one `WHERE epd = ANY(...)` (or `IN`), not a per-FEN roun
 `PositionEvalService` in `pipelines/fen_eval_cache`.
 
 ```text
-evaluate(fen, ply) → {eval_white_pov, candidates}
+evaluate(fen, ply=None) → {eval_white_pov, candidates}
 ```
 
-`ply` is required. Depth / nodes are optional kwargs (defaults: 12 / 50k). Batch `evaluate_many` uses the **minimum ply** per EPD, so a page stores the row if **any** occurrence is ≤ 32.
+Callers pass a FEN (the columns / `board.fen()` they already have). The service strips clocks to the EPD key; an EPD string also works. `ply=None` still computes but does not insert (same as ply > 32). Depth / nodes are optional kwargs (defaults: 12 / 50k). Batch `evaluate_many` uses the **minimum ply** per EPD, so a page stores the row if **any** occurrence is ≤ 32.
 
 Callers: expensive enrich, backfill, live play, NN bot. Nothing else talks to `StockfishEngine` for evals. (`choose_move` for the Stockfish opponent is not an eval; leave it.)
 

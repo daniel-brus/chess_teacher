@@ -271,13 +271,14 @@ def evaluate_all_legal_after(
     engine: StockfishEngine | None,
     fen_before: str,
     *,
-    ply: int,
+    ply: int | None = None,
     num_nodes: int | None = CANDIDATE_STOCKFISH_NODES,
 ) -> dict[str, float]:
     """Score every legal move on ``fen_before``; return ``{uci: eval_white_pov}``.
 
-    Always goes through ``PositionEvalService.evaluate(fen, ply)``. ``engine`` is
-    unused (kept for call-site compatibility).
+    Always goes through ``PositionEvalService.evaluate(fen, ply)``. ``ply=None``
+    computes without inserting. ``engine`` is unused (kept for call-site
+    compatibility).
     """
     del engine
     from chess_teacher.pipelines.fen_eval_cache.service import get_position_eval_service

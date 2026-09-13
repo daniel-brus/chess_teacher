@@ -108,12 +108,16 @@ class PositionEvalService:
     def evaluate(
         self,
         fen: str,
-        ply: int,
+        ply: int | None = None,
         *,
         eval_depth: int = DEFAULT_EVAL_DEPTH,
         candidate_nodes: int = DEFAULT_CANDIDATE_NODES,
     ) -> PositionEval:
-        """Always pass ply. Depth / nodes default to the pipeline budget."""
+        """Pass a FEN (or EPD); we strip clocks to the EPD key.
+
+        ``ply=None`` still computes, but does not insert (same as ply > cap).
+        Depth / nodes default to the pipeline budget.
+        """
         results = self.evaluate_many([
             FenEvalRequest(fen, ply=ply, eval_depth=eval_depth, candidate_nodes=candidate_nodes)
         ])
