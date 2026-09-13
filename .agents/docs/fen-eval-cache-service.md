@@ -1,6 +1,6 @@
 # FEN eval cache — plan
 
-**Status:** planning only. No implementation here.
+**Status:** implemented. `PositionEvalService` is the only application path for scalar / MultiPV evals.
 
 **Last updated:** 2026-09-13 (rev: EPD PK + lookup/LRU indexes)
 

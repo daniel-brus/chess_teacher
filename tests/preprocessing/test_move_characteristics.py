@@ -24,6 +24,11 @@ from chess_teacher.pipelines.preprocessing.move_characteristics.move_context imp
 from chess_teacher.pipelines.preprocessing.move_characteristics.move_flags import (
     MoveFlagsTransformation,
 )
+from chess_teacher.pipelines.fen_eval_cache.service import (
+    PositionEvalService,
+    reset_position_eval_service_for_tests,
+)
+from chess_teacher.pipelines.fen_eval_cache.store import MemoryEvalStore
 from chess_teacher.pipelines.preprocessing.move_characteristics.stockfish_evaluation import (
     StockfishEvaluationTransformation,
 )
@@ -312,31 +317,36 @@ def test_game_over_white_pov_checkmate_white_wins() -> None:
     assert game_over_white_pov_pawns(board) == pytest.approx(100.0)
 
 
+def _install_eval_service(
+    monkeypatch: pytest.MonkeyPatch,
+    compute_scalar,
+) -> None:
+    service = PositionEvalService(
+        store=MemoryEvalStore(),
+        compute_scalar=compute_scalar,
+        compute_candidates=lambda _fen, _nodes: {"e2e4": 0.0},
+        max_ply=64,
+        n_workers=1,
+    )
+    reset_position_eval_service_for_tests(service)
+    monkeypatch.setattr(
+        "chess_teacher.pipelines.preprocessing.move_characteristics.stockfish_evaluation.get_position_eval_service",
+        lambda: service,
+    )
+
+
 def test_stockfish_evaluation_transformation_mocked(monkeypatch: pytest.MonkeyPatch) -> None:
     evaluate_calls: list[str] = []
 
-    class _FakeEngine:
-        def __init__(self, *, depth: int = 20, path: str | None = None) -> None:
-            del depth, path
+    def compute_scalar(fen: str) -> float | None:
+        evaluate_calls.append(fen)
+        if fen == _START:
+            return 0.2
+        if fen == _AFTER_E4:
+            return 0.05
+        return None
 
-        def __enter__(self) -> _FakeEngine:
-            return self
-
-        def __exit__(self, *args: object) -> None:
-            return None
-
-        def evaluate_white_pov_pawns(self, fen: str) -> float | None:
-            evaluate_calls.append(fen)
-            if fen == _START:
-                return 0.2
-            if fen == _AFTER_E4:
-                return 0.05
-            return None
-
-    monkeypatch.setattr(
-        "chess_teacher.pipelines.preprocessing.move_characteristics.stockfish_evaluation.StockfishEngine",
-        _FakeEngine,
-    )
+    _install_eval_service(monkeypatch, compute_scalar)
     result = StockfishEvaluationTransformation(
         depth=20, stockfish_path="fake", n_workers=1
     ).transform(_sample_moves_df())
@@ -349,24 +359,11 @@ def test_stockfish_evaluation_transformation_mocked(monkeypatch: pytest.MonkeyPa
 def test_stockfish_evaluation_dedupes_shared_fens(monkeypatch: pytest.MonkeyPatch) -> None:
     evaluate_calls: list[str] = []
 
-    class _FakeEngine:
-        def __init__(self, *, depth: int = 20, path: str | None = None) -> None:
-            del depth, path
+    def compute_scalar(fen: str) -> float | None:
+        evaluate_calls.append(fen)
+        return 0.0
 
-        def __enter__(self) -> _FakeEngine:
-            return self
-
-        def __exit__(self, *args: object) -> None:
-            return None
-
-        def evaluate_white_pov_pawns(self, fen: str) -> float | None:
-            evaluate_calls.append(fen)
-            return 0.0
-
-    monkeypatch.setattr(
-        "chess_teacher.pipelines.preprocessing.move_characteristics.stockfish_evaluation.StockfishEngine",
-        _FakeEngine,
-    )
+    _install_eval_service(monkeypatch, compute_scalar)
     df = pl.DataFrame({
         "fen_before": [_START, _AFTER_E4],
         "fen_after": [_AFTER_E4, _WHITE_UP_PAWN],
@@ -382,25 +379,12 @@ def test_stockfish_engine_game_over_without_active_engine() -> None:
 
 
 def test_stockfish_evaluation_handles_checkmate_fen(monkeypatch: pytest.MonkeyPatch) -> None:
-    class _FakeEngine:
-        def __init__(self, *, depth: int = 20, path: str | None = None) -> None:
-            del depth, path
+    def compute_scalar(fen: str) -> float | None:
+        if fen == _CHECKMATE_WHITE_WINS:
+            return game_over_white_pov_pawns(chess.Board(fen))
+        return 0.0
 
-        def __enter__(self) -> _FakeEngine:
-            return self
-
-        def __exit__(self, *args: object) -> None:
-            return None
-
-        def evaluate_white_pov_pawns(self, fen: str) -> float | None:
-            if fen == _CHECKMATE_WHITE_WINS:
-                return game_over_white_pov_pawns(chess.Board(fen))
-            return 0.0
-
-    monkeypatch.setattr(
-        "chess_teacher.pipelines.preprocessing.move_characteristics.stockfish_evaluation.StockfishEngine",
-        _FakeEngine,
-    )
+    _install_eval_service(monkeypatch, compute_scalar)
     df = pl.DataFrame({
         "fen_before": [_START],
         "fen_after": [_CHECKMATE_WHITE_WINS],

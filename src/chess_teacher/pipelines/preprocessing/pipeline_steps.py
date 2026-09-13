@@ -185,6 +185,7 @@ class EnrichExpensiveMoveCharacteristicsStep(TransformStep):
         "fen_before",
         "fen_after",
         "move_uci",
+        "ply",
     )
 
     def __init__(self, *, mode: PipelineMode = PipelineMode.INCREMENTAL) -> None:

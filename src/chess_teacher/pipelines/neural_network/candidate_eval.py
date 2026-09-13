@@ -268,18 +268,31 @@ def build_candidate_payload(
 
 
 def evaluate_all_legal_after(
-    engine: StockfishEngine,
+    engine: StockfishEngine | None,
     fen_before: str,
     *,
     num_nodes: int | None = CANDIDATE_STOCKFISH_NODES,
+    ply: int | None = None,
 ) -> dict[str, float]:
-    """Score every legal move on ``fen_before``; return ``{uci: eval_white_pov}``."""
+    """Score every legal move on ``fen_before``; return ``{uci: eval_white_pov}``.
+
+    Always goes through ``PositionEvalService``. ``engine`` is unused (kept for
+    call-site compatibility).
+    """
+    del engine
+    from chess_teacher.pipelines.fen_eval_cache.service import get_position_eval_service
+
     try:
-        chess.Board(fen_before)
+        result = get_position_eval_service().evaluate(
+            fen_before,
+            ply=ply,
+            eval_depth=CANDIDATE_STOCKFISH_DEPTH,
+            candidate_nodes=int(num_nodes or 0),
+        )
     except ValueError:
         logger.warning("Invalid fen_before for candidate evals: %s", fen_before)
         return {}
-    return engine.evaluate_all_legal_moves_white_pov(fen_before, num_nodes=num_nodes)
+    return dict(result.candidate_evals)
 
 
 def candidate_move_rows(

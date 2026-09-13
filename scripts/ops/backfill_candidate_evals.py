@@ -39,7 +39,6 @@ from chess_teacher.pipelines.preprocessing.fen_characteristic import (
     _WorkerFenProgressTracker,
 )
 from chess_teacher.pipelines.preprocessing.moves import MoveCharacteristics
-from chess_teacher.utils.chess_utils import StockfishEngine
 from chess_teacher.utils.db.client import get_db_client
 from chess_teacher.utils.general_utils import quote_literal
 from chess_teacher.utils.logging import get_logger
@@ -59,7 +58,7 @@ def _pending_rows(*, limit: int | None) -> list[dict[str, str]]:
     db = get_db_client()
     db.ensure_metadata(MoveCharacteristics.get_metadata())
     sql = """
-        SELECT m.move_id AS move_id, m.fen_before AS fen_before
+        SELECT m.move_id AS move_id, m.fen_before AS fen_before, m.ply AS ply
         FROM games.moves m
         INNER JOIN games.move_characteristics mc ON mc.move_id = m.move_id
         WHERE mc.candidate_evaluations IS NULL
@@ -68,7 +67,14 @@ def _pending_rows(*, limit: int | None) -> list[dict[str, str]]:
     if limit is not None:
         sql += f"\nLIMIT {int(limit)}"
     rows = db.engine.execute_parameterized_query(sql, {})
-    return [{"move_id": str(r["move_id"]), "fen_before": str(r["fen_before"])} for r in rows]
+    return [
+        {
+            "move_id": str(r["move_id"]),
+            "fen_before": str(r["fen_before"]),
+            "ply": str(r["ply"]),
+        }
+        for r in rows
+    ]
 
 
 def _count_pending() -> int:
@@ -120,49 +126,51 @@ def _process_rows(
     failed = 0
     total = len(rows)
     last_logged_percent = 0
-    with StockfishEngine(depth=depth) as engine:
-        for index, row in enumerate(rows):
-            move_id = row["move_id"]
-            try:
-                evals = evaluate_all_legal_after(
-                    engine,
-                    row["fen_before"],
-                    num_nodes=num_nodes,
-                )
-                if not evals:
-                    _worker_logger.warning(
-                        "CandidateEvalBackfill: empty MultiPV for move_id=%s",
-                        move_id,
-                    )
-                    failed += 1
-                else:
-                    _persist_payload(
-                        move_id,
-                        build_candidate_payload(
-                            evals,
-                            depth=depth,
-                            num_nodes=num_nodes,
-                        ),
-                    )
-                    done += 1
-            except Exception:
-                _worker_logger.exception(
-                    "CandidateEvalBackfill: failed move_id=%s",
+    for index, row in enumerate(rows):
+        move_id = row["move_id"]
+        try:
+            ply_raw = row.get("ply")
+            ply = int(ply_raw) if ply_raw is not None and str(ply_raw) != "" else None
+            evals = evaluate_all_legal_after(
+                None,  # type: ignore[arg-type]
+                row["fen_before"],
+                num_nodes=num_nodes,
+                ply=ply,
+            )
+            if not evals:
+                _worker_logger.warning(
+                    "CandidateEvalBackfill: empty MultiPV for move_id=%s",
                     move_id,
                 )
                 failed += 1
-
-            completed = index + 1
-            if progress_tracker is not None:
-                progress_tracker.maybe_update(completed)
-            if report is not None:
-                last_logged_percent = _advance_fen_progress(
-                    completed=completed,
-                    total=total,
-                    progress_percent=log_progress_percent,
-                    last_logged_percent=last_logged_percent,
-                    report=report,
+            else:
+                _persist_payload(
+                    move_id,
+                    build_candidate_payload(
+                        evals,
+                        depth=depth,
+                        num_nodes=num_nodes,
+                    ),
                 )
+                done += 1
+        except Exception:
+            _worker_logger.exception(
+                "CandidateEvalBackfill: failed move_id=%s",
+                move_id,
+            )
+            failed += 1
+
+        completed = index + 1
+        if progress_tracker is not None:
+            progress_tracker.maybe_update(completed)
+        if report is not None:
+            last_logged_percent = _advance_fen_progress(
+                completed=completed,
+                total=total,
+                progress_percent=log_progress_percent,
+                last_logged_percent=last_logged_percent,
+                report=report,
+            )
     if progress_tracker is not None:
         progress_tracker.finalize(total)
     return {"done": done, "failed": failed}
