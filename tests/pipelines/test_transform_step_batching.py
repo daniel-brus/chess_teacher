@@ -39,6 +39,24 @@ def test_raw_games_to_games_step_enables_batch_size(monkeypatch: pytest.MonkeyPa
     assert step.batch_size == 500
 
 
+def test_extract_and_enrich_steps_enable_move_batch_size(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "chess_teacher.utils.pipeline_utils.transformations.get_db_client",
+        lambda: MagicMock(),
+    )
+    from chess_teacher.pipelines.preprocessing.pipeline_steps import (
+        EnrichCheapMoveCharacteristicsStep,
+        EnrichExpensiveMoveCharacteristicsStep,
+        ExtractUserMovesStep,
+    )
+
+    assert ExtractUserMovesStep().batch_size == 500
+    assert EnrichCheapMoveCharacteristicsStep().batch_size == 2000
+    assert EnrichExpensiveMoveCharacteristicsStep().batch_size == 2000
+
+
 def test_transform_step_batched_run_saves_each_page(monkeypatch: pytest.MonkeyPatch) -> None:
     pages = {
         None: pl.DataFrame([_raw_row("game-1"), _raw_row("game-2")]),
