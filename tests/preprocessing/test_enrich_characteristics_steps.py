@@ -81,6 +81,7 @@ def test_expensive_load_filters_incomplete_in_incremental() -> None:
                 "fen_before": "fen-a",
                 "fen_after": "fen-b",
                 "move_uci": "e2e4",
+                "ply": 4,
             }
         ]
 
