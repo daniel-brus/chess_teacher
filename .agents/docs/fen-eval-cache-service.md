@@ -2,7 +2,7 @@
 
 **Status:** planning only. No implementation here.
 
-**Last updated:** 2026-09-13 (rev: stripped)
+**Last updated:** 2026-09-13 (rev: engine+epd key; depth is a budget)
 
 ---
 
@@ -18,21 +18,23 @@ Ingested games and live games are the same: a request is a request. Hot means th
 
 ## Table
 
-`engine.position_evals`. One row per board.
+`engine.position_evals`. One row per **engine + board**.
 
 | Column | Role |
 |---|---|
-| `epd` | primary key |
-| `eval_white_pov` | scalar, white POV, depth 12 |
+| `engine` | e.g. `stockfish` — part of the PK |
+| `epd` | the board — part of the PK |
+| `eval_white_pov` | scalar, white POV |
+| `eval_depth` | how strong that scalar is |
 | `candidates` | MultiPV JSON (existing payload shape) |
 | `candidate_nodes` | how strong that MultiPV is |
 | `last_used` | touched on every hit / write |
 
-That is the whole key. No hash, no engine version, no payload version, no “kind” lane.
+Primary key: `(engine, epd)`. EPD alone is enough only if a single engine will ever own the table. A later engine switch would otherwise collide or force a wipe. With `engine` in the key, Stockfish rows stay put; a new engine fills its own rows. LRU cap **10_000 per engine**.
 
-If we change Stockfish or the JSON shape in a way that matters: `TRUNCATE` the table. It is a cache.
+`engine` is the family name, not a patch version. A Stockfish apt bump can keep using the same rows (small drift) or we delete `WHERE engine = 'stockfish'`. Do not put version in the key unless we need two Stockfish builds side by side.
 
-Capacity **10_000** rows. On insert past the cap, delete the row with the oldest `last_used`.
+No hash, no payload version, no kind lane.
 
 ---
 
@@ -41,7 +43,7 @@ Capacity **10_000** rows. On insert past the cap, delete the row with the oldest
 `PositionEvalService` in `pipelines/fen_eval_cache`.
 
 ```text
-evaluate(fen, ply, candidate_nodes) → {eval_white_pov, candidates}
+evaluate(fen, ply, eval_depth, candidate_nodes) → {eval_white_pov, candidates}
 ```
 
 Plus a batch variant for enrich pages. Same rules.
@@ -54,17 +56,15 @@ Callers: expensive enrich, backfill, live play, NN bot. Nothing else talks to `S
 
 ## Rules
 
-1. Normalize `fen` → `epd`. Look up `epd`.
-2. **Hit** if the row exists and `candidate_nodes` ≥ what the caller asked for. Return it. Touch `last_used`.
-3. **Miss / too weak:** run Stockfish (scalar depth 12 + MultiPV at the requested nodes). Return that.
-4. **Remember** the new result if:
-   - there is already a row (always **upgrade** in place), or
-   - there is no row and **ply ≤ 32**.
-5. Deep positions (ply > 32, or ply unknown) are still computed for the caller. They just do not get a new row.
+1. Normalize `fen` → `epd`. Look up `(engine, epd)`.
+2. **Hit** if the row exists, `eval_depth` ≥ requested depth, and `candidate_nodes` ≥ requested nodes. Return it. Touch `last_used`.
+3. **Too weak:** rerun only the weak search(es) at the requested budget. Upsert those columns.
+4. **No row:** run both searches. Insert if **ply ≤ 32**; otherwise return without storing.
+5. Ply unknown or ply > 32: still compute for the caller. No new row; still upgrade if the row already exists.
 
-Play asks for 1k nodes; enrich asks for 50k. Same row. A 50k store satisfies a later 1k ask. A 1k store does not satisfy 50k: recompute and overwrite.
+Depth and nodes are independent budgets, same rule as cheap vs expensive MultiPV: a stronger stored value satisfies a weaker ask; a weaker store is overwritten. Play might ask depth 12 / 1k nodes; enrich depth 12 / 50k. If we later want depth 20 scalars, that is just a higher `eval_depth` ask.
 
-Scalar and MultiPV are two SF searches. The class always returns both. Callers do not request one or the other.
+The class always returns both payloads. Scalar and MultiPV stay two searches (do not fake one from the other).
 
 ---
 
@@ -75,6 +75,7 @@ Scalar and MultiPV are two SF searches. The class always returns both. Callers d
 - Separate “play cache” vs “pipeline cache.”
 - Seeding the table from all of `move_characteristics`.
 - Faking the scalar from MultiPV (different search).
+- Engine **version** in the PK (only the engine name).
 
 `move_characteristics` stays the per-move store. This table is only a position cache.
 
