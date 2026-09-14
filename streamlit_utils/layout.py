@@ -34,10 +34,14 @@ def ingest_css(css: str) -> None:
 
 
 def app_page_link(path: str, label: str, *, width: str = "stretch") -> None:
-    """Link to a registered ``st.navigation`` page; fall back when run standalone (AppTest)."""
+    """Link to a registered ``st.navigation`` page; fall back when run standalone (AppTest).
+
+    Outside ``st.navigation``, Streamlit may raise ``StreamlitPageNotFoundError`` or
+    ``KeyError('url_pathname')`` (AppTest / bare page scripts).
+    """
     try:
         st.page_link(path, label=label, width=width)
-    except StreamlitPageNotFoundError:
+    except (StreamlitPageNotFoundError, KeyError):
         st.markdown(f"**{label}**")
 
 

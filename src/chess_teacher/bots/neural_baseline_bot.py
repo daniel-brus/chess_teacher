@@ -15,6 +15,10 @@ from chess_teacher.bots.move_analysis import (
     empty_bot_move_analysis,
 )
 from chess_teacher.pipelines.fen_eval_cache.service import get_position_eval_service
+from chess_teacher.pipelines.neural_network.board_encoder import (
+    model_is_hybrid_board_compatible,
+)
+from chess_teacher.pipelines.neural_network.board_tensor import fen_to_board_tensor
 from chess_teacher.pipelines.neural_network.candidate_eval import (
     CANDIDATE_STOCKFISH_DEPTH,
     live_candidate_stockfish_nodes,
@@ -28,6 +32,42 @@ from chess_teacher.utils.logging import get_logger
 from chess_teacher.utils.process_utils import snapshot_host_pressure
 
 logger = get_logger()
+
+
+def _model_input_names(model: object) -> set[str]:
+    """Collect Keras input names (list or dict; strip ``:0`` suffixes)."""
+    inputs = getattr(model, "inputs", None)
+    if inputs is None:
+        return set()
+    if isinstance(inputs, dict):
+        return {str(key).split(":")[0] for key in inputs}
+    names: set[str] = set()
+    for inp in inputs:
+        if isinstance(inp, str):
+            names.add(inp.split(":")[0])
+            continue
+        name = (getattr(inp, "name", "") or "").split(":")[0]
+        if name:
+            names.add(name)
+    return names
+
+
+def model_expects_board_input(model: object) -> bool:
+    """True when predict feed must include ``board`` (hybrid Phase 2c)."""
+    if model_is_hybrid_board_compatible(model):
+        return True
+    names = _model_input_names(model)
+    if "board" in names or any(name.startswith("board") for name in names):
+        return True
+    inputs = getattr(model, "inputs", None)
+    if inputs is None:
+        return False
+    if isinstance(inputs, dict):
+        return len(inputs) >= 3
+    try:
+        return len(list(inputs)) >= 3
+    except TypeError:
+        return False
 
 
 class NeuralBaselineBot(ChessBot):
@@ -73,13 +113,17 @@ class NeuralBaselineBot(ChessBot):
             tracker=self._tracker,
             on_progress=self._progress,
         )
+        self._needs_board = model_expects_board_input(self._model)
         self.last_move_analysis: BotMoveAnalysis | None = None
         logger.info(
-            "Loaded candidate_style baseline uri=%s version=%s depth=%s live_nodes=%s",
+            "Loaded candidate_style baseline uri=%s version=%s depth=%s "
+            "live_nodes=%s needs_board=%s input_names=%s",
             model_uri,
             version,
             stockfish_depth,
             self.candidate_nodes,
+            self._needs_board,
+            sorted(_model_input_names(self._model)),
         )
 
     def choose_move(self, board: chess.Board) -> chess.Move:
@@ -89,6 +133,7 @@ class NeuralBaselineBot(ChessBot):
         self.last_move_analysis = None
         t0 = time.perf_counter()
         fen = board.fen(en_passant="fen")
+        color_is_white = board.turn == chess.WHITE
 
         evaluated = get_position_eval_service().evaluate(
             fen,
@@ -139,8 +184,15 @@ class NeuralBaselineBot(ChessBot):
 
         x_state = np.asarray(state, dtype=np.float32)[None, :]
         x_feats = feats[None, :, :]
+        feed: dict[str, np.ndarray] = {"state": x_state, "move_feats": x_feats}
+        # Hybrid Phase 2c models also take board (8,8,C); MLP baselines omit it.
+        if self._needs_board:
+            feed["board"] = fen_to_board_tensor(
+                fen,
+                color_is_white=color_is_white,
+            )[None, ...]
         logits = np.asarray(
-            self._model.predict({"state": x_state, "move_feats": x_feats}, verbose=0),
+            self._model.predict(feed, verbose=0),
             dtype=np.float64,
         )[0]
         n = len(ucis)
