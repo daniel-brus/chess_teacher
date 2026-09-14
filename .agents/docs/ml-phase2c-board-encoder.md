@@ -289,14 +289,15 @@ Write conclusions into this doc or roadmap; then drop the tooling that produced 
 
 #### E. Queue / schema dual path
 
-Develop uses **cutoff** train (`last_trained_data_cutoff`). This branch also revived **registry queue** flags (`already_processed_*`, `fetch_unprocessed_train_batch`, `clear_processed`) for offline A/Bs.
+Develop once experimented with **cutoff** train (`last_trained_data_cutoff`). This branch also has **registry queue** flags (`already_processed_*`, `fetch_unprocessed_train_batch`, `clear_processed`).
 
-Cleanup must pick **one** production story:
+**Product direction (locked):** hash registry for train/val/test forever; catch-up = **unprocessed registry-train** queue (processed flags), not time-based train/val and not cutoff-as-split.
 
-1. If prod stays cutoff-only → remove queue reset from any path that scheduled jobs can hit; keep queue helpers only if a supported offline sibling still needs them, else delete.
-2. If queue returns for prod → document + wire deliberately; do not leave both half-alive.
+Cleanup must make **one** production story:
 
-Same for `PROCESSED_FLAG_*` on `GameSplitAssignment` / metadata indexes.
+1. Prefer registry-train queue for catch-up / offline A/B continuity.
+2. Remove or demote cutoff-as-partition language from docs/entrypoints so nothing reintroduces time-based val.
+3. Keep `PROCESSED_FLAG_*` on `GameSplitAssignment` if queue stays; document clearly.
 
 #### F. Docs + package noise
 
