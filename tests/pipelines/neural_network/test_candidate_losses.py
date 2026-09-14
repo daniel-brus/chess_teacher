@@ -6,7 +6,10 @@ import numpy as np
 
 from chess_teacher.pipelines.neural_network.candidate_eval import MAX_CANDIDATES, MOVE_FEAT_DIM
 from chess_teacher.pipelines.neural_network.candidate_losses import (
+    DEFAULT_LOSS_KIND,
+    DEFAULT_SF_MIX_ALPHA,
     pack_candidate_targets_for_loss,
+    resolve_candidate_loss,
     sf_best_indices_from_eval,
     soft_labels_from_delta_vs_best,
 )
@@ -67,6 +70,19 @@ def test_pack_layouts() -> None:
     assert y_mix.shape == (3, MAX_CANDIDATES + 2)
     assert y_mix[0, -1] == labels[0]
     assert y_mix[0, MAX_CANDIDATES] == 1  # sf best
+
+
+def test_default_loss_is_sf_mix_user_only() -> None:
+    """Default path = sf_mix packing + α=0 (user CE only)."""
+    assert DEFAULT_LOSS_KIND == "sf_mix"
+    assert DEFAULT_SF_MIX_ALPHA == 0.0
+    feats, mask, labels = _toy_feats_mask_labels()
+    y_default = pack_candidate_targets_for_loss(
+        loss_kind=DEFAULT_LOSS_KIND, labels=labels, mask=mask, move_feats=feats
+    )
+    assert y_default.shape == (3, MAX_CANDIDATES + 2)
+    loss_fn = resolve_candidate_loss()
+    assert loss_fn.__name__ == "masked_candidate_sf_mix_ce"
 
 
 def test_material_regime_kings_pawns() -> None:

@@ -63,9 +63,12 @@ def _affinity_count() -> int | None:
 
 
 def _load1() -> float | None:
+    getloadavg = getattr(os, "getloadavg", None)
+    if getloadavg is None:
+        return None
     try:
-        return float(os.getloadavg()[0])
-    except (AttributeError, OSError):
+        return float(getloadavg()[0])
+    except OSError:
         return None
 
 

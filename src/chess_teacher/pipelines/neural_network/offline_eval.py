@@ -11,6 +11,7 @@ from chess_teacher.pipelines.neural_network.create_training_set import (
     TrainingDatum,
 )
 from chess_teacher.pipelines.neural_network.models import BaselineModel, BaselineModelStatus
+from chess_teacher.pipelines.neural_network.split_registry import get_split_registry
 from chess_teacher.pipelines.neural_network.splits import (
     DEFAULT_SPLIT_SALT,
     GameSplitResult,
@@ -18,6 +19,20 @@ from chess_teacher.pipelines.neural_network.splits import (
     game_split_result,
 )
 from chess_teacher.utils.db.client import DatabaseClient, get_db_client
+
+
+def load_registry_split(
+    db_client: DatabaseClient | None = None,
+    *,
+    limit: int,
+    split_version: str = DEFAULT_SPLIT_SALT,
+    assign_if_missing: bool = True,
+) -> GameSplitResult:
+    """Fetch a cutoff-free sample and partition it via the persistent registry."""
+    db = db_client or get_db_client()
+    datums, _cutoff = TrainingDataStore(db).fetch_since(None, limit=limit)
+    registry = get_split_registry(db, split_version=split_version)
+    return registry.split_datums(datums, assign_if_missing=assign_if_missing)
 
 
 def load_registry_bucket_datums(
@@ -48,8 +63,14 @@ def load_registry_val_datums(
     limit: int | None = None,
     full: bool = False,
     extra_where: str | None = None,
+    assign_if_missing: bool = True,
 ) -> list[TrainingDatum]:
-    """Load registry val: all games, or a lowest-``game_id`` complete-game prefix."""
+    """Load registry val: all games, or a lowest-``game_id`` complete-game prefix.
+
+    ``assign_if_missing`` is accepted for call-site compatibility with the
+    cutoff/registry sample path; bucket-prefix loads do not assign new games.
+    """
+    del assign_if_missing  # API compat; unused for bucket-prefix fetch
     if full:
         limit = None
     elif limit is None:
@@ -75,15 +96,14 @@ def load_registry_prefix_split(
     ``limit`` caps **each** bucket independently (complete games, ``game_id``
     ASC). This is not a mixed timestamp sample.
     """
-    db = db_client or get_db_client()
     train = load_registry_bucket_datums(
-        db,
+        db_client,
         bucket=SplitBucket.TRAIN,
         split_version=split_version,
         limit=limit,
     )
     val = load_registry_bucket_datums(
-        db,
+        db_client,
         bucket=SplitBucket.VAL,
         split_version=split_version,
         limit=limit,
@@ -91,7 +111,7 @@ def load_registry_prefix_split(
     test: list[TrainingDatum] = []
     if include_test:
         test = load_registry_bucket_datums(
-            db,
+            db_client,
             bucket=SplitBucket.TEST,
             split_version=split_version,
             limit=limit,

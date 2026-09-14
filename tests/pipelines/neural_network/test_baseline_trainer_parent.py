@@ -31,7 +31,11 @@ class _FakeBatch:
 
 def _patch_fit_stack(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(train_mod, "TrainingBatch", _FakeBatch)
-    monkeypatch.setattr(train_mod, "pack_candidate_targets", lambda labels, _mask: labels)
+    monkeypatch.setattr(
+        train_mod,
+        "pack_candidate_targets_for_loss",
+        lambda **_k: np.zeros((1, 10), dtype=np.float32),
+    )
     monkeypatch.setattr(train_mod, "user_not_sf_best_mask", lambda *_a, **_k: np.array([True]))
     monkeypatch.setattr(train_mod, "user_sf_disagree_strength", lambda *_a, **_k: np.array([0.5]))
     monkeypatch.setattr(train_mod, "baseline_disagree_strength", lambda *_a, **_k: np.array([1.0]))

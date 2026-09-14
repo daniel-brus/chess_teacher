@@ -179,3 +179,38 @@ def _partition_datums(
             _counts(SplitBucket.TEST, test, test_games),
         ),
     )
+
+
+def game_split_result(
+    train: list[TrainingDatum],
+    val: list[TrainingDatum],
+    test: list[TrainingDatum],
+    *,
+    salt: str = DEFAULT_SPLIT_SALT,
+    compute_disagree_frac: bool = True,
+) -> GameSplitResult:
+    """Build a ``GameSplitResult`` from already-partitioned datum lists."""
+
+    def _n_games(datums: list[TrainingDatum]) -> int:
+        return len({d.game_id for d in datums})
+
+    def _counts(bucket: SplitBucket, moves: list[TrainingDatum]) -> SplitCounts:
+        frac = _disagree_fraction(moves) if compute_disagree_frac else None
+        return SplitCounts(
+            bucket=bucket,
+            n_games=_n_games(moves),
+            n_moves=len(moves),
+            sf_disagree_frac=frac,
+        )
+
+    return GameSplitResult(
+        train=tuple(train),
+        val=tuple(val),
+        test=tuple(test),
+        salt=salt,
+        counts=(
+            _counts(SplitBucket.TRAIN, train),
+            _counts(SplitBucket.VAL, val),
+            _counts(SplitBucket.TEST, test),
+        ),
+    )

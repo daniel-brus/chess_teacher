@@ -2,9 +2,13 @@
 
 Layouts (float32 ``y_true``; last column always **user** class index for metrics):
 
-- **sparse** (A): ``[mask | user_idx]`` → ``(N, MAX+1)``
-- **soft** (B): ``[mask | soft_probs | user_idx]`` → ``(N, 2*MAX+1)``
-- **sf_mix** (C): ``[mask | sf_idx | user_idx]`` → ``(N, MAX+2)``
+- **sparse** (A): ``[mask | user_idx]`` → ``(N, MAX+1)`` — legacy alias
+- **soft** (B): ``[mask | soft_probs | user_idx]`` → ``(N, 2*MAX+1)`` — research only
+- **sf_mix** (C): ``[mask | sf_idx | user_idx]`` → ``(N, MAX+2)`` — **default path**
+
+Default training objective: ``loss_kind=sf_mix`` with ``sf_mix_alpha=0`` → pure user
+CE (same goal as sparse). Raise ``alpha`` only for platform / generic baselines that
+should leash toward SF-best among candidates. Personal / style bots stay at ``0``.
 
 Soft probs come from temperature-softmax of SF ``delta_vs_best`` (user POV pawns)
 among masked candidates. SF index = masked argmax of ``evaluation_after_user_pov``.
@@ -25,8 +29,10 @@ from chess_teacher.pipelines.neural_network.tf_runtime import ensure_tensorflow_
 
 LossKind = Literal["sparse", "soft", "sf_mix"]
 
+DEFAULT_LOSS_KIND: LossKind = "sf_mix"
 DEFAULT_SOFT_TEMPERATURE_PAWNS = 0.5
-DEFAULT_SF_MIX_ALPHA = 0.3
+# α=0 → user-only CE (personal / style). α>0 → SF leash for platform baselines.
+DEFAULT_SF_MIX_ALPHA = 0.0
 
 # Must match packing in ``candidate_eval`` / ``ply_weights``.
 _EVAL_FEAT_TANH_SCALE = 5.0
@@ -148,7 +154,7 @@ def pack_candidate_targets_for_loss(
 
 def _import_tf() -> Any:
     ensure_tensorflow_logging()
-    import tensorflow as tf
+    import tensorflow as tf  # type: ignore[import-untyped]
 
     return tf
 
@@ -192,7 +198,7 @@ def masked_candidate_sf_mix_ce(
     *,
     alpha: float = DEFAULT_SF_MIX_ALPHA,
 ):
-    """Variant C -- ``(1-alpha)*CE_user + alpha*CE_sf_best``."""
+    """Default path -- ``(1-alpha)*CE_user + alpha*CE_sf_best`` (α=0 ≡ user-only)."""
     tf = _import_tf()
     a = float(alpha)
     if not 0.0 <= a <= 1.0:
@@ -232,7 +238,7 @@ def masked_candidate_top_k(k: int, max_candidates: int = MAX_CANDIDATES):
 
 
 def resolve_candidate_loss(
-    loss_kind: LossKind = "sparse",
+    loss_kind: LossKind = DEFAULT_LOSS_KIND,
     *,
     max_candidates: int = MAX_CANDIDATES,
     sf_mix_alpha: float = DEFAULT_SF_MIX_ALPHA,

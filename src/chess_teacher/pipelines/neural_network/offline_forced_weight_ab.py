@@ -64,32 +64,36 @@ def _make_trainers(
 ) -> tuple[Any, Any, Any]:
     """Return (control, treatment, save_fn)."""
     if encoder == "hybrid":
-        control = HybridBoardTrainer(
+        return (
+            HybridBoardTrainer(
+                epochs=epochs,
+                style_disagree_boost=style_disagree_boost,
+                style_disagree_scale=style_disagree_scale,
+                forced_scale_pawns=None,
+            ),
+            HybridBoardTrainer(
+                epochs=epochs,
+                style_disagree_boost=style_disagree_boost,
+                style_disagree_scale=style_disagree_scale,
+                forced_scale_pawns=forced_scale_pawns,
+            ),
+            HybridBoardTrainer.save,
+        )
+    return (
+        BaselineTrainer(
             epochs=epochs,
             style_disagree_boost=style_disagree_boost,
             style_disagree_scale=style_disagree_scale,
             forced_scale_pawns=None,
-        )
-        treatment = HybridBoardTrainer(
+        ),
+        BaselineTrainer(
             epochs=epochs,
             style_disagree_boost=style_disagree_boost,
             style_disagree_scale=style_disagree_scale,
             forced_scale_pawns=forced_scale_pawns,
-        )
-        return control, treatment, HybridBoardTrainer.save
-    control = BaselineTrainer(
-        epochs=epochs,
-        style_disagree_boost=style_disagree_boost,
-        style_disagree_scale=style_disagree_scale,
-        forced_scale_pawns=None,
+        ),
+        BaselineTrainer.save,
     )
-    treatment = BaselineTrainer(
-        epochs=epochs,
-        style_disagree_boost=style_disagree_boost,
-        style_disagree_scale=style_disagree_scale,
-        forced_scale_pawns=forced_scale_pawns,
-    )
-    return control, treatment, BaselineTrainer.save
 
 
 def run_forced_weight_ab(

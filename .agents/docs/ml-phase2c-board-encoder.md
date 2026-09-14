@@ -1,8 +1,22 @@
 # Phase 2c — Board representation + training signal (E19–E23)
 
-**Status:** research + offline hybrid path landed on `feature/ml-phase2c-board-encoder`. Production train/promote untouched.
+**Status:** ✅ **closed** (research + offline hybrid path on `feature/ml-phase2c-board-encoder`).
+Production train/promote still untouched until Phase 4. **Next:** Phase 3 on a new branch.
+Sandbox A/B cleanup (end of this doc) remains a PR chore, not a blocker for starting Phase 3.
 
 **Primary offline metrics:** stratified **top1 / top3** overall, SF-agree, SF-disagree. Style primary for ranking runs: `top1_sf_disagree` (report top3_disagree alongside).
+
+### Locked decisions (Phase 2c exit)
+
+| Topic | Decision |
+|-------|----------|
+| Encoder | **Hybrid** board conv + flat state (preferred offline path; MLP = A/B control / sunset candidate) |
+| Forced weights (E21) | Useful research lever; **not** default-on for personal style |
+| Loss (E22) | Default **`loss_kind=sf_mix`**, **`sf_mix_alpha=0`** ≡ pure user CE. Soft rejected. `α>0` reserved for platform / generic baselines only |
+| Soft labels | Research-only; do not use for style / personal bots |
+| Prod wiring | Still Phase 4 — defaults above are library defaults for offline + future wiring |
+
+**Loss note (why sf_mix @ α=0):** Personal bots recreate **user** moves → need user-only CE. Keeping the `sf_mix` implementation (not the thin `sparse` alias) means platform baselines can later raise `α` toward SF-best among candidates without a second loss family. E22 (`hybrid_loss_ab_r3_ep10`): soft killed disagree; `α=0.3` hurt disagree vs sparse; sparse/`α=0` wins for style.
 
 ### Design assumption — greenfield baseline
 
@@ -180,10 +194,14 @@ Still categorical over masked candidates.
 | **C SF-policy mix** | `loss = (1−α)·CE_user + α·CE_sf_best` | Regularize toward engine |
 | **D Sliced CE** | Separate agree/disagree heads or weighted CE terms | If single CE underfits disagree |
 
-**Impl (offline):** ``candidate_losses.py`` — A/B/C packing + Keras losses;
+**Impl (library default):** ``candidate_losses.py`` — A/B/C packing + Keras losses;
 ``BaselineTrainer`` / ``HybridBoardTrainer`` take ``loss_kind=sparse|soft|sf_mix``,
-``soft_temperature_pawns``, ``sf_mix_alpha``. Default remains **sparse**. Next: smoke
-A/B on registry val (guardrail: agree_t1, esp. sparse-material slices).
+``soft_temperature_pawns``, ``sf_mix_alpha``.
+
+**Default:** ``loss_kind=sf_mix``, ``sf_mix_alpha=0`` (user-only CE). Soft rejected for
+style (E22). Raise ``α`` only for platform / generic baseline recipes later.
+
+Offline A/B CLI: ``offline_loss_ab.py`` (sandbox; cleanup later).
 
 Pick by registry-val disagree (guardrail: agree must not collapse). **Do not** change loss in the same run as the first encoder A/B.
 
@@ -216,3 +234,92 @@ Pick by registry-val disagree (guardrail: agree must not collapse). **Do not** c
 3. Primary: `top1_sf_disagree`; also print stratified top3.
 4. Log param counts + `BOARD_TENSOR_VERSION` / `CANDIDATE_MOVE_FEAT_VERSION`.
 5. Full registry val for go/no-go; `--limit 2000` only for plumbing smoke.
+
+---
+
+## Phase 2c exit — sandbox / offline-experiment cleanup (big job)
+
+**When:** after E19–E23 decisions locked (encoder + signal knobs chosen) and **before** (or as last commits on) the feature→`develop` PR lands green. Not optional polish — this branch accumulates a lot of **research scaffolding that must not become production surface area**.
+
+**Goal:** ship only what platform pipelines need. Delete or quarantine everything that existed solely to iterate offline A/Bs, Play smoke registrations, and diagnostic one-offs — even if those files are currently in the PR tree.
+
+**Rule of thumb:** if prod train / promote / Play never call it, and Phase 3+ will not keep it as a supported sibling, **delete** (prefer) or move under an explicitly ignored research path. Docs may keep a short “what we learned” note; code must not.
+
+### Inventory (audit + delete / strip)
+
+Treat this as a checklist. Re-scan `git diff develop...HEAD` at cleanup time — list drifts.
+
+#### A. Offline A/B CLIs + pipeline siblings (experiment-only)
+
+| Area | Likely delete or unwire |
+|------|-------------------------|
+| Forced-weight A/B | `offline_forced_weight_ab.py` (+ `scripts/tools/…`) |
+| Loss A/B (E22) | `offline_loss_ab.py` (+ `scripts/tools/…`) |
+| Encoder A/B leftovers | any remaining `offline_*encoder*ab*`, `register_encoder_ab_playables.py` |
+| Arch / HP grid playables | register/playable helpers only used for A/B Play smoke |
+| Resume / parent CLI flags | flags added only for continuing A/B rounds (`--start-round`, `--parent-off/on`, …) once decision made |
+
+Keep **generic** offline ops that prod/dev still use (`offline_baseline_catch_up`, `offline_eval` loaders used by real eval) — but strip A/B-only branches inside them.
+
+#### B. Trainer / loss knobs that stay library-only (or die)
+
+| Keep if winner | Delete / do not wire if loser or unused |
+|----------------|----------------------------------------|
+| Hybrid board path if hybrid wins | `BaselineTrainer` as long-term trunk (sunset later) |
+| Default **`sf_mix` @ α=0** (user CE) | `loss_kind=soft`; non-zero α on personal / Phase 3 paths |
+| Style disagree boost/scale (if still used in prod catch-up) | `forced_scale_pawns` + forced helpers if E21 off for prod |
+| — | User-finetune sample-weight / recency / baseline-disagree paths if Phase 3 re-homes or drops them |
+
+**Hard rule:** no non-default `loss_kind` / `sf_mix_alpha>0` / forced-scale flags on `pipeline_steps` / scheduled personal train until an explicit Phase 4 wiring ticket. Defaults must match “what we promote” (`sf_mix`, `α=0`).
+
+#### C. Diagnostics + material slices
+
+| Likely delete after write-up | Maybe keep as tiny library |
+|------------------------------|----------------------------|
+| `scripts/tools/analyze_val_sparse_material.py` | `material_regime.py` **only if** eval metrics permanently slice on it |
+| One-off analyze / phase-error scripts added for 2c | Shared `eval_metrics` stratified report used by catch-up |
+
+Write conclusions into this doc or roadmap; then drop the tooling that produced the numbers.
+
+#### D. Play / registry experiment residue
+
+- Temporary Play registrations (`baseline:v_hyb_…`, encoder A/B tags) — deregister or leave archived; do **not** document as product bots.
+- Local Keras dumps under `storage/tmp/**` (`hybrid_loss_ab_*`, `hybrid_forced_ab_*`, `encoder_*`) — **never commit**; delete when done; `.gitignore` already should cover.
+- MLflow / model-uri experiments created only for A/B — mark archived; do not point production at them.
+
+#### E. Queue / schema dual path
+
+Develop uses **cutoff** train (`last_trained_data_cutoff`). This branch also revived **registry queue** flags (`already_processed_*`, `fetch_unprocessed_train_batch`, `clear_processed`) for offline A/Bs.
+
+Cleanup must pick **one** production story:
+
+1. If prod stays cutoff-only → remove queue reset from any path that scheduled jobs can hit; keep queue helpers only if a supported offline sibling still needs them, else delete.
+2. If queue returns for prod → document + wire deliberately; do not leave both half-alive.
+
+Same for `PROCESSED_FLAG_*` on `GameSplitAssignment` / metadata indexes.
+
+#### F. Docs + package noise
+
+- Trim this file to **decisions + final architecture**; move long A/B transcripts to appendix or delete.
+- Drop obsolete briefs (`ml-train-queue` vs cutoff, abandoned encoder A/B playbooks).
+- `pipelines/neural_network/__init__.py` stays import-light; no re-export of A/B trainers.
+- Tests: delete tests whose only purpose was experiment scaffolding; keep tests for **shipped** hybrid tensor / bot board feed / prod train path.
+
+### Execution order (suggested)
+
+1. Freeze winners (encoder, loss, forced scale, metrics gate) in writing (E23 table).
+2. Grep for `offline_*_ab`, `loss_kind`, `forced_scale`, `register_*playable`, `storage/tmp`, `reset-queue` — classify keep/delete.
+3. Delete CLIs + dead modules in one commit; fix imports/tests.
+4. Strip unused constructor knobs from trainers (or hard-default + raise if non-default in prod entrypoints).
+5. Reconcile queue vs cutoff; migrate metadata if needed.
+6. Run CI + one prod-shaped catch-up smoke (no A/B flags).
+7. PR description: “research scaffolding removed; production path = …”
+
+### Done when
+
+- [ ] No A/B CLI in `scripts/tools` that prod docs mention
+- [ ] Prod train/promote/Play call only chosen encoder + ``sf_mix`` @ ``α=0`` (or explicit platform ``α``)
+- [ ] No required env vars for dead knobs
+- [ ] `storage/tmp` experiment trees gone locally; not in git
+- [ ] Roadmap Phase 2c marked closed with pointer to final architecture, not to A/B recipes
+- [ ] CI green on feature branch after cleanup commit(s)

@@ -3,6 +3,9 @@
 One change family: ``loss_kind`` only (``sparse`` | ``soft`` | ``sf_mix``).
 Same hybrid/MLP encoder, style knobs, epochs, shared train batches. Val packed once.
 
+Library default elsewhere is ``sf_mix`` @ ``α=0`` (user-only). This CLI still ablates
+kinds; pass ``--sf-mix-alpha`` when the ``sf_mix`` arm should leash toward SF.
+
 Also reports le-6-piece and kings+pawns agree/disagree (Play-floor slices).
 
 Example::
@@ -259,10 +262,10 @@ def run_loss_ab(
                             top1_overall=float(overall["top1_overall"]),
                             top3_overall=float(overall["top3_overall"]),
                             top1_overall_weighted=float(overall["top1_overall_weighted"]),
-                            n_eval=float(overall["n_eval"]),
-                            n_dropped=float(overall["n_dropped"]),
-                            n_sf_agree=float(overall["n_sf_agree"]),
-                            n_sf_disagree=float(overall["n_sf_disagree"]),
+                            n_eval=int(overall["n_eval"]),
+                            n_dropped=int(overall["n_dropped"]),
+                            n_sf_agree=int(overall["n_sf_agree"]),
+                            n_sf_disagree=int(overall["n_sf_disagree"]),
                             sf_disagree_frac=float(overall["sf_disagree_frac"]),
                             top1_sf_agree=overall.get("top1_sf_agree"),
                             top3_sf_agree=overall.get("top3_sf_agree"),

@@ -31,6 +31,7 @@ from chess_teacher.pipelines.neural_network.candidate_eval import (
     MOVE_FEAT_DIM,
 )
 from chess_teacher.pipelines.neural_network.candidate_losses import (
+    DEFAULT_LOSS_KIND,
     DEFAULT_SF_MIX_ALPHA,
     DEFAULT_SOFT_TEMPERATURE_PAWNS,
     LossKind,
@@ -168,7 +169,7 @@ class HybridBoardTrainer:
         baseline_disagree_boost: float = 1.0,
         recency_boost: float = DEFAULT_RECENCY_BOOST,
         forced_scale_pawns: float | None = None,
-        loss_kind: LossKind = "sparse",
+        loss_kind: LossKind = DEFAULT_LOSS_KIND,
         soft_temperature_pawns: float = DEFAULT_SOFT_TEMPERATURE_PAWNS,
         sf_mix_alpha: float = DEFAULT_SF_MIX_ALPHA,
     ) -> None:
@@ -438,7 +439,7 @@ class HybridBoardTrainer:
                 feats,
                 labels,
                 aligned,
-                recency_lambda=float(recency_lambda) if use_recency else 0.0,
+                recency_lambda=float(recency_lambda) if recency_lambda is not None else 0.0,
                 recency_boost=self.recency_boost if use_recency else 1.0,
                 style_disagree_boost=self.style_disagree_boost,
                 style_disagree_scale=self.style_disagree_scale,
@@ -527,6 +528,7 @@ class HybridBoardTrainer:
         metrics["sf_disagree_frac"] = disagree_frac
         metrics["sf_disagree_mean_strength"] = mean_strength
         metrics["epochs"] = float(self.epochs)
+        metrics["sf_mix_alpha"] = float(self.sf_mix_alpha)
         if self.forced_scale_pawns is not None:
             metrics["forced_scale_pawns"] = float(self.forced_scale_pawns)
         if recency_lambda is not None:
