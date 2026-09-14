@@ -73,7 +73,7 @@ def test_pack_layouts() -> None:
 
 
 def test_default_loss_is_sf_mix_user_only() -> None:
-    """Default path = sf_mix packing + α=0 (user CE only)."""
+    """Default path = sf_mix packing + alpha=0 (user CE only)."""
     assert DEFAULT_LOSS_KIND == "sf_mix"
     assert DEFAULT_SF_MIX_ALPHA == 0.0
     feats, mask, labels = _toy_feats_mask_labels()

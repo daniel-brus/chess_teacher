@@ -3,7 +3,7 @@
 One change family: ``loss_kind`` only (``sparse`` | ``soft`` | ``sf_mix``).
 Same hybrid/MLP encoder, style knobs, epochs, shared train batches. Val packed once.
 
-Library default elsewhere is ``sf_mix`` @ ``α=0`` (user-only). This CLI still ablates
+Library default elsewhere is ``sf_mix`` @ ``alpha=0`` (user-only). This CLI still ablates
 kinds; pass ``--sf-mix-alpha`` when the ``sf_mix`` arm should leash toward SF.
 
 Also reports le-6-piece and kings+pawns agree/disagree (Play-floor slices).

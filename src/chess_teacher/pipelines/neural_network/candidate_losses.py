@@ -31,7 +31,7 @@ LossKind = Literal["sparse", "soft", "sf_mix"]
 
 DEFAULT_LOSS_KIND: LossKind = "sf_mix"
 DEFAULT_SOFT_TEMPERATURE_PAWNS = 0.5
-# α=0 → user-only CE (personal / style). α>0 → SF leash for platform baselines.
+# alpha=0 -> user-only CE (personal / style). alpha>0 -> SF leash for platform baselines.
 DEFAULT_SF_MIX_ALPHA = 0.0
 
 # Must match packing in ``candidate_eval`` / ``ply_weights``.
@@ -198,7 +198,7 @@ def masked_candidate_sf_mix_ce(
     *,
     alpha: float = DEFAULT_SF_MIX_ALPHA,
 ):
-    """Default path -- ``(1-alpha)*CE_user + alpha*CE_sf_best`` (α=0 ≡ user-only)."""
+    """Default path -- ``(1-alpha)*CE_user + alpha*CE_sf_best`` (alpha=0 == user-only)."""
     tf = _import_tf()
     a = float(alpha)
     if not 0.0 <= a <= 1.0:
