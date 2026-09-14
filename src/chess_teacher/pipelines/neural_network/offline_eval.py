@@ -9,6 +9,7 @@ from __future__ import annotations
 from chess_teacher.pipelines.neural_network.create_training_set import (
     TrainingDataStore,
     TrainingDatum,
+    account_id_in_sql,
 )
 from chess_teacher.pipelines.neural_network.models import BaselineModel, BaselineModelStatus
 from chess_teacher.pipelines.neural_network.split_registry import get_split_registry
@@ -19,6 +20,14 @@ from chess_teacher.pipelines.neural_network.splits import (
     game_split_result,
 )
 from chess_teacher.utils.db.client import DatabaseClient, get_db_client
+
+
+def account_registry_extra_where(account_id: str) -> str:
+    """SQL fragment restricting registry bucket fetches to one ``account_id``."""
+    aid = (account_id or "").strip()
+    if not aid:
+        raise ValueError("account_id is required")
+    return account_id_in_sql([aid])
 
 
 def load_registry_split(
@@ -129,3 +138,66 @@ def resolve_production_model_uri(db_client: DatabaseClient | None = None) -> str
             "pass --baseline-uri explicitly."
         )
     return row.model_uri
+
+
+def load_account_registry_bucket_datums(
+    account_id: str,
+    db_client: DatabaseClient | None = None,
+    *,
+    bucket: SplitBucket,
+    split_version: str = DEFAULT_SPLIT_SALT,
+    limit: int | None = None,
+) -> list[TrainingDatum]:
+    """Eligible moves for one account ∩ one registry bucket (``game_id`` ASC).
+
+    Uses the platform hash registry only — never time-orders train/val.
+    ``limit`` is a complete-game move cap; ``None`` loads the whole intersection.
+    """
+    return load_registry_bucket_datums(
+        db_client,
+        bucket=bucket,
+        split_version=split_version,
+        limit=limit,
+        extra_where=account_registry_extra_where(account_id),
+    )
+
+
+def load_account_registry_split(
+    account_id: str,
+    db_client: DatabaseClient | None = None,
+    *,
+    split_version: str = DEFAULT_SPLIT_SALT,
+    train_limit: int | None = None,
+    val_limit: int | None = None,
+    include_test: bool = False,
+    test_limit: int | None = None,
+) -> GameSplitResult:
+    """Train/val/(optional test) for one account via the shared hash registry.
+
+    Each bucket is loaded independently (complete games). Empty buckets are OK
+    when that account has no games in that registry bucket yet.
+    """
+    train = load_account_registry_bucket_datums(
+        account_id,
+        db_client,
+        bucket=SplitBucket.TRAIN,
+        split_version=split_version,
+        limit=train_limit,
+    )
+    val = load_account_registry_bucket_datums(
+        account_id,
+        db_client,
+        bucket=SplitBucket.VAL,
+        split_version=split_version,
+        limit=val_limit,
+    )
+    test: list[TrainingDatum] = []
+    if include_test:
+        test = load_account_registry_bucket_datums(
+            account_id,
+            db_client,
+            bucket=SplitBucket.TEST,
+            split_version=split_version,
+            limit=test_limit,
+        )
+    return game_split_result(train, val, test, salt=split_version)

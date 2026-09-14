@@ -33,10 +33,10 @@
 
 ## Phase 3a (do this first)
 
-1. Account×registry loaders (extend `TrainingDataStore` / `offline_eval` — **no** time-based `user_splits`).
-2. `scripts/tools/offline_user_finetune_eval.py`: parent baseline → train user∩train → eval user∩val.
-3. Stratified metrics; primary `top1_sf_disagree`; guardrail agree.
-4. Exit: 2–3 accounts; ~300+ registry-train moves; beat parent on user registry-val disagree.
+1. Account×registry loaders (extend `TrainingDataStore` / `offline_eval` — **no** time-based `user_splits`). ✅ `load_account_registry_*` in `offline_eval.py`
+2. `scripts/tools/offline_user_finetune_eval.py`: parent baseline → train user∩train → eval user∩val. ✅ (+ `--train-parent` cold hybrid)
+3. Stratified metrics; primary `top1_sf_disagree`; guardrail agree (report-only). ✅
+4. Exit: 2–3 accounts; ~300+ registry-train moves; beat parent on user registry-val disagree. *(pending: backfill Naroditsky/`RebeccaHarris` then E13 runs)*
 
 ## Phase 3b (after 3a)
 
