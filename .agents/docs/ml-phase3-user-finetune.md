@@ -36,7 +36,21 @@
 1. Account×registry loaders (extend `TrainingDataStore` / `offline_eval` — **no** time-based `user_splits`). ✅ `load_account_registry_*` in `offline_eval.py`
 2. `scripts/tools/offline_user_finetune_eval.py`: parent baseline → train user∩train → eval user∩val. ✅ (+ `--train-parent` cold hybrid)
 3. Stratified metrics; primary `top1_sf_disagree`; guardrail agree (report-only). ✅
-4. Exit: 2–3 accounts; ~300+ registry-train moves; beat parent on user registry-val disagree. *(pending: backfill Naroditsky/`RebeccaHarris` then E13 runs)*
+4. Exit: 2–3 accounts; ~300+ registry-train moves; beat parent on user registry-val disagree.
+
+### Smoke E13 (local, 2026-09-15) — ikbendaniel only
+
+Cold hybrid parent `--parent-train-limit 10000` ep5 → finetune train5k/val3k ep5 style boost 4.0.
+
+| | disagree_t1 | agree_t1 | top1 |
+|--|------------:|---------:|-----:|
+| parent on user val | 0.1942 | 0.7489 | 0.3987 |
+| user finetune | **0.2058** | 0.6965 | 0.3867 |
+| delta | **+0.0116** | −0.0524 | −0.0120 |
+
+Primary met (disagree↑). Agree drop reported (report-only). Artifacts under `storage/tmp/phase3a/` (gitignored).
+
+**Blocked for RebeccaHarris / Naroditsky on local:** chars exist but `candidate_evaluations` all NULL locally; VPS pipeline still filling prod (~8d ETA at ~3k moves/h). Sync or local expensive enrich before second-account E13 + full-registry parent.
 
 ## Phase 3b (after 3a)
 
