@@ -5,6 +5,7 @@ from chess_teacher.utils.db.client import get_db_client
 from chess_teacher.utils.exception_utils import AuthError
 from chess_teacher.utils.general_utils import get_current_datetime
 from chess_teacher.utils.logging import get_logger
+from streamlit_utils.dev_user import DEV_ENVIRONMENT_ST_USER, is_dev_environment_user_enabled
 from streamlit_utils.legal import render_legal_links
 from streamlit_utils.page_config import APP_DESCRIPTION, APP_NAME
 from streamlit_utils.session_state import get_current_user, set_current_user, st_user_is_logged_in
@@ -57,7 +58,26 @@ class LoginScreen:
             user.email = oauth_email
         return user
 
+    def _complete_login(self, st_user: dict, *, verify_oauth: bool) -> None:
+        now = get_current_datetime()
+        if not self._exists_in_db(st_user):
+            if verify_oauth:
+                user = self._verify_and_register_user(st_user)
+            else:
+                user = User.from_st_user(st_user)
+                _ = user.save_new_to_db(self.db_client)
+        else:
+            user = self._fetch_existing_user(st_user)
+
+        user.upsert_latest(self.db_client, "latest_login", now)
+        set_current_user(user)
+        self.logger.info("User authenticated in Streamlit user_id=%s", user.user_id)
+
     def display(self):
+        if is_dev_environment_user_enabled():
+            if not st.session_state.get("current_user", {}):
+                self._complete_login(DEV_ENVIRONMENT_ST_USER, verify_oauth=False)
+            return
         if not st_user_is_logged_in():
             self.logger.info("Login screen started.")
             apply_app_theme(None)
@@ -74,16 +94,7 @@ class LoginScreen:
         else:
             if st.session_state.get("current_user", {}):
                 return
-            now = get_current_datetime()
-            st_user = st.user.to_dict()
-            if not self._exists_in_db(st_user):
-                user = self._verify_and_register_user(st_user)
-            else:
-                user = self._fetch_existing_user(st_user)
-
-            user.upsert_latest(self.db_client, "latest_login", now)
-            set_current_user(user)
-            self.logger.info("User authenticated in Streamlit user_id=%s", user.user_id)
+            self._complete_login(st.user.to_dict(), verify_oauth=True)
 
 
 def require_authenticated_user() -> User:
