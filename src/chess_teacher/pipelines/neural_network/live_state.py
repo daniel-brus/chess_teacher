@@ -147,9 +147,25 @@ class LiveStateEncoder:
         """
         fen = board.fen(en_passant="fen")
         if evaluation_white_pov is _COMPUTE_EVAL:
-            evaluation = self._engine.evaluate_white_pov_pawns(fen)
-            if evaluation is None:
+            from chess_teacher.pipelines.fen_eval_cache.service import get_position_eval_service
+            from chess_teacher.pipelines.neural_network.candidate_eval import (
+                live_candidate_stockfish_nodes,
+            )
+
+            try:
+                evaluation = (
+                    get_position_eval_service()
+                    .evaluate(
+                        fen,
+                        board.ply(),
+                        eval_depth=self._engine.depth,
+                        candidate_nodes=live_candidate_stockfish_nodes(),
+                    )
+                    .eval_white_pov
+                )
+            except Exception:
                 logger.warning("Live Stockfish eval failed for fen=%s; missing indicator set", fen)
+                evaluation = None
         else:
             evaluation = evaluation_white_pov  # type: ignore[assignment]
         return compose_live_state_vector(

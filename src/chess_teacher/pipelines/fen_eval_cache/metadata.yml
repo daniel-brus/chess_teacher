@@ -1,0 +1,39 @@
+tables:
+  position_evals:
+    schema: engine
+    table: position_evals
+    comment: LRU cache of engine evals keyed by EPD (scalar + MultiPV)
+    primary_key:
+      - epd
+    indexes:
+      - name: idx_position_evals_last_used
+        columns: [last_used]
+    columns:
+      - name: epd
+        data_type: text
+        nullable: false
+        comment: Normalized board (placement, STM, castling, EP)
+      - name: engine
+        data_type: text
+        nullable: false
+        comment: Engine family that produced this row (e.g. stockfish)
+      - name: eval_white_pov
+        data_type: double precision
+        nullable: false
+        comment: Scalar white-POV pawns
+      - name: eval_depth
+        data_type: integer
+        nullable: false
+        comment: Depth used for the scalar
+      - name: candidates
+        data_type: jsonb
+        nullable: false
+        comment: MultiPV payload (depth, num_nodes, method, evals_white_pov)
+      - name: candidate_nodes
+        data_type: integer
+        nullable: false
+        comment: Node budget used for the MultiPV payload
+      - name: last_used
+        data_type: timestamptz
+        nullable: false
+        comment: Touched on every hit or write (LRU)

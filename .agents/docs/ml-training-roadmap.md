@@ -1,6 +1,6 @@
 # ML training roadmap — baseline + personalized bots
 
-**Status:** Phase 1 + 1b on `develop`. Game-split **assignment** runs in the daily user `PipelineRunner` after preprocess (not train/promote). Phase 2a **tools + `DEFAULT_EPOCHS=20`**. Phase 2b **tools + first 10k experiments** (keep `128/64`; feat v4 skipped). Production train/promote unchanged until Phase 4.
+**Status:** Phase 1 + 1b on `develop`. Game-split **assignment** runs in the daily user `PipelineRunner` after preprocess (not train/promote). Phase 2a **tools + `DEFAULT_EPOCHS=20`**. Phase 2b **tools + first 10k experiments** (keep `128/64`; feat v4 skipped). Phase 2c **closed** (hybrid encoder + `sf_mix`@α=0 loss default; see `.agents/docs/ml-phase2c-board-encoder.md`). Production train/promote unchanged until Phase 4. **Next: Phase 3** (new branch).
 
 **Audience:** humans and coding agents working on `src/chess_teacher/pipelines/neural_network/`
 
@@ -478,6 +478,19 @@ Decision: **no feat v4**. Opening is the weak disagree slice, not endgame. If cu
 
 ---
 
+## Phase 2c — Board encoder + training signal ✅
+
+Detail: `.agents/docs/ml-phase2c-board-encoder.md`.
+
+| Locked | Choice |
+|--------|--------|
+| Encoder | Hybrid board + state (offline); MLP control / sunset candidate |
+| Loss default | `sf_mix` with `sf_mix_alpha=0` (user-only CE); `α>0` later for platform baselines only |
+| Soft CE | Rejected for style (E22) |
+| Prod wire | Phase 4; sandbox A/B cleanup before/with merge |
+
+---
+
 ## Phase 3 — Personal bot experiments (offline)
 
 **Goal:** User finetune beats baseline on user’s **disagree** val positions. Same **tools → ops → entrypoint** progression as baseline.
@@ -656,10 +669,11 @@ When asked to implement part of this roadmap:
 
 1. **Terminal-only** — `backfill_game_splits.py` then `offline_baseline_train_eval.py` ✅
 2. **Phase 2a** — epoch sweep + promotion sibling + `DEFAULT_EPOCHS=20` (justified pick) ✅
-3. **Phase 2b** — tools + 10k experiments ✅ (keep 128/64; feat v4 skipped). Next: Phase 3 or larger-val HP revisit.
-4. **Phase 3** — user tools + user ops siblings + notebook user section
-5. **Phase 4** — merge into entrypoints; **consolidate** NN pipelines (≤2); fold split assign into preprocess; **orchestrated** train / promote / catch-up
-6. **Phase 5** — product polish
+3. **Phase 2b** — tools + 10k experiments ✅ (keep 128/64; feat v4 skipped)
+4. **Phase 2c** — board encoder + training signal ✅ (hybrid preferred; default loss `sf_mix` α=0; sandbox cleanup later). Detail: `.agents/docs/ml-phase2c-board-encoder.md`
+5. **Phase 3** — user tools + user ops siblings + notebook user section ← **you are here (new branch)**
+6. **Phase 4** — merge into entrypoints; **consolidate** NN pipelines (≤2); fold split assign into preprocess; **orchestrated** train / promote / catch-up
+7. **Phase 5** — product polish
 
 Each phase should close the **experimental questions** (E1–E18) listed above for that scope.
 

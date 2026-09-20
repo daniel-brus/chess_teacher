@@ -1,20 +1,30 @@
-"""Keras baseline trainer — candidate-aware style scorer (SF eval features per move).
+"""Hybrid board-encoder + flat state + candidate scorer (Phase 2c offline).
 
-Replaces the fixed-vocab policy head. Parent weights load only when compatible with
-``head=candidate_style`` (state tower + per-candidate scorer). See
-``candidate_eval.py`` for delta convention.
+Board conv trunk is an **addition** to the baseline flat ``state`` tower (not a
+replacement). Both embeddings fuse before the shared candidate head.
+Does **not** wire production entrypoints.
+
+POC: intended *successor candidate* for ``BaselineTrainer`` if registry-val
+A/B wins — still disposable with the rest of ``neural_network`` until Phase 4
+promotes a greenfield design. Not production-wired yet.
 """
 
 from __future__ import annotations
 
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
+from chess_teacher.pipelines.neural_network.board_tensor import (
+    BOARD_TENSOR_CHANNELS,
+    BOARD_TENSOR_SHAPE,
+    BOARD_TENSOR_VERSION,
+    pack_board_tensors,
+)
 from chess_teacher.pipelines.neural_network.candidate_eval import (
     CANDIDATE_MOVE_FEAT_VERSION,
     MAX_CANDIDATES,
@@ -25,11 +35,8 @@ from chess_teacher.pipelines.neural_network.candidate_losses import (
     DEFAULT_SF_MIX_ALPHA,
     DEFAULT_SOFT_TEMPERATURE_PAWNS,
     LossKind,
-    candidate_loss_custom_objects,
-    masked_candidate_sparse_ce,
     masked_candidate_top_k,
     pack_candidate_targets_for_loss,
-    pack_sparse_candidate_targets,
     resolve_candidate_loss,
 )
 from chess_teacher.pipelines.neural_network.create_training_set import (
@@ -47,24 +54,16 @@ from chess_teacher.pipelines.neural_network.ply_weights import (
     user_sf_disagree_strength,
 )
 from chess_teacher.pipelines.neural_network.tf_runtime import ensure_tensorflow_logging
+from chess_teacher.pipelines.neural_network.train import (
+    BaselineTrainer,
+    candidate_style_custom_objects,
+)
 from chess_teacher.utils.general_utils import get_current_datetime
 from chess_teacher.utils.logging import get_logger
 from chess_teacher.utils.process_utils import snapshot_host_pressure
 
 logger = get_logger()
-
-# Before any lazy ``import tensorflow`` in this module (and usually before other
-# call sites that import train first).
 ensure_tensorflow_logging()
-
-
-def _import_tensorflow():
-    """Import TF after quieting C++ STDERR, then re-wire Python loggers."""
-    ensure_tensorflow_logging()
-    import tensorflow as tf  # type: ignore[import-untyped]
-
-    ensure_tensorflow_logging()
-    return tf
 
 
 def _import_keras():
@@ -75,27 +74,13 @@ def _import_keras():
     return keras
 
 
-# Re-export for pipeline / MLflow params.
-HEAD_TYPE_POLICY = "policy"  # legacy marker only; trainer no longer builds this head.
-
-# Backward-compatible aliases — E22 implementations live in ``candidate_losses``.
-_masked_candidate_sparse_ce = masked_candidate_sparse_ce
-_masked_candidate_top_k = masked_candidate_top_k
-pack_candidate_targets = pack_sparse_candidate_targets
-
-
-def candidate_style_custom_objects(max_candidates: int = MAX_CANDIDATES) -> dict[str, Any]:
-    return candidate_loss_custom_objects(max_candidates)
-
-
-def load_candidate_style_keras(
+def load_hybrid_board_keras(
     path: Path,
     *,
     max_candidates: int = MAX_CANDIDATES,
     compile_model: bool = False,
 ) -> Any:
     keras = _import_keras()
-
     return keras.models.load_model(
         path,
         custom_objects=candidate_style_custom_objects(max_candidates),
@@ -103,116 +88,71 @@ def load_candidate_style_keras(
     )
 
 
-def model_is_candidate_style_compatible(
+def model_is_hybrid_board_compatible(
     model: Any,
     *,
     max_candidates: int = MAX_CANDIDATES,
     move_feat_dim: int = MOVE_FEAT_DIM,
+    board_channels: int = BOARD_TENSOR_CHANNELS,
 ) -> bool:
-    """True when outputs MAX slots and ``move_feats`` input has current feat dim."""
+    """True when inputs include board, state, and move_feats."""
     try:
         shape = model.output_shape
-    except Exception:
-        return False
-    if not shape:
-        return False
-    if isinstance(shape, (list, tuple)) and shape and not isinstance(shape[-1], int):
         last = shape[-1] if not isinstance(shape[0], (list, tuple)) else shape[0][-1]
-    else:
-        last = shape[-1]
-    try:
         if int(last) != int(max_candidates):
             return False
-    except (TypeError, ValueError):
+    except Exception:
         return False
 
-    # Input: list of tensors; find move_feats by name or second input shape.
     try:
         inputs = model.inputs
     except Exception:
         return False
-    if not inputs:
+    if not inputs or len(inputs) < 3:
         return False
-    feat_input = None
+
+    board_in = None
+    state_in = None
+    feats_in = None
     for inp in inputs:
-        name = getattr(inp, "name", "") or ""
-        if "move_feats" in name:
-            feat_input = inp
-            break
-    if feat_input is None and len(inputs) >= 2:
-        feat_input = inputs[1]
-    if feat_input is None:
+        name = (getattr(inp, "name", "") or "").split(":")[0]
+        if name == "board" or name.startswith("board"):
+            board_in = inp
+        elif name == "state" or name.startswith("state"):
+            state_in = inp
+        elif name == "move_feats" or "move_feats" in name:
+            feats_in = inp
+    if board_in is None or state_in is None or feats_in is None:
         return False
     try:
-        in_shape = tuple(feat_input.shape)
-        # (None, MAX, F)
-        return int(in_shape[-1]) == int(move_feat_dim) and int(in_shape[-2]) == int(max_candidates)
+        b_shape = tuple(board_in.shape)
+        f_shape = tuple(feats_in.shape)
+        return (
+            int(b_shape[-1]) == int(board_channels)
+            and int(b_shape[-2]) == 8
+            and int(b_shape[-3]) == 8
+            and int(f_shape[-1]) == int(move_feat_dim)
+            and int(f_shape[-2]) == int(max_candidates)
+        )
     except (TypeError, ValueError, IndexError):
         return False
 
 
-_LOADED_CANDIDATE_STYLE_MODELS: dict[tuple[str, int], Any] = {}
+class HybridBoardTrainer:
+    """Board conv + flat state tower fused, then candidate scorer (offline Phase 2c).
 
+    State tower matches ``BaselineTrainer`` widths; conv trunk is additive.
+    ``DEFAULT_CONV_FILTERS`` bumped vs first A/B (32 → 64).
 
-def clear_candidate_style_model_cache() -> None:
-    """Drop in-process Keras models (tests / memory pressure)."""
-    _LOADED_CANDIDATE_STYLE_MODELS.clear()
-
-
-def load_candidate_style_from_uri(
-    model_uri: str,
-    *,
-    tracker: Any | None = None,
-    max_candidates: int = MAX_CANDIDATES,
-    require_compatible: bool = True,
-    on_progress: Callable[[str], None] | None = None,
-) -> Any:
-    progress = on_progress or (lambda _message: None)
-    cache_key = (model_uri, int(max_candidates))
-    cached = _LOADED_CANDIDATE_STYLE_MODELS.get(cache_key)
-    if cached is not None:
-        progress("Using cached TensorFlow model…")
-        return cached
-
-    from chess_teacher.pipelines.neural_network.mlflow_utils import MLflowTracker
-
-    progress("Fetching model weights from storage…")
-    mlflow_tracker = tracker or MLflowTracker()
-    weights_path = mlflow_tracker.require_keras_weights(model_uri)
-    progress("Loading model into TensorFlow…")
-    model = load_candidate_style_keras(
-        weights_path, max_candidates=max_candidates, compile_model=False
-    )
-    if require_compatible and not model_is_candidate_style_compatible(
-        model, max_candidates=max_candidates, move_feat_dim=MOVE_FEAT_DIM
-    ):
-        raise ValueError(
-            f"Model at {model_uri!r} is not candidate_style-compatible "
-            f"(output_shape={getattr(model, 'output_shape', None)}, "
-            f"want MAX={max_candidates} feat_dim={MOVE_FEAT_DIM})"
-        )
-    _LOADED_CANDIDATE_STYLE_MODELS[cache_key] = model
-    return model
-
-
-class BaselineTrainer:
-    """Shared state tower + per-candidate MLP scorer; listwise masked CE.
-
-    Inputs: ``state`` (D,), ``move_feats`` (MAX, F). Output: logits (MAX,).
-    Sample weights: ply * SF-style, optional recency and baseline-disagree
-    (see ``ply_weights``). ``baseline_disagree_boost`` defaults to 1.0 so
-    platform baseline catch-up is unchanged. When boost is on, predict the
-    mask from ``baseline_weights_path`` (frozen production baseline) and
-    resume ``fit`` from ``weights_path`` (last personal checkpoint).
+    POC / intended successor for flat-state-only ``BaselineTrainer`` if A/B wins.
+    Still offline-only; package remains deletable until Phase 4 greenfield.
     """
 
-    # Justified 2a pick: 10k registry-val sweep still climbing at 20; peak
-    # disagree_t1 on the 3-20 grid. Val only 32 games -- revisit if 2b replay
-    # or a larger val set plateaus earlier.
-    DEFAULT_EPOCHS = 20
-    DEFAULT_BATCH_SIZE = 64
-    DEFAULT_HIDDEN = 128
-    DEFAULT_SCORE_HIDDEN = 64
+    DEFAULT_EPOCHS = BaselineTrainer.DEFAULT_EPOCHS
+    DEFAULT_BATCH_SIZE = BaselineTrainer.DEFAULT_BATCH_SIZE
+    DEFAULT_HIDDEN = BaselineTrainer.DEFAULT_HIDDEN
+    DEFAULT_SCORE_HIDDEN = BaselineTrainer.DEFAULT_SCORE_HIDDEN
+    DEFAULT_CONV_FILTERS = 64
 
     def __init__(
         self,
@@ -221,6 +161,7 @@ class BaselineTrainer:
         batch_size: int = DEFAULT_BATCH_SIZE,
         hidden: int = DEFAULT_HIDDEN,
         score_hidden: int = DEFAULT_SCORE_HIDDEN,
+        conv_filters: int = DEFAULT_CONV_FILTERS,
         max_candidates: int = MAX_CANDIDATES,
         move_feat_dim: int = MOVE_FEAT_DIM,
         style_disagree_boost: float | None = None,
@@ -236,6 +177,7 @@ class BaselineTrainer:
         self.batch_size = batch_size
         self.hidden = hidden
         self.score_hidden = score_hidden
+        self.conv_filters = conv_filters
         self.max_candidates = max_candidates
         self.move_feat_dim = move_feat_dim
         self.style_disagree_boost = (
@@ -262,41 +204,64 @@ class BaselineTrainer:
             sf_mix_alpha=self.sf_mix_alpha,
         )
 
-    def build(self, input_dim: int) -> Any:
+    def build(self, state_dim: int) -> Any:
         keras = _import_keras()
-
         layers = keras.layers
-        state_in = keras.Input(shape=(input_dim,), name="state")
+
+        board_in = keras.Input(shape=BOARD_TENSOR_SHAPE, name="board")
+        state_in = keras.Input(shape=(state_dim,), name="state")
         feats_in = keras.Input(
             shape=(self.max_candidates, self.move_feat_dim),
             name="move_feats",
         )
 
-        h = layers.Dense(self.hidden, activation="relu", name="state_h1")(state_in)
-        h = layers.Dense(self.hidden, activation="relu", name="state_h2")(h)
-        h_tile = layers.RepeatVector(self.max_candidates, name="state_tile")(h)
-        x = layers.Concatenate(axis=-1, name="state_move_concat")([h_tile, feats_in])
-        x = layers.TimeDistributed(
+        # Spatial trunk (additive geometry).
+        x = layers.Conv2D(
+            self.conv_filters,
+            3,
+            padding="same",
+            activation="relu",
+            name="board_conv1",
+        )(board_in)
+        x = layers.Conv2D(
+            self.conv_filters,
+            3,
+            padding="same",
+            activation="relu",
+            name="board_conv2",
+        )(x)
+        x = layers.GlobalAveragePooling2D(name="board_gap")(x)
+        board_emb = layers.Dense(self.hidden, activation="relu", name="board_emb")(x)
+
+        # Same flat-state tower as BaselineTrainer.
+        s = layers.Dense(self.hidden, activation="relu", name="state_h1")(state_in)
+        state_emb = layers.Dense(self.hidden, activation="relu", name="state_h2")(s)
+
+        fused = layers.Concatenate(axis=-1, name="board_state_concat")([board_emb, state_emb])
+        h = layers.Dense(self.hidden, activation="relu", name="fused_emb")(fused)
+        h_tile = layers.RepeatVector(self.max_candidates, name="fused_tile")(h)
+        scored_in = layers.Concatenate(axis=-1, name="fused_move_concat")([h_tile, feats_in])
+        scored = layers.TimeDistributed(
             layers.Dense(self.score_hidden, activation="relu"),
             name="score_h",
-        )(x)
+        )(scored_in)
         scores = layers.TimeDistributed(
             layers.Dense(1, activation="linear"),
             name="score_out",
-        )(x)
+        )(scored)
         logits = layers.Reshape((self.max_candidates,), name="candidate_logits")(scores)
 
         model = keras.Model(
-            inputs=[state_in, feats_in],
+            inputs=[board_in, state_in, feats_in],
             outputs=logits,
-            name="baseline_candidate_style",
+            name="baseline_hybrid_board",
         )
         model.compile(
             optimizer=keras.optimizers.Adam(1e-3),
             loss=self._loss_fn(),
             metrics=[
-                _masked_candidate_top_k(1, self.max_candidates),
-                _masked_candidate_top_k(3, self.max_candidates),
+                masked_candidate_top_k(1, self.max_candidates),
+                masked_candidate_top_k(3, self.max_candidates),
             ],
         )
         return model
@@ -304,7 +269,7 @@ class BaselineTrainer:
     def load_or_build(
         self,
         *,
-        input_dim: int,
+        state_dim: int,
         weights_path: Path | None = None,
         require_compatible_parent: bool = False,
     ) -> Any:
@@ -313,27 +278,25 @@ class BaselineTrainer:
                 raise FileNotFoundError(
                     "require_compatible_parent=True needs an existing Keras weights file"
                 )
-            logger.info("Loading required parent weights from %s", weights_path)
+            logger.info("Loading required hybrid parent weights from %s", weights_path)
             try:
-                model = load_candidate_style_keras(
+                model = load_hybrid_board_keras(
                     weights_path,
                     max_candidates=self.max_candidates,
                     compile_model=False,
                 )
             except Exception as exc:
                 raise RuntimeError(
-                    f"Failed to load parent Keras weights from {weights_path}"
+                    f"Failed to load parent hybrid Keras weights from {weights_path}"
                 ) from exc
-            if not model_is_candidate_style_compatible(
+            if not model_is_hybrid_board_compatible(
                 model,
                 max_candidates=self.max_candidates,
                 move_feat_dim=self.move_feat_dim,
             ):
                 raise RuntimeError(
-                    "Parent weights not candidate_style-compatible "
-                    f"(output_shape={getattr(model, 'output_shape', None)}, "
-                    f"want MAX={self.max_candidates} feat_dim={self.move_feat_dim} "
-                    f"/ version={CANDIDATE_MOVE_FEAT_VERSION})"
+                    "Parent weights not hybrid board+state compatible "
+                    f"(output_shape={getattr(model, 'output_shape', None)})"
                 )
             from tensorflow import keras  # type: ignore[import-untyped]
 
@@ -342,39 +305,31 @@ class BaselineTrainer:
                 optimizer=keras.optimizers.Adam(1e-3),
                 loss=self._loss_fn(),
                 metrics=[
-                    _masked_candidate_top_k(1, self.max_candidates),
-                    _masked_candidate_top_k(3, self.max_candidates),
+                    masked_candidate_top_k(1, self.max_candidates),
+                    masked_candidate_top_k(3, self.max_candidates),
                 ],
             )
             return model
         if weights_path is not None and weights_path.is_file():
-            logger.info("Loading baseline weights from %s", weights_path)
+            logger.info("Loading hybrid board weights from %s", weights_path)
             try:
-                model = load_candidate_style_keras(
+                model = load_hybrid_board_keras(
                     weights_path,
                     max_candidates=self.max_candidates,
                     compile_model=False,
                 )
             except Exception:
                 logger.exception(
-                    "Failed to load baseline weights; cold-starting candidate_style model"
+                    "Failed to load hybrid weights; cold-starting hybrid board+state model"
                 )
-                return self.build(input_dim)
-            if not model_is_candidate_style_compatible(
+                return self.build(state_dim)
+            if not model_is_hybrid_board_compatible(
                 model,
                 max_candidates=self.max_candidates,
                 move_feat_dim=self.move_feat_dim,
             ):
-                logger.warning(
-                    "Parent weights not candidate_style-compatible "
-                    "(output_shape=%s, want MAX=%s feat_dim=%s / version=%s); "
-                    "cold-starting instead of resuming old feat layout",
-                    getattr(model, "output_shape", None),
-                    self.max_candidates,
-                    self.move_feat_dim,
-                    CANDIDATE_MOVE_FEAT_VERSION,
-                )
-                return self.build(input_dim)
+                logger.warning("Parent weights not hybrid board+state compatible; cold-starting")
+                return self.build(state_dim)
             from tensorflow import keras  # type: ignore[import-untyped]
 
             ensure_tensorflow_logging()
@@ -382,18 +337,20 @@ class BaselineTrainer:
                 optimizer=keras.optimizers.Adam(1e-3),
                 loss=self._loss_fn(),
                 metrics=[
-                    _masked_candidate_top_k(1, self.max_candidates),
-                    _masked_candidate_top_k(3, self.max_candidates),
+                    masked_candidate_top_k(1, self.max_candidates),
+                    masked_candidate_top_k(3, self.max_candidates),
                 ],
             )
             return model
         logger.info(
-            "Cold-start candidate_style model input_dim=%s max_candidates=%s feat_dim=%s",
-            input_dim,
+            "Cold-start hybrid board+state model state_dim=%s conv_filters=%s "
+            "max_candidates=%s feat_dim=%s",
+            state_dim,
+            self.conv_filters,
             self.max_candidates,
             self.move_feat_dim,
         )
-        return self.build(input_dim)
+        return self.build(state_dim)
 
     def fit(
         self,
@@ -407,28 +364,23 @@ class BaselineTrainer:
         require_parent_weights: bool = False,
     ) -> tuple[Any, dict[str, float]]:
         if not datums:
-            raise ValueError("BaselineTrainer.fit requires a non-empty batch")
+            raise ValueError("HybridBoardTrainer.fit requires a non-empty batch")
 
         logger.info(
-            "Building candidate move features for %s datums "
-            "(SF evals from DB + on-the-fly geometry/material/openness; feat_dim=%s) %s",
+            "Hybrid board+state encoder: packing candidates for %s datums "
+            "(board_tensor_version=%s C=%s conv_filters=%s). %s",
             len(datums),
-            self.move_feat_dim,
+            BOARD_TENSOR_VERSION,
+            BOARD_TENSOR_CHANNELS,
+            self.conv_filters,
             snapshot_host_pressure().format_fields(),
         )
         batch = TrainingBatch(datums)
         feats, mask, labels, kept = batch.candidate_style_targets()
         if not kept:
-            raise ValueError(
-                "BaselineTrainer.fit: no datums with usable candidate_evaluations "
-                "(user move must be in evals)"
-            )
+            raise ValueError("HybridBoardTrainer.fit: no datums with usable candidate_evaluations")
         kept_datums = [datums[i] for i in kept]
-        logger.info(
-            "Candidate features ready kept=%s dropped=%s; building state matrix…",
-            len(kept_datums),
-            len(datums) - len(kept_datums),
-        )
+        x_board = pack_board_tensors(kept_datums)
         x_state = TrainingBatch(kept_datums).state_matrix()
         y = pack_candidate_targets_for_loss(
             loss_kind=self.loss_kind,
@@ -459,12 +411,15 @@ class BaselineTrainer:
             if baseline_weights_path is None:
                 raise ValueError("baseline_disagree_boost != 1.0 requires baseline_weights_path")
             baseline_model = self.load_or_build(
-                input_dim=int(x_state.shape[1]),
+                state_dim=int(x_state.shape[1]),
                 weights_path=baseline_weights_path,
                 require_compatible_parent=True,
             )
             logits = np.asarray(
-                baseline_model.predict({"state": x_state, "move_feats": feats}, verbose=0),
+                baseline_model.predict(
+                    {"board": x_board, "state": x_state, "move_feats": feats},
+                    verbose=0,
+                ),
                 dtype=np.float64,
             )
             baseline_strength = baseline_disagree_strength(logits, mask, labels)
@@ -507,23 +462,26 @@ class BaselineTrainer:
 
         if model is None:
             model = self.load_or_build(
-                input_dim=int(x_state.shape[1]),
+                state_dim=int(x_state.shape[1]),
                 weights_path=weights_path,
                 require_compatible_parent=require_parent_weights,
             )
         fit_started = snapshot_host_pressure()
         logger.info(
-            "Starting Keras fit samples=%s epochs=%s batch_size=%s "
-            "style_disagree_boost=%s scale_pawns=%s forced_scale_pawns=%s "
-            "disagree_frac=%.3f mean_strength=%.3f %s",
+            "Starting hybrid Keras fit samples=%s epochs=%s batch_size=%s "
+            "conv_filters=%s style_disagree_boost=%s scale_pawns=%s "
+            "forced_scale_pawns=%s disagree_frac=%.3f mean_strength=%.3f "
+            "parent=%s %s",
             len(kept_datums),
             self.epochs,
             min(self.batch_size, len(kept_datums)),
+            self.conv_filters,
             self.style_disagree_boost,
             self.style_disagree_scale,
             self.forced_scale_pawns,
             disagree_frac,
             mean_strength,
+            weights_path,
             fit_started.format_fields(),
         )
         total_epochs = self.epochs
@@ -532,16 +490,15 @@ class BaselineTrainer:
         class _EpochInfoCallback(Callback):
             def on_epoch_end(self, epoch: int, logs: dict[str, Any] | None = None) -> None:
                 logger.info(
-                    "Keras epoch %s/%s metrics=%s",
+                    "Hybrid Keras epoch %s/%s metrics=%s",
                     epoch + 1,
                     total_epochs,
                     {k: round(float(v), 6) for k, v in (logs or {}).items()},
                 )
 
         fit_t0 = time.monotonic()
-        # Prefer our logger over Keras STDERR progress bars.
         history = model.fit(
-            {"state": x_state, "move_feats": feats},
+            {"board": x_board, "state": x_state, "move_feats": feats},
             y,
             sample_weight=sample_w,
             epochs=self.epochs,
@@ -558,7 +515,13 @@ class BaselineTrainer:
         metrics["max_candidates"] = float(self.max_candidates)
         metrics["move_feat_dim"] = float(self.move_feat_dim)
         metrics["move_feat_version"] = float(CANDIDATE_MOVE_FEAT_VERSION)
+        metrics["board_tensor_version"] = float(BOARD_TENSOR_VERSION)
+        metrics["board_channels"] = float(BOARD_TENSOR_CHANNELS)
+        metrics["state_dim"] = float(x_state.shape[1])
+        metrics["conv_filters"] = float(self.conv_filters)
         metrics["head_candidate_style"] = 1.0
+        metrics["encoder_hybrid_board"] = 1.0
+        metrics["encoder_fuses_state"] = 1.0
         metrics["style_disagree_boost"] = float(self.style_disagree_boost)
         metrics["style_disagree_scale"] = float(self.style_disagree_scale)
         metrics["baseline_disagree_boost"] = float(self.baseline_disagree_boost)
@@ -566,12 +529,14 @@ class BaselineTrainer:
         metrics["sf_disagree_mean_strength"] = mean_strength
         metrics["epochs"] = float(self.epochs)
         metrics["sf_mix_alpha"] = float(self.sf_mix_alpha)
+        if self.forced_scale_pawns is not None:
+            metrics["forced_scale_pawns"] = float(self.forced_scale_pawns)
         if recency_lambda is not None:
             metrics["recency_lambda"] = float(recency_lambda)
             metrics["recency_boost"] = float(self.recency_boost)
         fit_ended = snapshot_host_pressure()
         logger.info(
-            "Keras fit finished duration_s=%.2f delta_rss_mb=%.1f n_samples=%s %s",
+            "Hybrid Keras fit finished duration_s=%.2f delta_rss_mb=%.1f n_samples=%s %s",
             time.monotonic() - fit_t0,
             fit_ended.rss_mb - fit_started.rss_mb,
             len(kept_datums),
@@ -583,23 +548,4 @@ class BaselineTrainer:
     def save(model: Any, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         model.save(path)
-        logger.info("Saved baseline model to %s", path)
-
-
-# Back-compat aliases used by older call sites / tests.
-def load_policy_keras(*args: Any, **kwargs: Any) -> Any:
-    raise RuntimeError(
-        "Policy head removed; use load_candidate_style_keras / load_candidate_style_from_uri"
-    )
-
-
-def load_policy_from_uri(*args: Any, **kwargs: Any) -> Any:
-    raise RuntimeError("Policy head removed; use load_candidate_style_from_uri")
-
-
-def model_is_policy_compatible(*args: Any, **kwargs: Any) -> bool:
-    return False
-
-
-def policy_custom_objects(*args: Any, **kwargs: Any) -> dict[str, Any]:
-    return candidate_style_custom_objects()
+        logger.info("Saved hybrid board model to %s", path)

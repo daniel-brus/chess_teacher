@@ -1,5 +1,6 @@
-"""User-facing pipeline orchestration."""
+"""User-facing pipeline orchestration.
 
-from chess_teacher.pipelines.runner import run_pipeline
-
-__all__ = ["run_pipeline"]
+Keep this package init empty: importing a submodule (e.g. ``preprocessing.games``)
+must not pull ``runner`` → neural_network and create an import cycle.
+Import ``run_pipeline`` from ``chess_teacher.pipelines.runner`` directly.
+"""
