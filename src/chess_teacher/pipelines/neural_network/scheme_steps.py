@@ -49,10 +49,8 @@ class PrepareTrainingStep(PipelineStep):
             return
 
         parent = self._scheme.resolve_parent(db_client)
-        reference = self._scheme.resolve_reference(db_client)
         datums, game_ids = self._scheme.load_train_batch(db_client)
         context.extras["parent"] = parent
-        context.extras["reference"] = reference
         context.extras["train_datums"] = datums
         context.extras["train_game_ids"] = game_ids
         if not datums:
@@ -62,12 +60,11 @@ class PrepareTrainingStep(PipelineStep):
 
         context.extras[SKIP_KEY] = False
         logger.info(
-            "PrepareTraining pending=%s batch=%s games=%s parent=%s reference=%s",
+            "PrepareTraining pending=%s batch=%s games=%s parent=%s",
             pending,
             len(datums),
             len(game_ids),
             parent.key if parent else None,
-            reference.key if reference else None,
         )
 
 
@@ -152,29 +149,29 @@ class ScoreEvaluationStep(PipelineStep):
         if not datums:
             logger.info("ScoreEvaluation skipped scores: empty eval set.")
             context.extras["candidate_eval"] = None
-            context.extras["reference_eval"] = None
+            context.extras["parent_eval"] = None
             return
 
         packed = pack_datums_for_eval(datums)
         candidate_model = load_candidate_style_keras(model_path, compile_model=False)
         context.extras["candidate_eval"] = evaluate_packed(candidate_model, packed)
 
-        reference: ModelHandle | None = context.extras.get("reference")
-        if reference is None or not reference.compatible or not reference.weights_uri:
-            context.extras["reference_eval"] = None
+        parent: ModelHandle | None = context.extras.get("parent")
+        if parent is None or not parent.compatible or not parent.weights_uri:
+            context.extras["parent_eval"] = None
             logger.info(
-                "ScoreEvaluation candidate only (no compatible served weights). n_eval=%s",
+                "ScoreEvaluation candidate only (cold start). n_eval=%s",
                 context.extras["candidate_eval"].n_eval,
             )
             return
 
-        reference_path = MLflowTracker().require_keras_weights(reference.weights_uri)
-        reference_model = load_candidate_style_keras(reference_path, compile_model=False)
-        context.extras["reference_eval"] = evaluate_packed(reference_model, packed)
+        parent_path = MLflowTracker().require_keras_weights(parent.weights_uri)
+        parent_model = load_candidate_style_keras(parent_path, compile_model=False)
+        context.extras["parent_eval"] = evaluate_packed(parent_model, packed)
         logger.info(
-            "ScoreEvaluation candidate_top1=%s reference_top1=%s n=%s",
+            "ScoreEvaluation candidate_top1=%s parent_top1=%s n=%s",
             context.extras["candidate_eval"].top1_overall,
-            context.extras["reference_eval"].top1_overall,
+            context.extras["parent_eval"].top1_overall,
             context.extras["candidate_eval"].n_eval,
         )
 
@@ -197,7 +194,7 @@ class RecordCandidateStep(PipelineStep):
 
         train_metrics: dict[str, float] = dict(context.extras.get("train_metrics") or {})
         candidate_eval = context.extras.get("candidate_eval")
-        reference_eval = context.extras.get("reference_eval")
+        parent_eval = context.extras.get("parent_eval")
         parent: ModelHandle | None = context.extras.get("parent")
         version = self._scheme.next_version(db_client)
 
@@ -208,9 +205,9 @@ class RecordCandidateStep(PipelineStep):
         if candidate_eval is not None:
             for key, value in candidate_eval.as_dict().items():
                 blob[f"val_{key}"] = value
-        if reference_eval is not None:
-            for key, value in reference_eval.as_dict().items():
-                blob[f"reference_val_{key}"] = value
+        if parent_eval is not None:
+            for key, value in parent_eval.as_dict().items():
+                blob[f"parent_val_{key}"] = value
         metrics_json = json.dumps(blob)
 
         mlflow_metrics = {
@@ -269,8 +266,8 @@ class DecideFromScoresStep(PipelineStep):
             return
         decision = self._scheme.decide_promotion(
             candidate_eval=context.extras.get("candidate_eval"),
-            reference=context.extras.get("reference"),
-            reference_eval=context.extras.get("reference_eval"),
+            parent=context.extras.get("parent"),
+            parent_eval=context.extras.get("parent_eval"),
         )
         context.extras["promotion_decision"] = decision
         logger.info(
@@ -297,14 +294,13 @@ class ApplyPromotionStep(PipelineStep):
         candidate: ModelHandle | None = context.extras.get("candidate")
         if candidate is None:
             raise ValueError("ApplyPromotion requires a recorded candidate")
-        reference: ModelHandle | None = context.extras.get("reference")
-        # Archive only a served row from this same chain. The score may have
-        # used another chain's weights as the reference.
-        current = reference if reference is not None and reference.kind == candidate.kind else None
+        parent: ModelHandle | None = context.extras.get("parent")
+        # A user run may warm-start from the platform model. Do not archive that.
+        current = parent if parent is not None and parent.kind == candidate.kind else None
         promoted = self._scheme.apply_promotion(
             db_client,
             candidate=candidate,
-            reference=current,
+            current=current,
             eval_metrics_json=None,
         )
         context.extras["promoted"] = promoted

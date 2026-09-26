@@ -56,25 +56,25 @@ tables:
   personal_models:
     schema: ml
     table: personal_models
-    comment: Per-account finetune candidates and the model currently served for that account
+    comment: Per-user finetune candidates and the model currently served for that user
     primary_key:
       - id
     indexes:
-      - name: idx_personal_models_account_status
-        columns: [account_id, status]
+      - name: idx_personal_models_user_status
+        columns: [user_id, status]
     columns:
       - name: id
         data_type: text
         nullable: false
-        comment: Hashed ID from account_id and version
-      - name: account_id
+        comment: Hashed ID from user_id and version
+      - name: user_id
         data_type: text
         nullable: false
-        comment: Account whose registry-train moves produced this row
+        comment: User whose linked accounts' registry-train moves produced this row
       - name: version
         data_type: text
         nullable: false
-        comment: Per-account monotonic version label (e.g. v3)
+        comment: Per-user monotonic version label (e.g. v3)
       - name: mlflow_run_id
         data_type: text
         nullable: true

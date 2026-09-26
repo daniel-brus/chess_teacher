@@ -1,7 +1,7 @@
-"""Parent-agnostic contract for a train / score / promote pipeline.
+"""Contract for one training run.
 
-Steps in ``scheme_steps`` call this protocol. They do not know whether the
-weights belong to the platform model or one account's personal model.
+``user_id`` none is the platform model. A user id pools that user's linked
+accounts. Steps do not branch on which one it is.
 """
 
 from __future__ import annotations
@@ -50,10 +50,7 @@ class TrainingScheme(Protocol):
         """Unprocessed registry-train moves for this chain."""
 
     def resolve_parent(self, db_client: DatabaseClient) -> ModelHandle | None:
-        """Warm-start weights. None means a cold start."""
-
-    def resolve_reference(self, db_client: DatabaseClient) -> ModelHandle | None:
-        """Model currently served for this chain. None means nothing to replace."""
+        """Warm-start and comparison model. None means a cold start."""
 
     def load_train_batch(self, db_client: DatabaseClient) -> tuple[list[TrainingDatum], list[str]]:
         """Next registry-train batch and the game ids to mark after a successful fit."""
@@ -94,17 +91,17 @@ class TrainingScheme(Protocol):
         self,
         *,
         candidate_eval: EvalMetrics | None,
-        reference: ModelHandle | None,
-        reference_eval: EvalMetrics | None,
+        parent: ModelHandle | None,
+        parent_eval: EvalMetrics | None,
     ) -> PromotionDecision:
-        """Whether the new candidate should replace the served model."""
+        """Whether the new candidate should replace the parent when it is the same chain."""
 
     def apply_promotion(
         self,
         db_client: DatabaseClient,
         *,
         candidate: ModelHandle,
-        reference: ModelHandle | None,
+        current: ModelHandle | None,
         eval_metrics_json: str | None,
     ) -> ModelHandle:
-        """Archive the served row (if any) and mark the candidate as served."""
+        """Archive ``current`` (if any) and mark the candidate as served."""

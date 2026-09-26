@@ -208,10 +208,10 @@ class BaselineModel(TableDataClass):
 
 @dataclass(frozen=True)
 class PersonalModel(TableDataClass):
-    """Per-account model row. Same status vocabulary as platform models."""
+    """Per-user model row. Same status vocabulary as platform models."""
 
     id: str
-    account_id: str
+    user_id: str
     version: str
     trained_at: datetime
     mlflow_run_id: str | None = None
@@ -232,20 +232,29 @@ class PersonalModel(TableDataClass):
 
     @classmethod
     def get_id_hash_columns(cls) -> tuple[str, ...]:
-        return ("account_id", "version")
+        return ("user_id", "version")
 
     def looks_like_candidate_style(self) -> bool:
         return eval_blob_is_candidate_style(self.eval_metrics)
 
     @classmethod
-    def latest_for_account(
+    def latest_promotion_for_user(
         cls,
         db_client: DatabaseClient,
-        account_id: str,
+        user_id: str,
+    ) -> PersonalModel | None:
+        """Latest production row for this user."""
+        return cls.latest_for_user(db_client, user_id, BaselineModelStatus.PRODUCTION)
+
+    @classmethod
+    def latest_for_user(
+        cls,
+        db_client: DatabaseClient,
+        user_id: str,
         status: BaselineModelStatus,
     ) -> PersonalModel | None:
         where = (
-            f"{generate_ident_is_literal('account_id', account_id)} AND "
+            f"{generate_ident_is_literal('user_id', user_id)} AND "
             f"{generate_ident_is_literal('status', status.value)}"
         )
         rows = cls.fetch_all_from_db(
@@ -257,10 +266,10 @@ class PersonalModel(TableDataClass):
         return rows[0] if rows else None
 
     @classmethod
-    def next_version(cls, db_client: DatabaseClient, account_id: str) -> str:
+    def next_version(cls, db_client: DatabaseClient, user_id: str) -> str:
         rows = cls.fetch_all_from_db(
             db_client,
-            where=generate_ident_is_literal("account_id", account_id),
+            where=generate_ident_is_literal("user_id", user_id),
             order_by='"trained_at" DESC',
             limit=50,
         )
@@ -277,18 +286,18 @@ class PersonalModel(TableDataClass):
         current_production: PersonalModel | None,
         eval_metrics: str | None = None,
     ) -> PersonalModel:
-        """Archive this account's production row (if any) and mark this row production."""
+        """Archive this user's production row (if any) and mark this row production."""
         if current_production is not None and current_production.id != self.id:
-            if current_production.account_id != self.account_id:
+            if current_production.user_id != self.user_id:
                 raise ValueError(
-                    "Refusing to archive a personal model from a different account "
-                    f"({current_production.account_id} vs {self.account_id})"
+                    "Refusing to archive a personal model from a different user "
+                    f"({current_production.user_id} vs {self.user_id})"
                 )
             archived = replace(current_production, status=BaselineModelStatus.ARCHIVED)
             archived.save_to_db(db_client)
             logger.info(
-                "Archived personal account=%s version=%s (was production)",
-                current_production.account_id,
+                "Archived personal user=%s version=%s (was production)",
+                current_production.user_id,
                 current_production.version,
             )
         promoted = replace(
@@ -298,8 +307,8 @@ class PersonalModel(TableDataClass):
         )
         promoted.save_to_db(db_client)
         logger.info(
-            "Promoted personal account=%s version=%s to production",
-            promoted.account_id,
+            "Promoted personal user=%s version=%s to production",
+            promoted.user_id,
             promoted.version,
         )
         return promoted

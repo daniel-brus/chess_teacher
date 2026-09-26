@@ -12,7 +12,7 @@ from chess_teacher.pipelines.neural_network.pipeline_steps import (
     MAX_MOVES_PER_BASELINE_BATCH,
     MIN_NEW_MOVES_BASELINE,
 )
-from chess_teacher.pipelines.neural_network.schemes import BaselineTrainingScheme
+from chess_teacher.pipelines.neural_network.schemes import ModelTraining
 from chess_teacher.utils.db.client import get_db_client
 from chess_teacher.utils.logging import get_logger
 from chess_teacher.utils.pipeline_utils.pipeline_helpers import (
@@ -25,7 +25,7 @@ logger = get_logger()
 
 def _eligible_count() -> tuple[int, object]:
     """Pending registry-train moves. The token is the count, so a stuck queue stalls."""
-    n = BaselineTrainingScheme().count_pending(get_db_client())
+    n = ModelTraining().count_pending(get_db_client())
     return n, n
 
 

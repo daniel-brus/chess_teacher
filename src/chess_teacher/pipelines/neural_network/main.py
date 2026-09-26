@@ -3,8 +3,9 @@
 Roadmap: ``.agents/docs/ml-training-roadmap.md``.
 
 ``run_baseline_training_pipeline`` and ``run_personal_training_pipeline`` share
-the steps in ``scheme_steps``. The scheme picks the queue, the trainer, and
-the table. Promotion entrypoint below is still the legacy random-eval chain.
+the steps in ``scheme_steps``. ``user_id`` none is the platform model. A user
+id pools that user's accounts. Promotion entrypoint below is still the legacy
+random-eval chain.
 """
 
 from __future__ import annotations
@@ -18,10 +19,7 @@ from chess_teacher.pipelines.neural_network.promotion_steps import (
     ScoreModelsStep,
 )
 from chess_teacher.pipelines.neural_network.scheme_steps import build_training_scheme_steps
-from chess_teacher.pipelines.neural_network.schemes import (
-    BaselineTrainingScheme,
-    PersonalTrainingScheme,
-)
+from chess_teacher.pipelines.neural_network.schemes import ModelTraining
 from chess_teacher.pipelines.neural_network.split_steps import AssignGameSplitsStep
 from chess_teacher.pipelines.neural_network.splits import DEFAULT_SPLIT_SALT
 from chess_teacher.pipelines.neural_network.training_scheme import TrainingScheme
@@ -58,25 +56,23 @@ def run_baseline_training_pipeline(
 ) -> PipelineRunResult:
     """Platform-wide incremental baseline train (registry-train queue)."""
     return run_training_scheme_pipeline(
-        BaselineTrainingScheme(),
+        ModelTraining(),
         promote=promote,
         progress_window=progress_window,
     )
 
 
 def run_personal_training_pipeline(
-    account_id: str,
+    user_id: str,
     *,
     promote: bool = False,
-    user_id: str | None = None,
     progress_window: ProgressWindow | None = None,
 ) -> PipelineRunResult:
-    """Finetune one account on that account's registry-train moves."""
+    """Finetune one user on every linked account's registry-train moves."""
     return run_training_scheme_pipeline(
-        PersonalTrainingScheme(account_id),
+        ModelTraining(user_id),
         promote=promote,
         user_id=user_id,
-        account_id=account_id,
         progress_window=progress_window,
     )
 
