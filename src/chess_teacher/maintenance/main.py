@@ -9,12 +9,13 @@ from chess_teacher.maintenance.pipeline_steps import (
     LoadRawLogsStep,
     PromoteWarningErrorLogsStep,
 )
+from chess_teacher.pipelines.neural_network.main import run_baseline_training_pipeline
 from chess_teacher.utils.pipeline_utils.pipeline_base import Pipeline
 from chess_teacher.utils.pipeline_utils.pipeline_helpers import PipelineRunResult
 
 
 def run_maintenance() -> PipelineRunResult:
-    """Main entry point for maintenance pipeline."""
+    """Log cleanup and orphan-lock maintenance. Does not train."""
     return Pipeline(
         name="maintenance",
         steps=[
@@ -29,3 +30,10 @@ def run_maintenance() -> PipelineRunResult:
             ClearOrphanedPipelineRunLocksStep(),
         ],
     ).run()
+
+
+def run_nightly_maintenance() -> tuple[PipelineRunResult, PipelineRunResult]:
+    """Nightly job: maintenance, then platform baseline train and promote."""
+    maintenance = run_maintenance()
+    training = run_baseline_training_pipeline(promote=True)
+    return maintenance, training
