@@ -53,6 +53,62 @@ tables:
         nullable: true
         comment: Git commit at train time if available
 
+  personal_models:
+    schema: ml
+    table: personal_models
+    comment: Per-account finetune candidates and the model currently served for that account
+    primary_key:
+      - id
+    indexes:
+      - name: idx_personal_models_account_status
+        columns: [account_id, status]
+    columns:
+      - name: id
+        data_type: text
+        nullable: false
+        comment: Hashed ID from account_id and version
+      - name: account_id
+        data_type: text
+        nullable: false
+        comment: Account whose registry-train moves produced this row
+      - name: version
+        data_type: text
+        nullable: false
+        comment: Per-account monotonic version label (e.g. v3)
+      - name: mlflow_run_id
+        data_type: text
+        nullable: true
+        comment: MLflow run id for this training session
+      - name: model_uri
+        data_type: text
+        nullable: true
+        comment: Artifact URI / S3 key for model weights
+      - name: status
+        data_type: text
+        nullable: false
+        default: "candidate"
+        comment: candidate | production | archived
+      - name: parent_version
+        data_type: text
+        nullable: true
+        comment: Version key of the weights this run warm-started from
+      - name: parent_kind
+        data_type: text
+        nullable: true
+        comment: baseline or personal, matching the parent handle kind
+      - name: trained_at
+        data_type: timestamptz
+        nullable: false
+        comment: When this row was written
+      - name: eval_metrics
+        data_type: text
+        nullable: true
+        comment: JSON metrics blob (train metrics plus registry-val scores)
+      - name: git_commit_hash
+        data_type: text
+        nullable: true
+        comment: Git commit at train time if available
+
   training_state:
     schema: ml
     table: training_state

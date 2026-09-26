@@ -1,23 +1,14 @@
 """Baseline training + promotion pipeline entrypoints.
 
-Roadmap: ``.agents/docs/ml-training-roadmap.md`` (Phase 4+ wires held-out eval here).
+Roadmap: ``.agents/docs/ml-training-roadmap.md``.
 
-Follow-ups (not wired here yet):
-- ``run_user_finetune_pipeline(user_id)`` — hook from daily ``PipelineRunner`` after preprocess.
-- Held-out validation set with periodic rotation (replace ``RandomEvalSetProvider``).
-- Train exclusion of registry val/test (Phase 4). Split *assignment* already runs from ``PipelineRunner``.
+``run_baseline_training_pipeline`` and ``run_personal_training_pipeline`` share
+the steps in ``scheme_steps``. The scheme picks the queue, the trainer, and
+the table. Promotion entrypoint below is still the legacy random-eval chain.
 """
 
 from __future__ import annotations
 
-from chess_teacher.pipelines.neural_network.pipeline_steps import (
-    CheckSufficientNewDataStep,
-    LoadNewDataStep,
-    LoadPreviousCandidateWeightsStep,
-    LogToMLflowStep,
-    TrainIncrementalStep,
-    UpdateTrainingStateStep,
-)
 from chess_teacher.pipelines.neural_network.promotion import PromotionStrategies
 from chess_teacher.pipelines.neural_network.promotion_steps import (
     ApplyPromotionStep,
@@ -26,35 +17,68 @@ from chess_teacher.pipelines.neural_network.promotion_steps import (
     SampleEvalSetStep,
     ScoreModelsStep,
 )
+from chess_teacher.pipelines.neural_network.scheme_steps import build_training_scheme_steps
+from chess_teacher.pipelines.neural_network.schemes import (
+    BaselineTrainingScheme,
+    PersonalTrainingScheme,
+)
 from chess_teacher.pipelines.neural_network.split_steps import AssignGameSplitsStep
 from chess_teacher.pipelines.neural_network.splits import DEFAULT_SPLIT_SALT
+from chess_teacher.pipelines.neural_network.training_scheme import TrainingScheme
 from chess_teacher.platform.account import Account
 from chess_teacher.utils.pipeline_utils.pipeline_base import Pipeline
 from chess_teacher.utils.pipeline_utils.pipeline_helpers import PipelineRunResult, ProgressWindow
 
 
-def run_baseline_training_pipeline(
+def run_training_scheme_pipeline(
+    scheme: TrainingScheme,
     *,
+    promote: bool = False,
+    user_id: str | None = None,
+    account_id: str | None = None,
     progress_window: ProgressWindow | None = None,
 ) -> PipelineRunResult:
-    """Platform-wide incremental baseline train (candidate chain)."""
+    """Train, score on the scheme's registry val, and optionally promote."""
     pipeline = Pipeline(
-        name="baseline_training",
-        user_id=None,
-        account_id=None,
-        steps=[
-            CheckSufficientNewDataStep(),
-            LoadPreviousCandidateWeightsStep(),
-            LoadNewDataStep(),
-            TrainIncrementalStep(),
-            LogToMLflowStep(),
-            UpdateTrainingStateStep(),
-        ],
+        name=scheme.pipeline_name,
+        user_id=user_id,
+        account_id=account_id,
+        steps=build_training_scheme_steps(scheme, promote=promote),
         progress_window=progress_window,
         # Training can exceed the default 1h lock window.
         lock_timeout_hours=6.0,
     )
     return pipeline.run()
+
+
+def run_baseline_training_pipeline(
+    *,
+    promote: bool = False,
+    progress_window: ProgressWindow | None = None,
+) -> PipelineRunResult:
+    """Platform-wide incremental baseline train (registry-train queue)."""
+    return run_training_scheme_pipeline(
+        BaselineTrainingScheme(),
+        promote=promote,
+        progress_window=progress_window,
+    )
+
+
+def run_personal_training_pipeline(
+    account_id: str,
+    *,
+    promote: bool = False,
+    user_id: str | None = None,
+    progress_window: ProgressWindow | None = None,
+) -> PipelineRunResult:
+    """Finetune one account on that account's registry-train moves."""
+    return run_training_scheme_pipeline(
+        PersonalTrainingScheme(account_id),
+        promote=promote,
+        user_id=user_id,
+        account_id=account_id,
+        progress_window=progress_window,
+    )
 
 
 def run_baseline_promotion_pipeline(

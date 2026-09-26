@@ -1,19 +1,18 @@
-"""Train (+ optional promote) until eligible moves since cutoff are below the floor."""
+"""Train (+ optional promote) until unprocessed registry-train moves are below the floor."""
 
 from __future__ import annotations
 
 import time
 
-from chess_teacher.pipelines.neural_network.create_training_set import TrainingDataStore
 from chess_teacher.pipelines.neural_network.main import (
     run_baseline_promotion_pipeline,
     run_baseline_training_pipeline,
 )
-from chess_teacher.pipelines.neural_network.models import TrainingState
 from chess_teacher.pipelines.neural_network.pipeline_steps import (
     MAX_MOVES_PER_BASELINE_BATCH,
     MIN_NEW_MOVES_BASELINE,
 )
+from chess_teacher.pipelines.neural_network.schemes import BaselineTrainingScheme
 from chess_teacher.utils.db.client import get_db_client
 from chess_teacher.utils.logging import get_logger
 from chess_teacher.utils.pipeline_utils.pipeline_helpers import (
@@ -25,10 +24,9 @@ logger = get_logger()
 
 
 def _eligible_count() -> tuple[int, object]:
-    db = get_db_client()
-    state = TrainingState.for_baseline(db)
-    n = TrainingDataStore(db).count_since(state.last_trained_data_cutoff)
-    return n, state.last_trained_data_cutoff
+    """Pending registry-train moves. The token is the count, so a stuck queue stalls."""
+    n = BaselineTrainingScheme().count_pending(get_db_client())
+    return n, n
 
 
 def _run_ok(result: PipelineRunResult, *, label: str) -> bool:
@@ -56,8 +54,8 @@ def _run_ok(result: PipelineRunResult, *, label: str) -> bool:
 def loop_until_caught_up(*, promote: bool = True, max_rounds: int = 50) -> int:
     """Return 0 when caught up; non-zero on failure / stall / max_rounds.
 
-    Stops when ``count_since(cutoff) < MIN_NEW_MOVES_BASELINE``. Remainder under
-    that floor is left for later (same as a single skipped train job).
+    Stops when unprocessed registry-train moves ``< MIN_NEW_MOVES_BASELINE``.
+    Remainder under that floor is left for later (same as a single skipped train job).
     """
     max_rounds = max(1, int(max_rounds))
     round_i = 0
