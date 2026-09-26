@@ -70,6 +70,20 @@ def test_user_not_sf_best_mask() -> None:
     assert mask.tolist() == [False, True, True, True]
 
 
+def test_labeled_delta_feat_no_full_float64_copy() -> None:
+    """Large float32 feats must not allocate a full float64 twin (OOM at 140k)."""
+    n, mx, f = 8_000, 128, MOVE_FEAT_DIM
+    feats = np.zeros((n, mx, f), dtype=np.float32)
+    delta_i = CANDIDATE_MOVE_FEAT_KEYS.index("delta_vs_best")
+    feats[:, 0, delta_i] = -0.5
+    labels = np.zeros(n, dtype=np.int64)
+    # If this wrongly cast full tensor to float64 it would need ~4.5 GiB here;
+    # with index-only path it stays ~small.
+    mask = user_not_sf_best_mask(feats, labels)
+    assert mask.dtype == bool
+    assert bool(mask.all())
+
+
 def test_style_boost_1_matches_ply_only() -> None:
     feats, labels = _fake_feats_labels()
     plies = [10, 10, 10, 10]

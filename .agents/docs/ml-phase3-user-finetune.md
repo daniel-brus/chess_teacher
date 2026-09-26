@@ -36,7 +36,7 @@
 1. Account×registry loaders (extend `TrainingDataStore` / `offline_eval` — **no** time-based `user_splits`). ✅ `load_account_registry_*` in `offline_eval.py`
 2. `scripts/tools/offline_user_finetune_eval.py`: parent baseline → train user∩train → eval user∩val. ✅ (+ `--train-parent` cold hybrid)
 3. Stratified metrics; primary `top1_sf_disagree`; guardrail agree (report-only). ✅
-4. Exit: 2–3 accounts; ~300+ registry-train moves; beat parent on user registry-val disagree.
+4. Exit: 2–3 accounts; ~300+ registry-train moves; beat parent on user registry-val disagree. ✅ smoke E13 + scaled local ladder (see below)
 
 ### Smoke E13 (local, 2026-09-15) — ikbendaniel only
 
@@ -50,7 +50,17 @@ Cold hybrid parent `--parent-train-limit 10000` ep5 → finetune train5k/val3k e
 
 Primary met (disagree↑). Agree drop reported (report-only). Artifacts under `storage/tmp/phase3a/` (gitignored).
 
-**Blocked for RebeccaHarris / Naroditsky on local:** chars exist but `candidate_evaluations` all NULL locally; VPS pipeline still filling prod (~8d ETA at ~3k moves/h). Sync or local expensive enrich before second-account E13 + full-registry parent.
+### Scale ladder (local, 2026-09-21 → 24) — accept limitations
+
+- Cold hybrid **parent** `100k+100k` (ikbendaniel + RebeccaHarris, balanced) → Play `phase3a_hybrid_parent_100k100k`.
+- Per-account FT rounds from that parent (train caps 25k→200k, ep10, style boost 4.0); each round registered archived Play.
+- **RebeccaHarris r1–r8** complete + registered.
+- **ikbendaniel r1–r5** complete; **r6–r8** resumed after float64 OOM fix (`ply_weights` / disagree-frac sample).
+- Known Play feel: side imbalance (e.g. White vs Black strength) — **not** a Phase 3a blocker; Phase 4 / later.
+
+**Closed for 3a code path:** loaders, FT tool, balanced parent, chunked fit, Play register scripts, OOM-safe disagree path. **Not in 3a:** promotion/catch-up (→ **3b**), Personal multi-account UX (→ **4**), color/side calibration.
+
+Tools: `scripts/tools/phase3a_scale_100k_chain.py`, `register_phase3a_playables.py`, `phase3a_resume_daniel_after_rh.ps1`.
 
 ## Phase 3b (after 3a)
 

@@ -43,14 +43,15 @@ _EVAL_AFTER_KEY = "evaluation_after_user_pov"
 
 
 def _feat_channel(move_feats: np.ndarray, key: str) -> np.ndarray:
-    feats = np.asarray(move_feats, dtype=np.float64)
+    # Slice channel first; promote only (N, MAX) — full float64 (N, MAX, F) OOMs at scale.
+    feats = np.asarray(move_feats)
     if feats.ndim != 3 or feats.shape[-1] != MOVE_FEAT_DIM:
         raise ValueError(f"move_feats expected (N, MAX, {MOVE_FEAT_DIM}), got {feats.shape}")
     try:
         idx = CANDIDATE_MOVE_FEAT_KEYS.index(key)
     except ValueError as exc:
         raise ValueError(f"missing feat key {key!r}") from exc
-    return feats[:, :, idx]
+    return np.asarray(feats[:, :, idx], dtype=np.float64)
 
 
 def _tanh_feat_to_pawns(

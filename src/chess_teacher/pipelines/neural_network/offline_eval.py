@@ -162,6 +162,41 @@ def load_account_registry_bucket_datums(
     )
 
 
+def load_balanced_account_registry_bucket_datums(
+    account_ids: list[str],
+    db_client: DatabaseClient | None = None,
+    *,
+    bucket: SplitBucket,
+    split_version: str = DEFAULT_SPLIT_SALT,
+    per_account_limit: int,
+) -> list[TrainingDatum]:
+    """Equal per-account registry-bucket prefixes, concatenated in id order.
+
+    Each account gets the same complete-game ``per_account_limit`` from that
+    account ∩ bucket (``game_id`` ASC). Still hash-registry only — no
+    time-ordering and no cross-account ``game_id`` ASC mix.
+    """
+    ids = [(a or "").strip() for a in account_ids if (a or "").strip()]
+    if len(ids) < 2:
+        raise ValueError("balanced load needs >=2 distinct account_ids")
+    if len(set(ids)) != len(ids):
+        raise ValueError("balanced account_ids must be unique")
+    if per_account_limit < 1:
+        raise ValueError("per_account_limit must be >= 1")
+
+    out: list[TrainingDatum] = []
+    for aid in ids:
+        part = load_account_registry_bucket_datums(
+            aid,
+            db_client,
+            bucket=bucket,
+            split_version=split_version,
+            limit=per_account_limit,
+        )
+        out.extend(part)
+    return out
+
+
 def load_account_registry_split(
     account_id: str,
     db_client: DatabaseClient | None = None,

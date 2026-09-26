@@ -11,6 +11,7 @@ from chess_teacher.pipelines.neural_network.offline_eval import (
     account_registry_extra_where,
     load_account_registry_bucket_datums,
     load_account_registry_split,
+    load_balanced_account_registry_bucket_datums,
 )
 from chess_teacher.pipelines.neural_network.offline_user_finetune import (
     MIN_USER_TRAIN_MOVES,
@@ -52,6 +53,38 @@ def test_load_account_registry_bucket_forwards_extra_where() -> None:
     assert kwargs["limit"] == 100
     assert "g.account_id IN" in kwargs["extra_where"]
     assert "acct-9" in kwargs["extra_where"]
+
+
+def test_load_balanced_account_registry_needs_two_ids() -> None:
+    with pytest.raises(ValueError, match=">=2"):
+        load_balanced_account_registry_bucket_datums(
+            ["only-one"],
+            MagicMock(),
+            bucket=SplitBucket.TRAIN,
+            per_account_limit=100,
+        )
+
+
+def test_load_balanced_account_registry_equal_per_account() -> None:
+    calls: list[str] = []
+
+    def _fake_load(account_id: str, *_a: object, **_k: object) -> list[object]:
+        calls.append(account_id)
+        return [MagicMock(account_id=account_id), MagicMock(account_id=account_id)]
+
+    with patch(
+        "chess_teacher.pipelines.neural_network.offline_eval.load_account_registry_bucket_datums",
+        side_effect=_fake_load,
+    ):
+        out = load_balanced_account_registry_bucket_datums(
+            ["a1", "a2"],
+            MagicMock(),
+            bucket=SplitBucket.TRAIN,
+            split_version="baseline-v1",
+            per_account_limit=25000,
+        )
+    assert calls == ["a1", "a2"]
+    assert len(out) == 4
 
 
 def test_load_account_registry_split_loads_train_and_val() -> None:
