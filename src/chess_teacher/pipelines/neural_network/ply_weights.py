@@ -137,7 +137,9 @@ def _labeled_delta_feat(
     *,
     delta_key: str = _DELTA_VS_BEST_KEY,
 ) -> np.ndarray:
-    feats = np.asarray(move_feats, dtype=np.float64)
+    # Index without casting the full (N, MAX, F) tensor to float64 — that copy
+    # OOMs at ~140k rows (7+ GiB). Promote only the extracted (N,) channel.
+    feats = np.asarray(move_feats)
     y = np.asarray(labels, dtype=np.int64).reshape(-1)
     if feats.ndim != 3:
         raise ValueError(f"move_feats expected (N, MAX, F), got {feats.shape}")
@@ -148,7 +150,7 @@ def _labeled_delta_feat(
     except ValueError as exc:
         raise ValueError(f"missing feat key {delta_key!r} in CANDIDATE_MOVE_FEAT_KEYS") from exc
     rows = np.arange(feats.shape[0], dtype=np.int64)
-    return feats[rows, y, delta_i]
+    return np.asarray(feats[rows, y, delta_i], dtype=np.float64)
 
 
 def labeled_delta_vs_best_pawns(
@@ -222,8 +224,8 @@ def second_vs_best_delta_pawns(
 
     Rows with fewer than two legal candidates return ``0`` (no downweight).
     """
-    feats = np.asarray(move_feats, dtype=np.float64)
-    m = np.asarray(mask, dtype=np.float64)
+    feats = np.asarray(move_feats)
+    m = np.asarray(mask)
     if feats.ndim != 3:
         raise ValueError(f"move_feats expected (N, MAX, F), got {feats.shape}")
     if m.shape[:2] != feats.shape[:2]:
@@ -233,10 +235,11 @@ def second_vs_best_delta_pawns(
     except ValueError as exc:
         raise ValueError(f"missing feat key {_EVAL_AFTER_KEY!r}") from exc
 
-    packed = feats[:, :, eval_i]
+    # Channel slice only — avoid float64 copy of full (N, MAX, F).
+    packed = np.asarray(feats[:, :, eval_i], dtype=np.float64)
     clipped = np.clip(packed, -_ATANH_CLIP, _ATANH_CLIP)
     evals = float(tanh_scale) * np.arctanh(clipped)
-    legal = m > 0.5
+    legal = np.asarray(m, dtype=np.float64) > 0.5
     evals = np.where(legal, evals, -np.inf)
     ordered = np.sort(evals, axis=1)[:, ::-1]
     n_legal = np.sum(legal, axis=1)

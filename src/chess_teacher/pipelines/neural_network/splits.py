@@ -72,9 +72,7 @@ def format_split_summary(split: GameSplitResult, *, heading: str | None = None) 
     lines = [f"=== {title} ===", f"split_version={split.salt!r}"]
     for counts in split.counts:
         disagree = (
-            f"{counts.sf_disagree_frac:.3f}"
-            if counts.sf_disagree_frac is not None
-            else "n/a"
+            f"{counts.sf_disagree_frac:.3f}" if counts.sf_disagree_frac is not None else "n/a"
         )
         lines.append(
             f"  {counts.bucket.value:5s} games={counts.n_games:5d} "
@@ -94,13 +92,25 @@ def game_split_bucket(game_id: str, *, salt: str = DEFAULT_SPLIT_SALT) -> SplitB
     return SplitBucket.TEST
 
 
+_DISAGREE_FRAC_SAMPLE_CAP = 20_000
+
+
 def _disagree_fraction(datums: list[TrainingDatum]) -> float | None:
-    """SF-disagree fraction among datums with usable candidate targets."""
+    """SF-disagree fraction among datums with usable candidate targets.
+
+    Caps pack size so summary stats do not OOM on 100k+ splits (full pack of
+    ``(N, 128, 55)`` plus a float64 cast previously peaked ~7 GiB).
+    """
     from chess_teacher.pipelines.neural_network.create_training_set import TrainingBatch
 
     if not datums:
         return None
-    batch = TrainingBatch(datums)
+    sample = datums
+    if len(datums) > _DISAGREE_FRAC_SAMPLE_CAP:
+        rng = np.random.default_rng(0)
+        idx = rng.choice(len(datums), size=_DISAGREE_FRAC_SAMPLE_CAP, replace=False)
+        sample = [datums[int(i)] for i in idx]
+    batch = TrainingBatch(sample)
     feats, _mask, labels, kept = batch.candidate_style_targets()
     if not kept:
         return None
@@ -117,8 +127,10 @@ def split_datums_by_game(
 ) -> GameSplitResult:
     """Partition datums by ``game_id``; every move from a game stays in one bucket."""
     if bucket_for_game is None:
+
         def bucket_for_game(gid: str) -> SplitBucket:
             return game_split_bucket(gid, salt=salt)
+
     return _partition_datums(
         datums,
         bucket_for_game=bucket_for_game,
