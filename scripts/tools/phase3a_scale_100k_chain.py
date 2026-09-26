@@ -126,19 +126,20 @@ def run_chain(
     else:
         accounts = all_accounts
     rounds = list(_ROUND_TRAIN_LIMITS[: max(1, max_rounds)])
+    steps: list[dict[str, object]] = []
     status: dict[str, object] = {
         "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "parent": str(parent_out),
         "rounds_train_limits": rounds,
         "ft_epochs": _FT_EPOCHS,
         "accounts": [n for n, _ in accounts],
-        "steps": [],
+        "steps": steps,
     }
     _write_status(status)
 
     if not skip_parent:
         parent_log = _SCALE / "parent_100k100k_run.log"
-        status["steps"].append({"step": "parent_100k100k", "state": "running"})  # type: ignore[index]
+        steps.append({"step": "parent_100k100k", "state": "running"})
         _write_status(status)
         code = _run_tool(
             [
@@ -160,10 +161,10 @@ def run_chain(
             parent_log,
         )
         if code != 0 or not parent_out.is_file():
-            status["steps"][-1] = {"step": "parent_100k100k", "state": "failed", "exit": code}  # type: ignore[index]
+            steps[-1] = {"step": "parent_100k100k", "state": "failed", "exit": code}
             _write_status(status)
             return 1
-        status["steps"][-1] = {"step": "parent_100k100k", "state": "done"}  # type: ignore[index]
+        steps[-1] = {"step": "parent_100k100k", "state": "done"}
         _write_status(status)
 
         _register(
@@ -176,13 +177,11 @@ def run_chain(
                 "train_moves_per_account": 100000,
             },
         )
-        status["steps"].append(  # type: ignore[index]
-            {
-                "step": "register_parent",
-                "version": "phase3a_hybrid_parent_100k100k",
-                "state": "done",
-            }
-        )
+        steps.append({
+            "step": "register_parent",
+            "version": "phase3a_hybrid_parent_100k100k",
+            "state": "done",
+        })
         _write_status(status)
     elif not parent_out.is_file():
         logger.error("skip_parent but missing %s", parent_out)
@@ -194,7 +193,7 @@ def run_chain(
             child = _SCALE / name / f"round_{round_i}.keras"
             child.parent.mkdir(parents=True, exist_ok=True)
             version = f"phase3a_{name}_from100k_r{round_i}"
-            step = {
+            step: dict[str, object] = {
                 "step": f"ft_{name}_r{round_i}",
                 "train_limit": train_limit,
                 "parent": str(weights),
@@ -202,7 +201,7 @@ def run_chain(
                 "version": version,
                 "state": "running",
             }
-            status["steps"].append(step)  # type: ignore[index]
+            steps.append(step)
             _write_status(status)
             log = _SCALE / name / f"round_{round_i}_run.log"
             if child.is_file():
