@@ -1,0 +1,7 @@
+{
+  "name": "chess_teacher",
+  "snapshot": "snapshot-20260926-5937ab66-b347-43ed-8928-23b4f51557dc",
+  "agentCanUpdateSnapshot": false,
+  "install": "python3.12 -m venv .venv\n.venv/bin/pip install --upgrade pip\n.venv/bin/pip install -r requirements.txt -r requirements-dev.txt\n.venv/bin/pip install -e .\nbash scripts/dev/cloud_agent_infra_install.sh",
+  "start": "bash scripts/dev/cloud_agent_infra_start.sh"
+}

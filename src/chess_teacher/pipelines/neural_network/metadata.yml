@@ -83,6 +83,8 @@ tables:
     indexes:
       - name: idx_game_split_assignments_bucket
         columns: [split_version, bucket]
+      - name: idx_game_split_assignments_baseline_queue
+        columns: [split_version, bucket, already_processed_baseline]
     columns:
       - name: split_version
         data_type: text
@@ -100,3 +102,11 @@ tables:
         data_type: timestamptz
         nullable: false
         comment: When this assignment was first written
+      - name: already_processed_baseline
+        data_type: timestamptz
+        nullable: true
+        comment: NULL = unprocessed for the platform baseline train queue; set to now() after a successful baseline fit
+      - name: already_processed_personal
+        data_type: timestamptz
+        nullable: true
+        comment: NULL = unprocessed for this user's current personal train chain; set to now() after a successful personal fit

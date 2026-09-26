@@ -10,9 +10,15 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 
 from chess_teacher.pipelines.neural_network.create_training_set import TrainingDatum
-from chess_teacher.pipelines.neural_network.models import GameSplitAssignment
+from chess_teacher.pipelines.neural_network.models import (
+    PROCESSED_FLAG_BASELINE,
+    PROCESSED_FLAG_PERSONAL,
+    GameSplitAssignment,
+    require_processed_flag,
+)
 from chess_teacher.pipelines.neural_network.splits import (
     DEFAULT_SPLIT_SALT,
     GameSplitResult,
@@ -23,18 +29,23 @@ from chess_teacher.pipelines.neural_network.splits import (
 from chess_teacher.pipelines.preprocessing.games import Game
 from chess_teacher.pipelines.preprocessing.moves import Move, MoveCharacteristics
 from chess_teacher.utils.db.client import DatabaseClient, get_db_client
-from chess_teacher.utils.general_utils import generate_ident_is_literal, quote_literal
+from chess_teacher.utils.general_utils import (
+    generate_ident_is_literal,
+    get_current_datetime,
+    quote_ident,
+    quote_literal,
+)
 from chess_teacher.utils.logging import get_logger
 
 logger = get_logger()
 
-# Same eligibility as TrainingDataStore (moves with complete expensive SF cols + end_time).
-_ELIGIBLE_GAMES_SQL = f"""
+# Same eligibility as TrainingDataStore (moves with SF candidate evals + end_time).
+_ELIGIBLE_GAMES_SQL = """
             FROM games.moves m
             INNER JOIN games.games g ON g.game_id = m.game_id
             INNER JOIN games.move_characteristics mc ON mc.move_id = m.move_id
             WHERE g.end_time IS NOT NULL
-              AND {MoveCharacteristics.sql_expensive_complete("mc")}
+              AND mc.candidate_evaluations IS NOT NULL
 """
 
 _MOVES_QUERY_SESSION_SETTINGS = {"max_parallel_workers_per_gather": "0"}
@@ -87,8 +98,6 @@ class SplitRegistry:
             return 0
         self.ensure_table()
         existing = self.fetch_buckets(unique)
-        from chess_teacher.utils.general_utils import get_current_datetime
-
         assigned_at = get_current_datetime()
         pending: list[GameSplitAssignment] = []
         for game_id in unique:
@@ -101,6 +110,8 @@ class SplitRegistry:
                     game_id=game_id,
                     bucket=bucket.value,
                     assigned_at=assigned_at,
+                    already_processed_baseline=None,
+                    already_processed_personal=None,
                 )
             )
         if not pending:
@@ -242,6 +253,78 @@ class SplitRegistry:
         )
         return [row.game_id for row in rows]
 
+    def mark_processed(
+        self,
+        game_ids: Sequence[str],
+        *,
+        flag_column: str = PROCESSED_FLAG_BASELINE,
+        processed_at: datetime | None = None,
+    ) -> int:
+        """Set the processed flag on **train** rows only. Returns rows updated.
+
+        Never writes val/test. No-op when ``game_ids`` is empty. Caller must
+        invoke this only after a successful fit.
+        """
+        unique = sorted({gid for gid in game_ids if gid})
+        if not unique:
+            return 0
+        flag = require_processed_flag(flag_column)
+        self.ensure_table()
+        when = processed_at or get_current_datetime()
+        metadata = GameSplitAssignment.get_metadata()
+        updated = 0
+        batch_size = 500
+        for offset in range(0, len(unique), batch_size):
+            chunk = unique[offset : offset + batch_size]
+            game_id_list = ", ".join(quote_literal(gid) for gid in chunk)
+            where = (
+                f"{generate_ident_is_literal('split_version', self.split_version)} "
+                f"AND {generate_ident_is_literal('bucket', SplitBucket.TRAIN.value)} "
+                f"AND {quote_ident(flag)} IS NULL "
+                f'AND "game_id" IN ({game_id_list})'
+            )
+            updated += self.db_client.update_where(
+                metadata,
+                {flag: when},
+                where,
+            )
+        logger.info(
+            "SplitRegistry mark_processed split_version=%s flag=%s requested=%s updated=%s",
+            self.split_version,
+            flag,
+            len(unique),
+            updated,
+        )
+        return updated
+
+    def clear_processed(
+        self,
+        *,
+        flag_column: str = PROCESSED_FLAG_BASELINE,
+        game_ids: Sequence[str] | None = None,
+    ) -> int:
+        """NULL the processed flag (fresh experiment / personal reset)."""
+        flag = require_processed_flag(flag_column)
+        self.ensure_table()
+        metadata = GameSplitAssignment.get_metadata()
+        where = generate_ident_is_literal("split_version", self.split_version)
+        unique: list[str] = []
+        if game_ids is not None:
+            unique = sorted({gid for gid in game_ids if gid})
+            if not unique:
+                return 0
+            game_id_list = ", ".join(quote_literal(gid) for gid in unique)
+            where = f'{where} AND "game_id" IN ({game_id_list})'
+        updated = self.db_client.update_where(metadata, {flag: None}, where)
+        logger.info(
+            "SplitRegistry clear_processed split_version=%s flag=%s scoped=%s updated=%s",
+            self.split_version,
+            flag,
+            len(unique) if game_ids is not None else "all",
+            updated,
+        )
+        return updated
+
     def exclude_holdout_games_sql(self, *, game_id_column: str = "g.game_id") -> str:
         """SQL fragment: true when ``game_id`` is not registry val/test (Phase 4 train filter)."""
         version_lit = quote_literal(self.split_version)
@@ -305,3 +388,16 @@ def get_split_registry(
     split_version: str = DEFAULT_SPLIT_SALT,
 ) -> SplitRegistry:
     return SplitRegistry(db_client or get_db_client(), split_version=split_version)
+
+
+def clear_personal_processed(
+    db_client: DatabaseClient,
+    game_ids: Sequence[str],
+    *,
+    split_version: str = DEFAULT_SPLIT_SALT,
+) -> int:
+    """NULL personal flags for one user's ``game_id``s (tests + later promote hook)."""
+    return get_split_registry(db_client, split_version=split_version).clear_processed(
+        flag_column=PROCESSED_FLAG_PERSONAL,
+        game_ids=game_ids,
+    )

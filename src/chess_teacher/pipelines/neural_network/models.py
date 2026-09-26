@@ -24,6 +24,18 @@ class BaselineModelStatus(StrEnum):
 
 
 BASELINE_TRAINING_SCOPE = "baseline"
+PROCESSED_FLAG_BASELINE = "already_processed_baseline"
+PROCESSED_FLAG_PERSONAL = "already_processed_personal"
+PROCESSED_FLAGS = frozenset({PROCESSED_FLAG_BASELINE, PROCESSED_FLAG_PERSONAL})
+
+
+def require_processed_flag(flag_column: str) -> str:
+    """Reject unknown processed-flag column names (SQL ident safety)."""
+    if flag_column not in PROCESSED_FLAGS:
+        raise ValueError(
+            f"flag_column must be one of {sorted(PROCESSED_FLAGS)}, got {flag_column!r}"
+        )
+    return flag_column
 
 
 @dataclass(frozen=True)
@@ -246,6 +258,8 @@ class GameSplitAssignment(TableDataClass):
     game_id: str
     bucket: str
     assigned_at: datetime
+    already_processed_baseline: datetime | None = None
+    already_processed_personal: datetime | None = None
 
     @classmethod
     def get_yaml_path(cls) -> Path:

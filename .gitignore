@@ -1,6 +1,7 @@
 # ZELF TOEGEVOEGD
 .vscode/
-.cursor/
+.cursor/*
+!.cursor/environment.json
 storage/
 .streamlit/secrets.toml
 testnotebook.ipynb
