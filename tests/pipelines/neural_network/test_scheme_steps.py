@@ -198,7 +198,25 @@ def test_prepare_evaluation_loads_once_when_missing() -> None:
     assert context.extras["eval_datums"] == scheme.eval_datums
 
 
-def test_score_packs_eval_once_for_candidate_and_reference(monkeypatch) -> None:
+def _stub_mlflow_tracker(monkeypatch: Any) -> None:
+    """Avoid the tracker's Postgres tracking-URI lookup."""
+
+    def init(
+        self: object,
+        *,
+        tracking_uri: str | None = None,
+        experiment_name: str | None = None,
+    ) -> None:
+        del tracking_uri, experiment_name
+        return None
+
+    monkeypatch.setattr(
+        "chess_teacher.pipelines.neural_network.mlflow_utils.MLflowTracker.__init__",
+        init,
+    )
+
+
+def test_score_packs_eval_once_for_candidate_and_reference(monkeypatch: Any) -> None:
     packed = object()
     loads: list[Path] = []
     packs: list[list[object]] = []
@@ -229,6 +247,7 @@ def test_score_packs_eval_once_for_candidate_and_reference(monkeypatch) -> None:
         "chess_teacher.pipelines.neural_network.train.load_candidate_style_keras",
         load_candidate_style_keras,
     )
+    _stub_mlflow_tracker(monkeypatch)
     monkeypatch.setattr(
         "chess_teacher.pipelines.neural_network.mlflow_utils.MLflowTracker.require_keras_weights",
         lambda self, uri: Path("/tmp/served.keras"),
@@ -751,6 +770,7 @@ def test_adopt_step_scores_a_different_parent_baseline(monkeypatch: Any) -> None
         "chess_teacher.pipelines.neural_network.train.load_candidate_style_keras",
         lambda path, compile_model=False: path,
     )
+    _stub_mlflow_tracker(monkeypatch)
     monkeypatch.setattr(
         "chess_teacher.pipelines.neural_network.mlflow_utils.MLflowTracker.require_keras_weights",
         lambda self, uri: Path("/tmp/old.keras"),
