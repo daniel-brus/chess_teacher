@@ -29,6 +29,43 @@ PROCESSED_FLAG_PERSONAL = "already_processed_personal"
 PROCESSED_FLAGS = frozenset({PROCESSED_FLAG_BASELINE, PROCESSED_FLAG_PERSONAL})
 
 
+def eval_blob_is_candidate_style(eval_metrics: str | None) -> bool:
+    """True when a metrics JSON blob is the current candidate-style head."""
+    if not eval_metrics:
+        return False
+    try:
+        blob = json.loads(eval_metrics)
+    except (TypeError, json.JSONDecodeError):
+        return False
+    if not isinstance(blob, dict):
+        return False
+    from chess_teacher.pipelines.neural_network.candidate_eval import (
+        MAX_CANDIDATES,
+        MOVE_FEAT_DIM,
+    )
+
+    feat_dim = blob.get("move_feat_dim")
+    if feat_dim is not None:
+        try:
+            if int(float(feat_dim)) != MOVE_FEAT_DIM:
+                return False
+        except (TypeError, ValueError):
+            return False
+    elif blob.get("head_candidate_style") == 1.0 or blob.get("head") == "candidate_style":
+        # Legacy candidate_style without feat dim is incompatible with current feats.
+        return False
+
+    if blob.get("head_candidate_style") == 1.0 or blob.get("head") == "candidate_style":
+        return True
+    max_c = blob.get("max_candidates")
+    if max_c is None:
+        return False
+    try:
+        return int(float(max_c)) == MAX_CANDIDATES and feat_dim is not None
+    except (TypeError, ValueError):
+        return False
+
+
 def require_processed_flag(flag_column: str) -> str:
     """Reject unknown processed-flag column names (SQL ident safety)."""
     if flag_column not in PROCESSED_FLAGS:
@@ -46,6 +83,7 @@ class BaselineModel(TableDataClass):
     mlflow_run_id: str | None = None
     model_uri: str | None = None
     status: BaselineModelStatus = BaselineModelStatus.CANDIDATE
+    is_parent_baseline: bool = False
     parent_version: str | None = None
     data_cutoff_at: datetime | None = None
     eval_metrics: str | None = None
@@ -91,6 +129,34 @@ class BaselineModel(TableDataClass):
         db_client.ensure_metadata(cls.get_metadata())
         return cls.fetch_all_from_db(db_client, order_by='"trained_at" DESC')
 
+    @classmethod
+    def current_parent_baseline(cls, db_client: DatabaseClient) -> BaselineModel | None:
+        """The platform model personal runs warm-start from, if one has been adopted."""
+        rows = cls.fetch_all_from_db(
+            db_client,
+            where='"is_parent_baseline" IS TRUE',
+            order_by='"trained_at" DESC',
+            limit=1,
+        )
+        return rows[0] if rows else None
+
+    def adopt_as_parent_baseline(self, db_client: DatabaseClient) -> BaselineModel:
+        """Make this row the parent baseline. Does not change ``status``."""
+        db_client.ensure_metadata(type(self).get_metadata())
+        holders = type(self).fetch_all_from_db(
+            db_client,
+            where='"is_parent_baseline" IS TRUE',
+        )
+        for holder in holders:
+            if holder.id == self.id:
+                continue
+            replace(holder, is_parent_baseline=False).save_to_db(db_client)
+            logger.info("Cleared parent baseline version=%s", holder.version)
+        adopted = replace(self, is_parent_baseline=True)
+        adopted.save_to_db(db_client)
+        logger.info("Adopted parent baseline version=%s", adopted.version)
+        return adopted
+
     def looks_like_policy(self) -> bool:
         """Legacy fixed-vocab policy head (superseded by candidate_style)."""
         from chess_teacher.pipelines.neural_network.move_encoding import (
@@ -119,39 +185,7 @@ class BaselineModel(TableDataClass):
 
     def looks_like_candidate_style(self) -> bool:
         """True when eval_metrics suggest candidate-aware style head (current feat dim)."""
-        if not self.eval_metrics:
-            return False
-        try:
-            blob = json.loads(self.eval_metrics)
-        except (TypeError, json.JSONDecodeError):
-            return False
-        if not isinstance(blob, dict):
-            return False
-        from chess_teacher.pipelines.neural_network.candidate_eval import (
-            MAX_CANDIDATES,
-            MOVE_FEAT_DIM,
-        )
-
-        feat_dim = blob.get("move_feat_dim")
-        if feat_dim is not None:
-            try:
-                if int(float(feat_dim)) != MOVE_FEAT_DIM:
-                    return False
-            except (TypeError, ValueError):
-                return False
-        elif blob.get("head_candidate_style") == 1.0 or blob.get("head") == "candidate_style":
-            # Legacy candidate_style without feat dim → treat as incompatible with v2 feats.
-            return False
-
-        if blob.get("head_candidate_style") == 1.0 or blob.get("head") == "candidate_style":
-            return True
-        max_c = blob.get("max_candidates")
-        if max_c is None:
-            return False
-        try:
-            return int(float(max_c)) == MAX_CANDIDATES and feat_dim is not None
-        except (TypeError, ValueError):
-            return False
+        return eval_blob_is_candidate_style(self.eval_metrics)
 
     @classmethod
     def next_version(cls, db_client: DatabaseClient) -> str:
@@ -198,6 +232,115 @@ class BaselineModel(TableDataClass):
         )
         promoted.save_to_db(db_client)
         logger.info("Promoted baseline version=%s to production", promoted.version)
+        return promoted
+
+
+@dataclass(frozen=True)
+class PersonalModel(TableDataClass):
+    """Per-user model row. Same status vocabulary as platform models."""
+
+    id: str
+    user_id: str
+    version: str
+    trained_at: datetime
+    mlflow_run_id: str | None = None
+    model_uri: str | None = None
+    status: BaselineModelStatus = BaselineModelStatus.CANDIDATE
+    parent_version: str | None = None
+    parent_kind: str | None = None
+    parent_baseline_version: str | None = None
+    eval_metrics: str | None = None
+    git_commit_hash: str | None = None
+
+    @classmethod
+    def get_yaml_path(cls) -> Path:
+        return Path(__file__).parent / "metadata.yml"
+
+    @classmethod
+    def get_key(cls) -> str:
+        return "personal_models"
+
+    @classmethod
+    def get_id_hash_columns(cls) -> tuple[str, ...]:
+        return ("user_id", "version")
+
+    def looks_like_candidate_style(self) -> bool:
+        return eval_blob_is_candidate_style(self.eval_metrics)
+
+    @classmethod
+    def latest_promotion_for_user(
+        cls,
+        db_client: DatabaseClient,
+        user_id: str,
+    ) -> PersonalModel | None:
+        """Latest production row for this user."""
+        return cls.latest_for_user(db_client, user_id, BaselineModelStatus.PRODUCTION)
+
+    @classmethod
+    def latest_for_user(
+        cls,
+        db_client: DatabaseClient,
+        user_id: str,
+        status: BaselineModelStatus,
+    ) -> PersonalModel | None:
+        where = (
+            f"{generate_ident_is_literal('user_id', user_id)} AND "
+            f"{generate_ident_is_literal('status', status.value)}"
+        )
+        rows = cls.fetch_all_from_db(
+            db_client,
+            where=where,
+            order_by='"trained_at" DESC',
+            limit=1,
+        )
+        return rows[0] if rows else None
+
+    @classmethod
+    def next_version(cls, db_client: DatabaseClient, user_id: str) -> str:
+        rows = cls.fetch_all_from_db(
+            db_client,
+            where=generate_ident_is_literal("user_id", user_id),
+            order_by='"trained_at" DESC',
+            limit=50,
+        )
+        max_n = 0
+        for row in rows:
+            if row.version.startswith("v") and row.version[1:].isdigit():
+                max_n = max(max_n, int(row.version[1:]))
+        return f"v{max_n + 1}"
+
+    def promote_over(
+        self,
+        db_client: DatabaseClient,
+        *,
+        current_production: PersonalModel | None,
+        eval_metrics: str | None = None,
+    ) -> PersonalModel:
+        """Archive this user's production row (if any) and mark this row production."""
+        if current_production is not None and current_production.id != self.id:
+            if current_production.user_id != self.user_id:
+                raise ValueError(
+                    "Refusing to archive a personal model from a different user "
+                    f"({current_production.user_id} vs {self.user_id})"
+                )
+            archived = replace(current_production, status=BaselineModelStatus.ARCHIVED)
+            archived.save_to_db(db_client)
+            logger.info(
+                "Archived personal user=%s version=%s (was production)",
+                current_production.user_id,
+                current_production.version,
+            )
+        promoted = replace(
+            self,
+            status=BaselineModelStatus.PRODUCTION,
+            eval_metrics=eval_metrics if eval_metrics is not None else self.eval_metrics,
+        )
+        promoted.save_to_db(db_client)
+        logger.info(
+            "Promoted personal user=%s version=%s to production",
+            promoted.user_id,
+            promoted.version,
+        )
         return promoted
 
 
