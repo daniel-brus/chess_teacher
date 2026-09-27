@@ -1,8 +1,14 @@
 """One training run, scoped by user id.
 
 ``user_id`` none trains the platform model on every account. A user id pools
-that user's linked accounts into one model. The parent for the round is that
-user's latest promotion, then the latest platform promotion, then a cold start.
+that user's linked accounts into one model.
+
+A platform run warm-starts from the latest platform promotion. A user run
+warm-starts from that user's latest promotion when it descends from the current
+parent baseline. Once a parent baseline exists and the user's model does not
+descend from it, the user run starts from that baseline instead. Before any
+parent baseline has been adopted, a user run falls back to the latest platform
+promotion, then a cold start.
 """
 
 from __future__ import annotations
@@ -32,13 +38,19 @@ from chess_teacher.pipelines.neural_network.pipeline_steps import (
 )
 from chess_teacher.pipelines.neural_network.split_registry import SplitRegistry
 from chess_teacher.pipelines.neural_network.splits import DEFAULT_SPLIT_SALT
-from chess_teacher.pipelines.neural_network.training_scheme import ModelHandle, PromotionDecision
+from chess_teacher.pipelines.neural_network.training_scheme import (
+    ModelHandle,
+    ParentBaselineDecision,
+    PromotionDecision,
+)
 from chess_teacher.platform.user import User
 from chess_teacher.utils.db.client import DatabaseClient
 from chess_teacher.utils.general_utils import get_current_datetime
 
 # Users have less new data than the platform pool.
 MIN_USER_TRAIN_MOVES = 300
+# Parent-baseline moves reset every later personal warm start, so the bar is high.
+PARENT_BASELINE_DISAGREE_TOP1_MIN_DELTA = 0.02
 
 KIND_BASELINE = "baseline"
 KIND_PERSONAL = "personal"
@@ -58,6 +70,7 @@ def _baseline_handle(row: BaselineModel | None) -> ModelHandle | None:
         compatible=bool(row.model_uri) and row.looks_like_candidate_style(),
         kind=KIND_BASELINE,
         payload=row,
+        parent_baseline_version=row.version,
     )
 
 
@@ -70,6 +83,7 @@ def _personal_handle(row: PersonalModel | None) -> ModelHandle | None:
         compatible=bool(row.model_uri) and row.looks_like_candidate_style(),
         kind=KIND_PERSONAL,
         payload=row,
+        parent_baseline_version=row.parent_baseline_version,
     )
 
 
@@ -83,11 +97,16 @@ def resolve_training_parent(
     db_client: DatabaseClient,
     user_id: str | None,
 ) -> ModelHandle | None:
-    """User's latest promotion, else the latest platform promotion, else cold start."""
+    """Warm-start model for this run. None means a cold start."""
     if user_id:
+        pointer = _usable(_baseline_handle(BaselineModel.current_parent_baseline(db_client)))
         user_parent = _usable(
             _personal_handle(PersonalModel.latest_promotion_for_user(db_client, user_id))
         )
+        if pointer is not None:
+            if user_parent is not None and user_parent.parent_baseline_version == pointer.key:
+                return user_parent
+            return pointer
         if user_parent is not None:
             return user_parent
     return _usable(
@@ -128,6 +147,85 @@ def _promotion_decision(
     return PromotionDecision(True, "overall top1 held and disagree top1 did not drop.")
 
 
+def _fmt(value: float | None) -> str:
+    if value is None:
+        return "missing"
+    return f"{value:.4f}"
+
+
+def _parent_baseline_decision(
+    *,
+    candidate_eval: EvalMetrics | None,
+    parent: ModelHandle | None,
+    parent_eval: EvalMetrics | None,
+) -> ParentBaselineDecision:
+    """Strict gate for moving the parent baseline. Promotion is a separate decision."""
+    if parent is None or not parent.compatible:
+        return ParentBaselineDecision(
+            True,
+            "No parent baseline yet; the promoted model becomes it.",
+        )
+    if candidate_eval is None or parent_eval is None:
+        return ParentBaselineDecision(
+            False,
+            "Missing registry-val scores; not adopting as parent baseline.",
+        )
+    if candidate_eval.top1_overall < parent_eval.top1_overall:
+        return ParentBaselineDecision(
+            False,
+            (
+                f"overall top1 {_fmt(candidate_eval.top1_overall)} < "
+                f"{_fmt(parent_eval.top1_overall)}"
+            ),
+        )
+    if (
+        candidate_eval.top1_sf_agree is None
+        or parent_eval.top1_sf_agree is None
+        or candidate_eval.top1_sf_agree < parent_eval.top1_sf_agree
+    ):
+        return ParentBaselineDecision(
+            False,
+            (
+                f"agree top1 {_fmt(candidate_eval.top1_sf_agree)} < "
+                f"{_fmt(parent_eval.top1_sf_agree)}"
+            ),
+        )
+    if (
+        candidate_eval.top3_sf_disagree is None
+        or parent_eval.top3_sf_disagree is None
+        or candidate_eval.top3_sf_disagree < parent_eval.top3_sf_disagree
+    ):
+        return ParentBaselineDecision(
+            False,
+            (
+                f"disagree top3 {_fmt(candidate_eval.top3_sf_disagree)} < "
+                f"{_fmt(parent_eval.top3_sf_disagree)}"
+            ),
+        )
+    if candidate_eval.top1_sf_disagree is None or parent_eval.top1_sf_disagree is None:
+        return ParentBaselineDecision(
+            False,
+            (
+                f"disagree top1 {_fmt(candidate_eval.top1_sf_disagree)} < "
+                f"{_fmt(parent_eval.top1_sf_disagree)}"
+            ),
+        )
+    need = parent_eval.top1_sf_disagree + PARENT_BASELINE_DISAGREE_TOP1_MIN_DELTA
+    if candidate_eval.top1_sf_disagree < need:
+        return ParentBaselineDecision(
+            False,
+            (
+                f"disagree top1 {_fmt(candidate_eval.top1_sf_disagree)} < {_fmt(need)} "
+                f"(need +{PARENT_BASELINE_DISAGREE_TOP1_MIN_DELTA:.2f})"
+            ),
+        )
+    return ParentBaselineDecision(
+        True,
+        "disagree top1 rose by at least 0.02; agree top1, overall top1, and "
+        "disagree top3 did not drop.",
+    )
+
+
 class ModelTraining:
     """Platform run when ``user_id`` is none. Otherwise one model for that user."""
 
@@ -144,9 +242,11 @@ class ModelTraining:
         if self.user_id is None:
             self.pipeline_name = "baseline_training"
             self.min_new_moves = MIN_NEW_MOVES_BASELINE
+            self.considers_parent_baseline = True
         else:
             self.pipeline_name = "personal_training"
             self.min_new_moves = MIN_USER_TRAIN_MOVES
+            self.considers_parent_baseline = False
 
     @property
     def _scope(self) -> str:
@@ -254,6 +354,9 @@ class ModelTraining:
                 status=BaselineModelStatus.CANDIDATE,
                 parent_version=parent.key if parent else None,
                 parent_kind=parent.kind if parent else None,
+                parent_baseline_version=(
+                    parent.parent_baseline_version if parent is not None else None
+                ),
                 eval_metrics=metrics_json,
                 git_commit_hash=git_commit,
             )
@@ -320,4 +423,44 @@ class ModelTraining:
             handle = _personal_handle(promoted_user)
         if handle is None:
             raise RuntimeError("apply_promotion failed to build a model handle")
+        return handle
+
+    def current_parent_baseline(self, db_client: DatabaseClient) -> ModelHandle | None:
+        if self.user_id is not None:
+            return None
+        return _baseline_handle(BaselineModel.current_parent_baseline(db_client))
+
+    def decide_parent_baseline(
+        self,
+        *,
+        candidate_eval: EvalMetrics | None,
+        parent: ModelHandle | None,
+        parent_eval: EvalMetrics | None,
+    ) -> ParentBaselineDecision:
+        if self.user_id is not None:
+            return ParentBaselineDecision(
+                False,
+                "Personal runs do not adopt a parent baseline.",
+            )
+        return _parent_baseline_decision(
+            candidate_eval=candidate_eval,
+            parent=parent,
+            parent_eval=parent_eval,
+        )
+
+    def apply_parent_baseline(
+        self,
+        db_client: DatabaseClient,
+        *,
+        candidate: ModelHandle,
+    ) -> ModelHandle:
+        if self.user_id is not None:
+            raise RuntimeError("Personal runs do not adopt a parent baseline.")
+        row = candidate.payload
+        if not isinstance(row, BaselineModel):
+            raise TypeError("Only a platform row can become the parent baseline.")
+        adopted = row.adopt_as_parent_baseline(db_client)
+        handle = _baseline_handle(adopted)
+        if handle is None:
+            raise RuntimeError("apply_parent_baseline failed to build a model handle")
         return handle

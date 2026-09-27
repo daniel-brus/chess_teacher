@@ -10,6 +10,8 @@ tables:
         columns: [status]
       - name: idx_baseline_models_version
         columns: [version]
+      - name: idx_baseline_models_parent_baseline
+        columns: [is_parent_baseline]
     columns:
       - name: id
         data_type: text
@@ -32,6 +34,11 @@ tables:
         nullable: false
         default: "candidate"
         comment: candidate | production | archived
+      - name: is_parent_baseline
+        data_type: boolean
+        nullable: false
+        default: false
+        comment: True only for the platform model that personal runs warm-start from after a parent reset. Independent of production status.
       - name: parent_version
         data_type: text
         nullable: true
@@ -96,6 +103,10 @@ tables:
         data_type: text
         nullable: true
         comment: baseline or personal, matching the parent handle kind
+      - name: parent_baseline_version
+        data_type: text
+        nullable: true
+        comment: Platform baseline version this model descends from. Copied forward when a personal run warm-starts from another personal model.
       - name: trained_at
         data_type: timestamptz
         nullable: false

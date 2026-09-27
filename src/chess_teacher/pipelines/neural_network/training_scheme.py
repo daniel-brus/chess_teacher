@@ -28,11 +28,24 @@ class ModelHandle:
     compatible: bool
     kind: str
     payload: Any = None
+    parent_baseline_version: str | None = None
 
 
 @dataclass(frozen=True)
 class PromotionDecision:
     should_promote: bool
+    reason: str
+
+
+@dataclass(frozen=True)
+class ParentBaselineDecision:
+    """Whether a promoted platform model becomes the parent baseline.
+
+    Separate from promotion. A model can be served for play without moving
+    the pointer that later personal runs warm-start from.
+    """
+
+    should_adopt: bool
     reason: str
 
 
@@ -42,6 +55,7 @@ class TrainingScheme(Protocol):
     pipeline_name: str
     split_version: str
     min_new_moves: int
+    considers_parent_baseline: bool
 
     def note_checked(self, db_client: DatabaseClient) -> None:
         """Record that the pending-data gate ran."""
@@ -105,3 +119,23 @@ class TrainingScheme(Protocol):
         eval_metrics_json: str | None,
     ) -> ModelHandle:
         """Archive ``current`` (if any) and mark the candidate as served."""
+
+    def current_parent_baseline(self, db_client: DatabaseClient) -> ModelHandle | None:
+        """Platform model personal runs warm-start from. None if the pointer is unset."""
+
+    def decide_parent_baseline(
+        self,
+        *,
+        candidate_eval: EvalMetrics | None,
+        parent: ModelHandle | None,
+        parent_eval: EvalMetrics | None,
+    ) -> ParentBaselineDecision:
+        """Whether a promoted platform candidate should replace the parent baseline."""
+
+    def apply_parent_baseline(
+        self,
+        db_client: DatabaseClient,
+        *,
+        candidate: ModelHandle,
+    ) -> ModelHandle:
+        """Point the parent baseline at ``candidate`` without changing who is served."""

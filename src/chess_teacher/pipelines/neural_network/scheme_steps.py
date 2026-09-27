@@ -11,8 +11,10 @@ import json
 import tempfile
 from pathlib import Path
 
+from chess_teacher.pipelines.neural_network.eval_metrics import EvalMetrics
 from chess_teacher.pipelines.neural_network.training_scheme import (
     ModelHandle,
+    ParentBaselineDecision,
     TrainingScheme,
 )
 from chess_teacher.utils.db.client import DatabaseClient
@@ -307,12 +309,82 @@ class ApplyPromotionStep(PipelineStep):
         logger.info("ApplyPromotion served=%s", promoted.key)
 
 
+def _parent_baseline_eval(
+    context: PipelineContext,
+    current: ModelHandle,
+) -> EvalMetrics | None:
+    """Reuse the training-parent score when it is already the parent baseline."""
+    scored = context.extras.get("parent")
+    if scored is not None and scored.key == current.key and scored.kind == current.kind:
+        return context.extras.get("parent_eval")
+
+    datums = context.extras.get("eval_datums") or []
+    if not datums or not current.weights_uri:
+        return None
+
+    from chess_teacher.pipelines.neural_network.eval_metrics import (
+        evaluate_packed,
+        pack_datums_for_eval,
+    )
+    from chess_teacher.pipelines.neural_network.mlflow_utils import MLflowTracker
+    from chess_teacher.pipelines.neural_network.train import load_candidate_style_keras
+
+    logger.info("Scoring parent baseline key=%s", current.key)
+    packed = pack_datums_for_eval(datums)
+    weights_path = MLflowTracker().require_keras_weights(current.weights_uri)
+    model = load_candidate_style_keras(weights_path, compile_model=False)
+    return evaluate_packed(model, packed)
+
+
+class AdoptParentBaselineStep(PipelineStep):
+    """Move the parent baseline when a promoted platform model clears the strict gate.
+
+    Promotion can still succeed when this step does not. Personal runs no-op.
+    """
+
+    def __init__(self, scheme: TrainingScheme) -> None:
+        super().__init__(name="AdoptParentBaseline")
+        self._scheme = scheme
+
+    def run(self, db_client: DatabaseClient, context: PipelineContext) -> None:
+        if _skipped(context) or not self._scheme.considers_parent_baseline:
+            return
+
+        promoted: ModelHandle | None = context.extras.get("promoted")
+        if promoted is None:
+            decision = ParentBaselineDecision(False, "Candidate was not promoted.")
+            context.extras["parent_baseline_decision"] = decision
+            logger.info("AdoptParentBaseline: %s", decision.reason)
+            return
+
+        current = self._scheme.current_parent_baseline(db_client)
+        parent_eval = None
+        if current is not None and current.compatible and current.weights_uri:
+            parent_eval = _parent_baseline_eval(context, current)
+        decision = self._scheme.decide_parent_baseline(
+            candidate_eval=context.extras.get("candidate_eval"),
+            parent=current,
+            parent_eval=parent_eval,
+        )
+        context.extras["parent_baseline_decision"] = decision
+        logger.info(
+            "AdoptParentBaseline should_adopt=%s reason=%s",
+            decision.should_adopt,
+            decision.reason,
+        )
+        if not decision.should_adopt:
+            return
+        adopted = self._scheme.apply_parent_baseline(db_client, candidate=promoted)
+        context.extras["parent_baseline"] = adopted
+        logger.info("AdoptParentBaseline version=%s", adopted.key)
+
+
 def build_training_scheme_steps(
     scheme: TrainingScheme,
     *,
     promote: bool = False,
 ) -> list[PipelineStep]:
-    """Same step classes for every scheme. ``promote`` adds the two write steps."""
+    """Same step classes for every scheme. ``promote`` adds the write steps."""
     steps: list[PipelineStep] = [
         PrepareTrainingStep(scheme),
         TrainModelStep(scheme),
@@ -325,5 +397,6 @@ def build_training_scheme_steps(
         steps.extend([
             DecideFromScoresStep(scheme),
             ApplyPromotionStep(scheme),
+            AdoptParentBaselineStep(scheme),
         ])
     return steps

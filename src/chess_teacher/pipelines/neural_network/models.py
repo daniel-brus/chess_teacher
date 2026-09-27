@@ -83,6 +83,7 @@ class BaselineModel(TableDataClass):
     mlflow_run_id: str | None = None
     model_uri: str | None = None
     status: BaselineModelStatus = BaselineModelStatus.CANDIDATE
+    is_parent_baseline: bool = False
     parent_version: str | None = None
     data_cutoff_at: datetime | None = None
     eval_metrics: str | None = None
@@ -127,6 +128,34 @@ class BaselineModel(TableDataClass):
         """All baseline rows, newest first (any status)."""
         db_client.ensure_metadata(cls.get_metadata())
         return cls.fetch_all_from_db(db_client, order_by='"trained_at" DESC')
+
+    @classmethod
+    def current_parent_baseline(cls, db_client: DatabaseClient) -> BaselineModel | None:
+        """The platform model personal runs warm-start from, if one has been adopted."""
+        rows = cls.fetch_all_from_db(
+            db_client,
+            where='"is_parent_baseline" IS TRUE',
+            order_by='"trained_at" DESC',
+            limit=1,
+        )
+        return rows[0] if rows else None
+
+    def adopt_as_parent_baseline(self, db_client: DatabaseClient) -> BaselineModel:
+        """Make this row the parent baseline. Does not change ``status``."""
+        db_client.ensure_metadata(type(self).get_metadata())
+        holders = type(self).fetch_all_from_db(
+            db_client,
+            where='"is_parent_baseline" IS TRUE',
+        )
+        for holder in holders:
+            if holder.id == self.id:
+                continue
+            replace(holder, is_parent_baseline=False).save_to_db(db_client)
+            logger.info("Cleared parent baseline version=%s", holder.version)
+        adopted = replace(self, is_parent_baseline=True)
+        adopted.save_to_db(db_client)
+        logger.info("Adopted parent baseline version=%s", adopted.version)
+        return adopted
 
     def looks_like_policy(self) -> bool:
         """Legacy fixed-vocab policy head (superseded by candidate_style)."""
@@ -219,6 +248,7 @@ class PersonalModel(TableDataClass):
     status: BaselineModelStatus = BaselineModelStatus.CANDIDATE
     parent_version: str | None = None
     parent_kind: str | None = None
+    parent_baseline_version: str | None = None
     eval_metrics: str | None = None
     git_commit_hash: str | None = None
 
