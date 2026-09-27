@@ -7,8 +7,8 @@ A platform run warm-starts from the latest platform promotion. A user run
 warm-starts from that user's latest promotion when it descends from the current
 parent baseline. Once a parent baseline exists and the user's model does not
 descend from it, the user run starts from that baseline instead. Before any
-parent baseline has been adopted, a user run falls back to the latest platform
-promotion, then a cold start.
+parent baseline has been adopted, a user run uses that user's latest promotion,
+else the latest platform promotion, else a cold start.
 """
 
 from __future__ import annotations
@@ -399,7 +399,12 @@ class ModelTraining:
             if not isinstance(row, BaselineModel):
                 raise TypeError("Platform run can only promote a platform row")
             served_platform = current.payload if current is not None else None
-            if not isinstance(served_platform, BaselineModel):
+            if not isinstance(served_platform, BaselineModel) or served_platform.id == row.id:
+                served_platform = BaselineModel.latest_with_status(
+                    db_client,
+                    BaselineModelStatus.PRODUCTION,
+                )
+            if served_platform is not None and served_platform.id == row.id:
                 served_platform = None
             promoted_platform = row.promote_over(
                 db_client,
@@ -413,7 +418,13 @@ class ModelTraining:
             if row.user_id != self.user_id:
                 raise ValueError(f"Candidate user {row.user_id} does not match run {self.user_id}")
             served_user = current.payload if current is not None else None
-            if not isinstance(served_user, PersonalModel):
+            if (
+                not isinstance(served_user, PersonalModel)
+                or served_user.user_id != self.user_id
+                or served_user.id == row.id
+            ):
+                served_user = PersonalModel.latest_promotion_for_user(db_client, self.user_id)
+            if served_user is not None and served_user.id == row.id:
                 served_user = None
             promoted_user = row.promote_over(
                 db_client,

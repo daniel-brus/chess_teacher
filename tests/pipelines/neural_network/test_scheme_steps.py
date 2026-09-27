@@ -786,6 +786,108 @@ def test_adopt_step_leaves_the_pointer_when_the_gate_fails() -> None:
     assert "parent_baseline" not in context.extras
 
 
+def test_user_promotion_archives_production_when_the_parent_is_a_baseline(
+    monkeypatch: Any,
+) -> None:
+    trained_at = datetime.now(UTC)
+    existing = PersonalModel(
+        id="old",
+        user_id="user-1",
+        version="v1",
+        trained_at=trained_at,
+        status=BaselineModelStatus.PRODUCTION,
+    )
+    candidate = PersonalModel(
+        id="new",
+        user_id="user-1",
+        version="v2",
+        trained_at=trained_at,
+        status=BaselineModelStatus.CANDIDATE,
+    )
+    seen: dict[str, PersonalModel | None] = {}
+
+    def promote_over(
+        self: PersonalModel,
+        db: object,
+        *,
+        current_production: PersonalModel | None,
+        eval_metrics: str | None,
+    ) -> PersonalModel:
+        del self, db, eval_metrics
+        seen["current"] = current_production
+        return candidate
+
+    monkeypatch.setattr(PersonalModel, "promote_over", promote_over)
+    monkeypatch.setattr(
+        PersonalModel,
+        "latest_promotion_for_user",
+        lambda db, user_id: existing,
+    )
+    ModelTraining("user-1").apply_promotion(
+        MagicMock(),
+        candidate=ModelHandle(
+            key="v2",
+            weights_uri="s3://cand",
+            compatible=True,
+            kind="personal",
+            payload=candidate,
+        ),
+        current=None,
+        eval_metrics_json=None,
+    )
+    assert seen["current"] is existing
+
+
+def test_platform_promotion_archives_production_when_the_parent_handle_is_missing(
+    monkeypatch: Any,
+) -> None:
+    trained_at = datetime.now(UTC)
+    existing = BaselineModel(
+        id="old",
+        version="v1",
+        trained_at=trained_at,
+        status=BaselineModelStatus.PRODUCTION,
+    )
+    candidate = BaselineModel(
+        id="new",
+        version="v2",
+        trained_at=trained_at,
+        status=BaselineModelStatus.CANDIDATE,
+    )
+    seen: dict[str, BaselineModel | None] = {}
+
+    def promote_over(
+        self: BaselineModel,
+        db: object,
+        *,
+        current_production: BaselineModel | None,
+        eval_metrics: str | None,
+    ) -> BaselineModel:
+        del self, db, eval_metrics
+        seen["current"] = current_production
+        return candidate
+
+    monkeypatch.setattr(BaselineModel, "promote_over", promote_over)
+    monkeypatch.setattr(
+        BaselineModel,
+        "latest_with_status",
+        lambda db, status: existing,
+    )
+    ModelTraining().apply_promotion(
+        MagicMock(),
+        candidate=ModelHandle(
+            key="v2",
+            weights_uri="s3://cand",
+            compatible=True,
+            kind="baseline",
+            payload=candidate,
+        ),
+        current=None,
+        eval_metrics_json=None,
+    )
+    assert seen["current"] is existing
+
+
 def test_scheme_steps_do_not_name_either_model_chain() -> None:
     source = (
         Path(__file__).resolve().parents[3]
