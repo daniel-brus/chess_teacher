@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from chess_teacher.pipelines.neural_network.split_steps import AssignGameSplitsStep
 from chess_teacher.pipelines.preprocessing.main import run_preprocessing_pipeline
 from chess_teacher.pipelines.preprocessing.pipeline_steps import (
@@ -11,7 +13,15 @@ from chess_teacher.pipelines.preprocessing.pipeline_steps import (
 )
 
 
-def test_preprocessing_pipeline_assigns_splits_last() -> None:
+def test_preprocessing_pipeline_assigns_splits_last(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "chess_teacher.utils.pipeline_utils.transformations.get_db_client",
+        lambda: MagicMock(),
+    )
+    monkeypatch.setattr(
+        "chess_teacher.pipelines.preprocessing.transformations.load_slug_title_lookup",
+        lambda: {},
+    )
     account = MagicMock()
     account.account_id = "acct-1"
     with patch("chess_teacher.pipelines.preprocessing.main.Pipeline") as pipeline_cls:
