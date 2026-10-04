@@ -217,31 +217,30 @@ def _stub_mlflow_tracker(monkeypatch: Any) -> None:
 
 
 def test_score_packs_eval_once_for_candidate_and_reference(monkeypatch: Any) -> None:
-    packed = object()
     loads: list[Path] = []
-    packs: list[list[object]] = []
-    scores: list[tuple[object, object]] = []
-
-    def pack_datums_for_eval(datums: list[object]) -> object:
-        packs.append(datums)
-        return packed
+    scored_calls: list[tuple[tuple[str, ...], list[object]]] = []
 
     def load_candidate_style_keras(path: Path, *, compile_model: bool = False) -> object:
         del compile_model
         loads.append(path)
         return path
 
-    def evaluate_packed(model: object, packed_arg: object) -> EvalMetrics:
-        scores.append((model, packed_arg))
-        return _metrics(top1=0.4 if len(scores) == 1 else 0.3, agree=0.5, disagree=0.2)
+    def score_models_on_datums(
+        models: dict[str, object],
+        datums: list[object],
+        **_kwargs: object,
+    ) -> dict[str, EvalMetrics]:
+        scored_calls.append((tuple(sorted(models.keys())), list(datums)))
+        out: dict[str, EvalMetrics] = {
+            "candidate": _metrics(top1=0.4, agree=0.5, disagree=0.2),
+        }
+        if "parent" in models:
+            out["parent"] = _metrics(top1=0.3, agree=0.5, disagree=0.2)
+        return out
 
     monkeypatch.setattr(
-        "chess_teacher.pipelines.neural_network.eval_metrics.pack_datums_for_eval",
-        pack_datums_for_eval,
-    )
-    monkeypatch.setattr(
-        "chess_teacher.pipelines.neural_network.eval_metrics.evaluate_packed",
-        evaluate_packed,
+        "chess_teacher.pipelines.neural_network.eval_metrics.score_models_on_datums",
+        score_models_on_datums,
     )
     monkeypatch.setattr(
         "chess_teacher.pipelines.neural_network.train.load_candidate_style_keras",
@@ -264,9 +263,8 @@ def test_score_packs_eval_once_for_candidate_and_reference(monkeypatch: Any) -> 
         kind="chain",
     )
     ScoreEvaluationStep().run(MagicMock(), context)  # type: ignore[arg-type]
-    assert packs == [["val-move"]]
+    assert scored_calls == [(("candidate", "parent"), ["val-move"])]
     assert len(loads) == 2
-    assert scores[0][1] is packed and scores[1][1] is packed
     assert context.extras["candidate_eval"].top1_overall == 0.4
     assert context.extras["parent_eval"].top1_overall == 0.3
 
@@ -759,12 +757,8 @@ def test_adopt_step_scores_a_different_parent_baseline(monkeypatch: Any) -> None
     )
     scored = _metrics(top1=0.3, agree=0.4, disagree=0.1)
     monkeypatch.setattr(
-        "chess_teacher.pipelines.neural_network.eval_metrics.pack_datums_for_eval",
-        lambda datums: datums,
-    )
-    monkeypatch.setattr(
-        "chess_teacher.pipelines.neural_network.eval_metrics.evaluate_packed",
-        lambda model, packed: scored,
+        "chess_teacher.pipelines.neural_network.eval_metrics.evaluate_datums",
+        lambda model, datums, **_kwargs: scored,
     )
     monkeypatch.setattr(
         "chess_teacher.pipelines.neural_network.train.load_candidate_style_keras",

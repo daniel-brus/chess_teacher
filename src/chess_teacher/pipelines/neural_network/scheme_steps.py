@@ -138,8 +138,7 @@ class ScoreEvaluationStep(PipelineStep):
             return
 
         from chess_teacher.pipelines.neural_network.eval_metrics import (
-            evaluate_packed,
-            pack_datums_for_eval,
+            score_models_on_datums,
         )
         from chess_teacher.pipelines.neural_network.mlflow_utils import MLflowTracker
         from chess_teacher.pipelines.neural_network.train import load_candidate_style_keras
@@ -154,22 +153,23 @@ class ScoreEvaluationStep(PipelineStep):
             context.extras["parent_eval"] = None
             return
 
-        packed = pack_datums_for_eval(datums)
         candidate_model = load_candidate_style_keras(model_path, compile_model=False)
-        context.extras["candidate_eval"] = evaluate_packed(candidate_model, packed)
+        models: dict[str, object] = {"candidate": candidate_model}
 
         parent: ModelHandle | None = context.extras.get("parent")
-        if parent is None or not parent.compatible or not parent.weights_uri:
-            context.extras["parent_eval"] = None
+        if parent is not None and parent.compatible and parent.weights_uri:
+            parent_path = MLflowTracker().require_keras_weights(parent.weights_uri)
+            models["parent"] = load_candidate_style_keras(parent_path, compile_model=False)
+
+        scored = score_models_on_datums(models, datums)
+        context.extras["candidate_eval"] = scored["candidate"]
+        context.extras["parent_eval"] = scored.get("parent")
+        if context.extras["parent_eval"] is None:
             logger.info(
                 "ScoreEvaluation candidate only (cold start). n_eval=%s",
                 context.extras["candidate_eval"].n_eval,
             )
             return
-
-        parent_path = MLflowTracker().require_keras_weights(parent.weights_uri)
-        parent_model = load_candidate_style_keras(parent_path, compile_model=False)
-        context.extras["parent_eval"] = evaluate_packed(parent_model, packed)
         logger.info(
             "ScoreEvaluation candidate_top1=%s parent_top1=%s n=%s",
             context.extras["candidate_eval"].top1_overall,
@@ -322,18 +322,14 @@ def _parent_baseline_eval(
     if not datums or not current.weights_uri:
         return None
 
-    from chess_teacher.pipelines.neural_network.eval_metrics import (
-        evaluate_packed,
-        pack_datums_for_eval,
-    )
+    from chess_teacher.pipelines.neural_network.eval_metrics import evaluate_datums
     from chess_teacher.pipelines.neural_network.mlflow_utils import MLflowTracker
     from chess_teacher.pipelines.neural_network.train import load_candidate_style_keras
 
     logger.info("Scoring parent baseline key=%s", current.key)
-    packed = pack_datums_for_eval(datums)
     weights_path = MLflowTracker().require_keras_weights(current.weights_uri)
     model = load_candidate_style_keras(weights_path, compile_model=False)
-    return evaluate_packed(model, packed)
+    return evaluate_datums(model, datums)
 
 
 class AdoptParentBaselineStep(PipelineStep):
