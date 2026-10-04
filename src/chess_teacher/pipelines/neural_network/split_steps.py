@@ -1,4 +1,4 @@
-"""Assign persistent game splits during the per-account user pipeline."""
+"""Assign persistent game splits at the end of preprocessing."""
 
 from __future__ import annotations
 
@@ -14,9 +14,9 @@ logger = get_logger()
 class AssignGameSplitsStep(PipelineStep):
     """Write ``ml.game_split_assignments`` for this account's eligible games.
 
-    Same hash policy as ``backfill_game_splits.py``. Idempotent. Does **not**
-    change training or promotion. New games can lag until the next user-pipeline
-    run (typically ≤1 day).
+    Last step of ``run_preprocessing_pipeline``. Same hash policy as
+    ``backfill_game_splits.py``. Idempotent. Does **not** change training or
+    promotion. New games can lag until the next user-pipeline run (typically ≤1 day).
     """
 
     def __init__(self, *, split_version: str = DEFAULT_SPLIT_SALT) -> None:
