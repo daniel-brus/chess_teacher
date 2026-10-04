@@ -461,6 +461,40 @@ def test_platform_run_uses_every_account(monkeypatch) -> None:
     assert seen["where"] is None
 
 
+def test_scheme_eval_loads_capped_registry_val(monkeypatch: Any) -> None:
+    from chess_teacher.pipelines.neural_network.pipeline_steps import (
+        MAX_MOVES_PER_REGISTRY_VAL_EVAL,
+    )
+
+    seen: dict[str, object] = {}
+
+    def fake_load(
+        db_client: object,
+        *,
+        split_version: str,
+        limit: int | None = None,
+        full: bool = False,
+        extra_where: str | None = None,
+        assign_if_missing: bool = True,
+    ) -> list[object]:
+        del db_client, assign_if_missing
+        seen["split_version"] = split_version
+        seen["limit"] = limit
+        seen["full"] = full
+        seen["extra_where"] = extra_where
+        return ["datum"]
+
+    monkeypatch.setattr(
+        "chess_teacher.pipelines.neural_network.schemes.load_registry_val_datums",
+        fake_load,
+    )
+    out = ModelTraining().load_eval_datums(MagicMock())
+    assert out == ["datum"]
+    assert seen["full"] is False
+    assert seen["limit"] == MAX_MOVES_PER_REGISTRY_VAL_EVAL == 10_000
+    assert seen["extra_where"] is None
+
+
 def _parent_handle() -> ModelHandle:
     return ModelHandle(
         key="v1",
