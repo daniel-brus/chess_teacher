@@ -72,11 +72,16 @@ def run_nightly_baseline_rounds(rounds: int) -> tuple[PipelineRunResult, ...]:
     above the training minimum. A failed pass stops the loop.
     """
     rounds = max(1, int(rounds))
-    scheme = ModelTraining()
-    db_client = get_db_client()
     results: list[PipelineRunResult] = []
+    scheme: ModelTraining | None = None
+    db_client = None
     for index in range(rounds):
         if index > 0:
+            # Open Postgres only when a later round needs the pending-move count.
+            # Round 1 always delegates to the pipeline, which has its own client.
+            if scheme is None or db_client is None:
+                scheme = ModelTraining()
+                db_client = get_db_client()
             pending = scheme.count_pending(db_client)
             if pending < scheme.min_new_moves:
                 logger.info(
