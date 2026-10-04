@@ -24,4 +24,4 @@ def test_nightly_maintenance_trains_and_promotes_the_baseline(monkeypatch) -> No
         train,
     )
 
-    assert run_nightly_maintenance() == (maintenance, training)
+    assert run_nightly_maintenance() == (maintenance, (training,))
