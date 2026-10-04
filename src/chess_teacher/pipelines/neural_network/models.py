@@ -296,6 +296,15 @@ class PersonalModel(TableDataClass):
         return rows[0] if rows else None
 
     @classmethod
+    def rows_for_user(cls, db_client: DatabaseClient, user_id: str) -> list[PersonalModel]:
+        """Every personal row for this user, newest first."""
+        return cls.fetch_all_from_db(
+            db_client,
+            where=generate_ident_is_literal("user_id", user_id),
+            order_by='"trained_at" DESC',
+        )
+
+    @classmethod
     def next_version(cls, db_client: DatabaseClient, user_id: str) -> str:
         rows = cls.fetch_all_from_db(
             db_client,

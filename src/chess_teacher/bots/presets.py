@@ -4,6 +4,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import TYPE_CHECKING
 
 from chess_teacher.bots.base import ChessBot
 from chess_teacher.bots.random_bot import RandomBot
@@ -12,13 +13,18 @@ from chess_teacher.utils.db.client import DatabaseClient
 from chess_teacher.utils.exception_utils import ConfigError, DatabaseError, MetadataError
 from chess_teacher.utils.logging import get_logger
 
+if TYPE_CHECKING:
+    from chess_teacher.pipelines.neural_network.models import PersonalModel
+
 BASELINE_PRESET_PREFIX = "baseline:"
+PERSONAL_PRESET_PREFIX = "personal:"
 STOCKFISH_PRESET_PREFIX = "stockfish:"
 logger = get_logger()
 
 # Play page calls preset lookup on every Streamlit rerun; cache DB-backed baselines briefly.
 _BASELINE_PRESETS_CACHE_TTL_SEC = 60.0
 _baseline_presets_cache: dict[int, tuple[list[BotPreset], float]] = {}
+_personal_presets_cache: dict[tuple[int, str], tuple[list[BotPreset], bool, float]] = {}
 
 STOCKFISH_DEPTH_MIN = 1
 STOCKFISH_DEPTH_MAX = 20
@@ -63,6 +69,20 @@ def baseline_preset_key(version: str) -> str:
     return f"{BASELINE_PRESET_PREFIX}{version}"
 
 
+def personal_preset_key(user_id: str, version: str) -> str:
+    return f"{PERSONAL_PRESET_PREFIX}{user_id}:{version}"
+
+
+def parse_personal_preset_key(key: str) -> tuple[str, str]:
+    """Return ``(user_id, version)`` from a ``personal:{user_id}:{version}`` key."""
+    if not key.startswith(PERSONAL_PRESET_PREFIX):
+        raise KeyError(f"Unknown personal bot preset: {key!r}")
+    user_id, sep, version = key.removeprefix(PERSONAL_PRESET_PREFIX).rpartition(":")
+    if not sep or not user_id or not version:
+        raise KeyError(f"Unknown personal bot preset: {key!r}")
+    return user_id, version
+
+
 def _stockfish_factory(depth: int) -> Callable[[], ChessBot]:
     def factory() -> ChessBot:
         return StockfishBot(depth=depth)
@@ -80,7 +100,12 @@ def _stockfish_preset(depth: int) -> BotPreset:
     )
 
 
-def _baseline_factory(model_uri: str, version: str) -> Callable[..., ChessBot]:
+def _neural_factory(
+    model_uri: str,
+    version: str,
+    *,
+    display_name: str | None = None,
+) -> Callable[..., ChessBot]:
     def factory(
         *,
         temperature: float = 0.0,
@@ -91,11 +116,16 @@ def _baseline_factory(model_uri: str, version: str) -> Callable[..., ChessBot]:
         return NeuralBaselineBot(
             model_uri=model_uri,
             version=version,
+            display_name=display_name,
             temperature=temperature,
             on_progress=on_progress,
         )
 
     return factory
+
+
+def _baseline_factory(model_uri: str, version: str) -> Callable[..., ChessBot]:
+    return _neural_factory(model_uri, version)
 
 
 # Legacy fixed Stockfish keys (in-progress games / bookmarks). Prefer stockfish:N.
@@ -130,15 +160,19 @@ BOT_PRESET_BY_KEY: dict[str, BotPreset] = {preset.key: preset for preset in BOT_
 
 
 def invalidate_baseline_presets_cache(*, db_client: DatabaseClient | None = None) -> None:
-    """Drop cached baseline presets (all clients, or one ``DatabaseClient`` instance)."""
+    """Drop cached baseline and personal presets (all clients, or one client)."""
     if db_client is None:
         _baseline_presets_cache.clear()
+        _personal_presets_cache.clear()
         return
     _baseline_presets_cache.pop(id(db_client), None)
+    stale = [key for key in _personal_presets_cache if key[0] == id(db_client)]
+    for key in stale:
+        _personal_presets_cache.pop(key, None)
 
 
 def reset_baseline_presets_cache_for_tests() -> None:
-    """Test helper: clear baseline preset cache between cases."""
+    """Test helper: clear baseline and personal preset caches between cases."""
     invalidate_baseline_presets_cache()
 
 
@@ -204,6 +238,94 @@ def list_baseline_presets(
     return list(presets)
 
 
+def _personal_preset(row: PersonalModel) -> BotPreset | None:
+    from chess_teacher.pipelines.neural_network.models import BaselineModelStatus
+
+    model_uri = row.model_uri
+    if model_uri is None or not row.looks_like_candidate_style():
+        return None
+    if row.status not in {BaselineModelStatus.PRODUCTION, BaselineModelStatus.ARCHIVED}:
+        return None
+    status_label = "current" if row.status == BaselineModelStatus.PRODUCTION else "archived"
+    return BotPreset(
+        key=personal_preset_key(row.user_id, row.version),
+        label=f"Personal {row.version}",
+        description=f"Personalized on your games ({status_label}).",
+        factory=_neural_factory(
+            model_uri,
+            row.version,
+            display_name=f"Personal {row.version}",
+        ),
+    )
+
+
+def _platform_fallback_preset(db_client: DatabaseClient) -> BotPreset | None:
+    """Current platform production model, labeled as the personal-bot fallback."""
+    from chess_teacher.pipelines.neural_network.models import (
+        BaselineModel,
+        BaselineModelStatus,
+    )
+
+    row = BaselineModel.latest_with_status(db_client, BaselineModelStatus.PRODUCTION)
+    if row is None or not row.model_uri or not row.looks_like_candidate_style():
+        return None
+    return BotPreset(
+        key=baseline_preset_key(row.version),
+        label=f"Baseline {row.version}",
+        description="Platform baseline. No personal model is promoted for you yet.",
+        factory=_baseline_factory(row.model_uri, row.version),
+    )
+
+
+def list_personal_play_presets(
+    db_client: DatabaseClient,
+    user_id: str,
+    *,
+    force_refresh: bool = False,
+) -> tuple[list[BotPreset], bool]:
+    """Playable personal models for ``user_id``.
+
+    Returns ``(presets, using_baseline_fallback)``. When this user has no
+    promoted or archived personal model, the single option is the current
+    platform production baseline and the flag is true.
+    """
+    cache_key = (id(db_client), user_id)
+    now = time.monotonic()
+    if not force_refresh:
+        cached = _personal_presets_cache.get(cache_key)
+        if cached is not None:
+            presets, using_fallback, cached_at = cached
+            if now - cached_at < _BASELINE_PRESETS_CACHE_TTL_SEC:
+                return list(presets), using_fallback
+
+    from chess_teacher.pipelines.neural_network.models import (
+        BaselineModelStatus,
+        PersonalModel,
+    )
+
+    rows = [
+        row
+        for row in PersonalModel.rows_for_user(db_client, user_id)
+        if _personal_preset(row) is not None
+    ]
+    rows.sort(
+        key=lambda row: (
+            0 if row.status == BaselineModelStatus.PRODUCTION else 1,
+            -(row.trained_at.timestamp() if row.trained_at is not None else 0.0),
+        )
+    )
+    presets = [preset for row in rows if (preset := _personal_preset(row)) is not None]
+    using_fallback = False
+    if not presets:
+        fallback = _platform_fallback_preset(db_client)
+        if fallback is not None:
+            presets = [fallback]
+            using_fallback = True
+
+    _personal_presets_cache[cache_key] = (presets, using_fallback, now)
+    return list(presets), using_fallback
+
+
 def list_other_presets() -> list[BotPreset]:
     """Non-engine / non-neural toys (Random, …)."""
     return [BOT_PRESET_BY_KEY["random"]]
@@ -228,7 +350,12 @@ def list_play_presets(db_client: DatabaseClient | None = None) -> list[BotPreset
     return presets
 
 
-def get_bot_preset(key: str, *, db_client: DatabaseClient | None = None) -> BotPreset:
+def get_bot_preset(
+    key: str,
+    *,
+    db_client: DatabaseClient | None = None,
+    user_id: str | None = None,
+) -> BotPreset:
     if key in BOT_PRESET_BY_KEY:
         return BOT_PRESET_BY_KEY[key]
 
@@ -258,6 +385,21 @@ def get_bot_preset(key: str, *, db_client: DatabaseClient | None = None) -> BotP
             return preset
         raise KeyError(f"Unknown baseline bot preset: {key!r} (version={version!r})")
 
+    if key.startswith(PERSONAL_PRESET_PREFIX):
+        owner_id, version = parse_personal_preset_key(key)
+        if user_id is not None and owner_id != user_id:
+            raise KeyError(f"Personal bot preset {key!r} is not for this user")
+        client = db_client
+        if client is None:
+            from chess_teacher.utils.db.client import get_db_client
+
+            client = get_db_client()
+        presets, _using_fallback = list_personal_play_presets(client, owner_id)
+        preset = next((item for item in presets if item.key == key), None)
+        if preset is not None:
+            return preset
+        raise KeyError(f"Unknown personal bot preset: {key!r} (version={version!r})")
+
     raise KeyError(f"Unknown bot preset: {key!r}")
 
 
@@ -267,6 +409,8 @@ def category_for_preset_key(key: str) -> OpponentCategory:
         return OpponentCategory.STOCKFISH
     if key.startswith(BASELINE_PRESET_PREFIX):
         return OpponentCategory.BASELINE
+    if key.startswith(PERSONAL_PRESET_PREFIX):
+        return OpponentCategory.PERSONAL
     if key == "random" or key in {p.key for p in list_other_presets()}:
         return OpponentCategory.OTHER
     return OpponentCategory.OTHER
