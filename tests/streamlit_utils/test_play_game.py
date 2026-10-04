@@ -78,7 +78,7 @@ def test_create_bot_passes_temperature_and_progress_to_baseline_factory(
     )
     monkeypatch.setattr(
         "streamlit_utils.play_game.get_bot_preset",
-        lambda _key, db_client=None: preset,
+        lambda _key, db_client=None, user_id=None: preset,
     )
 
     progress: list[str] = []

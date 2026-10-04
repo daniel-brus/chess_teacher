@@ -1,4 +1,4 @@
-"""Render the play-page bot move candidates panel (baseline only)."""
+"""Render the play-page bot move candidates panel (neural bots)."""
 
 from __future__ import annotations
 

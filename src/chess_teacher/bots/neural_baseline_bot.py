@@ -80,6 +80,7 @@ class NeuralBaselineBot(ChessBot):
         *,
         model_uri: str,
         version: str | None = None,
+        display_name: str | None = None,
         temperature: float = 0.0,
         tracker: MLflowTracker | None = None,
         stockfish_depth: int = CANDIDATE_STOCKFISH_DEPTH,
@@ -97,7 +98,7 @@ class NeuralBaselineBot(ChessBot):
             if candidate_nodes is not None
             else live_candidate_stockfish_nodes()
         )
-        self.name = f"Baseline {version}" if version else "NeuralBaseline"
+        self.name = display_name or (f"Baseline {version}" if version else "NeuralBaseline")
         self._tracker = tracker or MLflowTracker()
 
         self._progress("Starting Stockfish engine…")

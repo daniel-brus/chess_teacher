@@ -30,6 +30,8 @@ spec:
                     configMapKeyRef:
                       name: chess-teacher-config
                       key: ENVIRONMENT
+                - name: BASELINE_NIGHTLY_ROUNDS
+                  value: "1"
                 - name: HOSTNAME
                   valueFrom:
                     fieldRef:

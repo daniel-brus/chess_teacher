@@ -6,9 +6,15 @@ from __future__ import annotations
 
 import time
 
-from chess_teacher.maintenance.main import run_nightly_maintenance
+from chess_teacher.maintenance.main import (
+    resolve_baseline_nightly_rounds,
+    run_nightly_maintenance,
+)
 from chess_teacher.utils.logging import get_logger
-from chess_teacher.utils.pipeline_utils.pipeline_helpers import PipelineResult
+from chess_teacher.utils.pipeline_utils.pipeline_helpers import (
+    PipelineResult,
+    PipelineRunResult,
+)
 from chess_teacher.utils.process_utils import log_script_runtime_context
 
 logger = get_logger()
@@ -18,14 +24,20 @@ def main() -> int:
     log_script_runtime_context(logger, script="maintenance")
     logger.info("Maintenance job started.")
     started_at = time.monotonic()
-    maintenance_result, training_result = run_nightly_maintenance()
+    baseline_rounds = resolve_baseline_nightly_rounds()
+    logger.info("Nightly baseline round budget=%s", baseline_rounds)
+    maintenance_result, training_results = run_nightly_maintenance(
+        baseline_rounds=baseline_rounds,
+    )
     duration_s = time.monotonic() - started_at
 
     failed = False
-    for label, result in (
+    labeled_results: list[tuple[str, PipelineRunResult]] = [
         ("maintenance", maintenance_result),
-        ("baseline_training", training_result),
-    ):
+    ]
+    for index, training_result in enumerate(training_results, start=1):
+        labeled_results.append((f"baseline_training round {index}", training_result))
+    for label, result in labeled_results:
         logger.info(
             "%s finished result=%s duration_s=%.1f run_id=%s steps=%s",
             label,

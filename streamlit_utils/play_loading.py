@@ -14,24 +14,35 @@ from chess_teacher.utils.db.client import DatabaseClient
 from streamlit_utils.play_game import create_bot
 
 MSG_BASELINE_PRESETS = "Loading baseline models from database…"
+MSG_PERSONAL_PRESETS = "Loading your models from database…"
 MSG_STOCKFISH_ENGINE = "Starting Stockfish engine…"
 MSG_BASELINE_PREPARE = "Preparing baseline opponent…"
+MSG_PERSONAL_PREPARE = "Preparing your personalized opponent…"
 MSG_OPPONENT_PREPARE = "Preparing opponent…"
 MSG_OPPONENT_READY = "Opponent ready"
 MSG_BASELINE_THINKING = "Analyzing position (Stockfish + neural model)…"
+
+
+def _is_neural_preset(preset_key: str) -> bool:
+    return category_for_preset_key(preset_key) in {
+        OpponentCategory.BASELINE,
+        OpponentCategory.PERSONAL,
+    }
 
 
 def initial_bot_loading_message(preset_key: str) -> str:
     category = category_for_preset_key(preset_key)
     if category == OpponentCategory.BASELINE:
         return MSG_BASELINE_PREPARE
+    if category == OpponentCategory.PERSONAL:
+        return MSG_PERSONAL_PREPARE
     if category == OpponentCategory.STOCKFISH:
         return MSG_STOCKFISH_ENGINE
     return MSG_OPPONENT_PREPARE
 
 
 def bot_thinking_message(preset_key: str, *, label: str) -> str:
-    if category_for_preset_key(preset_key) == OpponentCategory.BASELINE:
+    if _is_neural_preset(preset_key):
         return f"{label} — {MSG_BASELINE_THINKING}"
     return f"{label} is thinking…"
 
@@ -41,19 +52,28 @@ def list_baseline_presets_with_feedback(db_client: DatabaseClient):
         return list_baseline_presets(db_client)
 
 
+def list_personal_play_presets_with_feedback(db_client: DatabaseClient, user_id: str):
+    from chess_teacher.bots import list_personal_play_presets
+
+    with st.spinner(MSG_PERSONAL_PRESETS):
+        return list_personal_play_presets(db_client, user_id)
+
+
 def create_bot_with_feedback(
     preset_key: str,
     *,
     baseline_temperature: float | None = None,
     db_client: DatabaseClient,
+    user_id: str | None = None,
 ) -> ChessBot:
     category = category_for_preset_key(preset_key)
-    if category != OpponentCategory.BASELINE:
+    if category not in {OpponentCategory.BASELINE, OpponentCategory.PERSONAL}:
         with st.spinner(initial_bot_loading_message(preset_key)):
             return create_bot(
                 preset_key,
                 baseline_temperature=baseline_temperature,
                 db_client=db_client,
+                user_id=user_id,
             )
 
     with st.status(initial_bot_loading_message(preset_key), expanded=True) as status:
@@ -65,6 +85,7 @@ def create_bot_with_feedback(
             preset_key,
             baseline_temperature=baseline_temperature,
             db_client=db_client,
+            user_id=user_id,
             on_progress=on_progress,
         )
         status.update(label=MSG_OPPONENT_READY, state="complete", expanded=False)

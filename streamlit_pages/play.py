@@ -48,6 +48,7 @@ from streamlit_utils.play_loading import (
     bot_thinking_message,
     create_bot_with_feedback,
     list_baseline_presets_with_feedback,
+    list_personal_play_presets_with_feedback,
 )
 from streamlit_utils.play_session import load_play_session_for_user, save_play_session_for_user
 
@@ -65,11 +66,13 @@ _PLAY_SETUP_COLOR_KEY = "play_setup_color"
 _PLAY_SETUP_CATEGORY_KEY = "play_setup_category"
 _PLAY_SETUP_STOCKFISH_DEPTH_KEY = "play_setup_stockfish_depth"
 _PLAY_SETUP_BASELINE_KEY = "play_setup_baseline"
+_PLAY_SETUP_PERSONAL_KEY = "play_setup_personal"
 _PLAY_SETUP_BASELINE_TEMPERATURE_KEY = "play_setup_baseline_temperature"
 _PLAY_SETUP_OTHER_KEY = "play_setup_other"
 _BOT_ANALYSIS_KEY = "play_bot_move_analysis"
 _BOT_CANDIDATES_VISIBLE_KEY = "play_bot_candidates_visible"
 _PLAY_SETUP_BASELINE_PRESETS_KEY = "play_setup_baseline_presets"
+_PLAY_SETUP_PERSONAL_PRESETS_KEY = "play_setup_personal_presets"
 
 _PLAY_STATUS_CSS = """
 div[class*="st-key-play_board_status"],
@@ -180,12 +183,22 @@ def _baseline_presets_for_setup():
     return presets
 
 
+def _personal_presets_for_setup():
+    cached = st.session_state.get(_PLAY_SETUP_PERSONAL_PRESETS_KEY)
+    if cached is not None:
+        return cached
+    options = list_personal_play_presets_with_feedback(db_client, user.user_id)
+    st.session_state[_PLAY_SETUP_PERSONAL_PRESETS_KEY] = options
+    return options
+
+
 def _reset_game() -> None:
     close_bot(_get_bot())
     _set_bot(None)
     _set_state(None)
     st.session_state.pop(_PLAY_WIN_CELEBRATED_KEY, None)
     st.session_state.pop(_PLAY_SETUP_BASELINE_PRESETS_KEY, None)
+    st.session_state.pop(_PLAY_SETUP_PERSONAL_PRESETS_KEY, None)
     _clear_bot_analysis()
 
 
@@ -201,7 +214,10 @@ def _maybe_celebrate_win(state: PlayGameState) -> None:
 def _bot_matches_state(bot: ChessBot, state: PlayGameState) -> bool:
     if st.session_state.get("play_game_bot_preset") != state.preset_key:
         return False
-    if category_for_preset_key(state.preset_key) == OpponentCategory.BASELINE:
+    if category_for_preset_key(state.preset_key) in {
+        OpponentCategory.BASELINE,
+        OpponentCategory.PERSONAL,
+    }:
         temperature = getattr(bot, "temperature", None)
         if temperature is None:
             return False
@@ -217,6 +233,7 @@ def _ensure_bot(state: PlayGameState) -> ChessBot:
         bot = create_bot_with_feedback(
             state.preset_key,
             db_client=db_client,
+            user_id=user.user_id,
             baseline_temperature=state.baseline_temperature,
         )
         _set_bot(bot)
@@ -227,7 +244,7 @@ def _ensure_bot(state: PlayGameState) -> ChessBot:
 def _resolve_preset(preset_key: str):
     """Look up a play preset; refresh from DB so baseline keys stay valid."""
     try:
-        return get_bot_preset(preset_key, db_client=db_client)
+        return get_bot_preset(preset_key, db_client=db_client, user_id=user.user_id)
     except KeyError:
         return next(
             (p for p in list_play_presets(db_client) if p.key == preset_key),
@@ -277,7 +294,14 @@ def _resolve_setup_preset_key(category: OpponentCategory) -> tuple[str | None, s
         return key, None
 
     if category == OpponentCategory.PERSONAL:
-        return None, "Personal bots are not available yet."
+        personal_presets, _using_fallback = _personal_presets_for_setup()
+        if not personal_presets:
+            return None, "No personal model or platform baseline is available yet."
+        key = st.session_state.get(_PLAY_SETUP_PERSONAL_KEY)
+        keys = [p.key for p in personal_presets]
+        if key not in keys:
+            key = keys[0]
+        return key, None
 
     if category == OpponentCategory.OTHER:
         key = st.session_state.get(_PLAY_SETUP_OTHER_KEY, "random")
@@ -323,7 +347,33 @@ def _render_category_options(category: OpponentCategory) -> None:
         return
 
     if category == OpponentCategory.PERSONAL:
-        st.info("Personal (user-finetuned) bots are coming later.")
+        personal_presets, using_fallback = _personal_presets_for_setup()
+        if not personal_presets:
+            st.info("No personal model or platform baseline is available yet.")
+            return
+        if using_fallback:
+            st.info(
+                "No personal model is promoted yet. "
+                "You can play the current platform baseline instead."
+            )
+        labels = {p.key: f"{p.label} — {p.description}" for p in personal_presets}
+        keys = [p.key for p in personal_presets]
+        if st.session_state.get(_PLAY_SETUP_PERSONAL_KEY) not in keys:
+            st.session_state[_PLAY_SETUP_PERSONAL_KEY] = keys[0]
+        st.selectbox(
+            "Your bot" if not using_fallback else "Fallback opponent",
+            keys,
+            format_func=lambda key: labels.get(key, key),
+            key=_PLAY_SETUP_PERSONAL_KEY,
+        )
+        st.slider(
+            "Temperature",
+            min_value=BASELINE_TEMPERATURE_MIN,
+            max_value=BASELINE_TEMPERATURE_MAX,
+            step=BASELINE_TEMPERATURE_STEP,
+            key=_PLAY_SETUP_BASELINE_TEMPERATURE_KEY,
+            help="0 = always play the top move; higher values add randomness.",
+        )
         return
 
     other_presets = list_other_presets()
@@ -360,7 +410,7 @@ def _render_setup() -> None:
 
     preset_key, setup_error = _resolve_setup_preset_key(category)
     start_disabled = preset_key is None
-    if setup_error and category != OpponentCategory.PERSONAL:
+    if setup_error:
         st.warning(setup_error)
 
     if st.button(
@@ -373,7 +423,7 @@ def _render_setup() -> None:
             st.error(setup_error or "Choose a valid opponent.")
             return
         try:
-            get_bot_preset(preset_key, db_client=db_client)
+            get_bot_preset(preset_key, db_client=db_client, user_id=user.user_id)
         except KeyError:
             st.error(f"Unknown opponent preset: {preset_key!r}")
             return
@@ -382,12 +432,13 @@ def _render_setup() -> None:
             preset_key,
             baseline_temperature=(
                 float(st.session_state[_PLAY_SETUP_BASELINE_TEMPERATURE_KEY])
-                if category == OpponentCategory.BASELINE
+                if category in {OpponentCategory.BASELINE, OpponentCategory.PERSONAL}
                 else BASELINE_TEMPERATURE_DEFAULT
             ),
         )
         _set_state(state)
         st.session_state.pop(_PLAY_SETUP_BASELINE_PRESETS_KEY, None)
+        st.session_state.pop(_PLAY_SETUP_PERSONAL_PRESETS_KEY, None)
         _ensure_bot(state)
         log_user_action(
             f"Started play game color={color_choice} preset={preset_key}",
@@ -408,8 +459,11 @@ def _run_bot_turn(state: PlayGameState, bot: ChessBot) -> PlayGameState:
     return new_state
 
 
-def _is_baseline_game(state: PlayGameState) -> bool:
-    return category_for_preset_key(state.preset_key) == OpponentCategory.BASELINE
+def _is_neural_game(state: PlayGameState) -> bool:
+    return category_for_preset_key(state.preset_key) in {
+        OpponentCategory.BASELINE,
+        OpponentCategory.PERSONAL,
+    }
 
 
 def _candidates_show_flags(
@@ -417,7 +471,7 @@ def _candidates_show_flags(
     analysis: BotMoveAnalysis | None,
 ) -> tuple[bool, bool]:
     """Return ``(show_dataframe, show_no_analysis)`` for the baseline panel."""
-    if not _is_baseline_game(state) or analysis is None:
+    if not _is_neural_game(state) or analysis is None:
         return False, False
     if is_bot_thinking(state):
         return False, False
@@ -504,12 +558,12 @@ def _render_active_game(state: PlayGameState) -> None:
         _clear_bot_analysis()
 
     status = game_status_message(state)
-    baseline = _is_baseline_game(state)
+    neural = _is_neural_game(state)
     ingest_css(_PLAY_STATUS_CSS)
 
     _render_outcome_banner(status)
 
-    if not baseline:
+    if not neural:
         _render_match_caption(state, label=label, description=description)
 
     if not thinking:
@@ -518,7 +572,7 @@ def _render_active_game(state: PlayGameState) -> None:
     analysis = _get_bot_analysis()
     show_df, show_no = _candidates_show_flags(state, analysis)
 
-    if baseline:
+    if neural:
         board_col, panel_col = st.columns([2.0, 1.0], gap="medium", vertical_alignment="top")
         with board_col:
             with st.container(key="play_board_col"):
@@ -539,7 +593,7 @@ def _render_active_game(state: PlayGameState) -> None:
         preset_key=state.preset_key,
         label=label,
         state=state,
-        align_with_panel=baseline,
+        align_with_panel=neural,
     )
 
     if thinking:

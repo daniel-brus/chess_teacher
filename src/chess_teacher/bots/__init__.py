@@ -14,6 +14,7 @@ from chess_teacher.bots.presets import (
     BOT_PRESET_BY_KEY,
     BOT_PRESETS,
     OPPONENT_CATEGORY_LABELS,
+    PERSONAL_PRESET_PREFIX,
     STOCKFISH_DEPTH_DEFAULT,
     STOCKFISH_DEPTH_MAX,
     STOCKFISH_DEPTH_MIN,
@@ -27,7 +28,9 @@ from chess_teacher.bots.presets import (
     invalidate_baseline_presets_cache,
     list_baseline_presets,
     list_other_presets,
+    list_personal_play_presets,
     list_play_presets,
+    personal_preset_key,
     stockfish_preset_key,
 )
 from chess_teacher.bots.random_bot import RandomBot
@@ -46,6 +49,7 @@ __all__ = [
     "BOT_PRESETS",
     "BOT_PRESET_BY_KEY",
     "OPPONENT_CATEGORY_LABELS",
+    "PERSONAL_PRESET_PREFIX",
     "STOCKFISH_DEPTH_DEFAULT",
     "STOCKFISH_DEPTH_MAX",
     "STOCKFISH_DEPTH_MIN",
@@ -65,7 +69,9 @@ __all__ = [
     "invalidate_baseline_presets_cache",
     "list_baseline_presets",
     "list_other_presets",
+    "list_personal_play_presets",
     "list_play_presets",
+    "personal_preset_key",
     "stockfish_preset_key",
 ]
 
