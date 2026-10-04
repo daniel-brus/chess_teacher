@@ -6,6 +6,7 @@ See ``.agents/docs/ml-training-roadmap.md`` Phase 1.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -20,6 +21,13 @@ from chess_teacher.pipelines.neural_network.ply_weights import (
     candidate_style_sample_weights,
     user_not_sf_best_mask,
 )
+from chess_teacher.utils.logging import get_logger
+
+logger = get_logger()
+
+# Packing move_feats (N x 128 x 55) + board/state for a full registry-val set OOMs
+# laptop/k3d jobs (~120k moves). Score in chunks; metrics merge exactly.
+EVAL_PACK_CHUNK_SIZE = 4_000
 
 PHASE_OPENING = "opening"
 PHASE_MIDDLE = "middle"
@@ -208,9 +216,6 @@ def compute_candidate_style_metrics(
     )
 
 
-
-
-
 def _model_input_names(model: Any) -> set[str]:
     names: set[str] = set()
     try:
@@ -288,8 +293,7 @@ def pack_datums_for_eval(
     )
 
 
-def evaluate_packed(model: Any, packed: PackedCandidateEval) -> EvalMetrics:
-    """Score a model using pre-packed val tensors (board + state)."""
+def _predict_packed_logits(model: Any, packed: PackedCandidateEval) -> np.ndarray:
     names = _model_input_names(model)
     feed: dict[str, np.ndarray] = {"move_feats": packed.feats}
     if "board" in names:
@@ -298,7 +302,12 @@ def evaluate_packed(model: Any, packed: PackedCandidateEval) -> EvalMetrics:
         feed["state"] = packed.state
     if "board" not in feed and "state" not in feed:
         feed["state"] = packed.state
-    logits = np.asarray(model.predict(feed, verbose=0), dtype=np.float64)
+    return np.asarray(model.predict(feed, verbose=0), dtype=np.float64)
+
+
+def evaluate_packed(model: Any, packed: PackedCandidateEval) -> EvalMetrics:
+    """Score a model using pre-packed val tensors (board + state)."""
+    logits = _predict_packed_logits(model, packed)
     return compute_candidate_style_metrics(
         logits=logits,
         mask=packed.mask,
@@ -310,17 +319,145 @@ def evaluate_packed(model: Any, packed: PackedCandidateEval) -> EvalMetrics:
     )
 
 
+def _metrics_from_hit_buffers(
+    *,
+    top1: np.ndarray,
+    top3: np.ndarray,
+    disagree: np.ndarray,
+    weights: np.ndarray,
+    n_input: int,
+) -> EvalMetrics:
+    """Build ``EvalMetrics`` from per-kept-row buffers (no logits retained)."""
+    if top1.size == 0:
+        raise ValueError(
+            "evaluate_datums: no datums with usable candidate_evaluations "
+            "(user move must be in evals)"
+        )
+    agree = ~disagree
+    w_sum = float(np.sum(weights))
+    top1_weighted = float(np.sum(top1.astype(np.float64) * weights) / w_sum) if w_sum else 0.0
+    return EvalMetrics(
+        top1_overall=float(np.mean(top1)),
+        top3_overall=float(np.mean(top3)),
+        top1_sf_agree=_mean_or_none(top1, agree),
+        top3_sf_agree=_mean_or_none(top3, agree),
+        top1_sf_disagree=_mean_or_none(top1, disagree),
+        top3_sf_disagree=_mean_or_none(top3, disagree),
+        top1_overall_weighted=top1_weighted,
+        n_eval=int(top1.size),
+        n_dropped=int(n_input) - int(top1.size),
+        n_sf_agree=int(np.sum(agree)),
+        n_sf_disagree=int(np.sum(disagree)),
+        sf_disagree_frac=float(np.mean(disagree)),
+    )
+
+
+def score_models_on_datums(
+    models: Mapping[str, Any],
+    datums: list[TrainingDatum],
+    *,
+    chunk_size: int = EVAL_PACK_CHUNK_SIZE,
+    max_candidates: int = MAX_CANDIDATES,
+) -> dict[str, EvalMetrics]:
+    """Pack+score in chunks so full registry-val never materializes at once.
+
+    Each chunk is packed once and scored for every model (same tensors).
+    Hit buffers stay O(n_eval); packed tensors stay O(chunk_size).
+    """
+    if not models:
+        raise ValueError("score_models_on_datums requires at least one model")
+    if not datums:
+        raise ValueError("score_models_on_datums requires a non-empty datum list")
+
+    chunk_size = max(1, int(chunk_size))
+    n_input = len(datums)
+    keys = list(models.keys())
+    top1_parts: dict[str, list[np.ndarray]] = {key: [] for key in keys}
+    top3_parts: dict[str, list[np.ndarray]] = {key: [] for key in keys}
+    disagree_parts: list[np.ndarray] = []
+    weight_parts: list[np.ndarray] = []
+
+    n_chunks = (n_input + chunk_size - 1) // chunk_size
+    for chunk_i, start in enumerate(range(0, n_input, chunk_size)):
+        chunk = datums[start : start + chunk_size]
+        try:
+            packed = pack_datums_for_eval(chunk, max_candidates=max_candidates)
+        except ValueError:
+            logger.info(
+                "Eval chunk %s/%s dropped entirely (n_in=%s)",
+                chunk_i + 1,
+                n_chunks,
+                len(chunk),
+            )
+            continue
+
+        disagree = user_not_sf_best_mask(packed.feats, packed.labels)
+        weights = candidate_style_sample_weights(
+            [d.ply for d in packed.kept_datums],
+            packed.feats,
+            packed.labels,
+        )
+        disagree_parts.append(np.asarray(disagree, dtype=bool))
+        weight_parts.append(np.asarray(weights, dtype=np.float64))
+
+        for key in keys:
+            logits = _predict_packed_logits(models[key], packed)
+            top1, top3 = _topk_hits(
+                logits,
+                packed.mask,
+                packed.labels,
+                max_candidates=packed.max_candidates,
+            )
+            top1_parts[key].append(np.asarray(top1, dtype=bool))
+            top3_parts[key].append(np.asarray(top3, dtype=bool))
+
+        logger.info(
+            "Eval chunk %s/%s kept=%s / chunk_in=%s",
+            chunk_i + 1,
+            n_chunks,
+            len(packed.labels),
+            len(chunk),
+        )
+        del packed
+
+    if not disagree_parts:
+        raise ValueError(
+            "evaluate_datums: no datums with usable candidate_evaluations "
+            "(user move must be in evals)"
+        )
+
+    disagree_all = np.concatenate(disagree_parts)
+    weights_all = np.concatenate(weight_parts)
+    out: dict[str, EvalMetrics] = {}
+    for key in keys:
+        out[key] = _metrics_from_hit_buffers(
+            top1=np.concatenate(top1_parts[key]),
+            top3=np.concatenate(top3_parts[key]),
+            disagree=disagree_all,
+            weights=weights_all,
+            n_input=n_input,
+        )
+    return out
+
+
 def evaluate_datums(
     model: Any,
     datums: list[TrainingDatum],
     *,
     max_candidates: int = MAX_CANDIDATES,
+    chunk_size: int = EVAL_PACK_CHUNK_SIZE,
 ) -> EvalMetrics:
-    """Run ``model.predict`` on datums and return stratified metrics."""
-    return evaluate_packed(
-        model,
-        pack_datums_for_eval(datums, max_candidates=max_candidates),
+    """Run ``model.predict`` on datums and return stratified metrics.
+
+    Large lists are scored in ``chunk_size`` packs to bound peak memory.
+    """
+    scored = score_models_on_datums(
+        {"model": model},
+        datums,
+        chunk_size=chunk_size,
+        max_candidates=max_candidates,
     )
+    return scored["model"]
 
 
 def evaluate_model_uri(
