@@ -149,6 +149,34 @@ def test_create_indexes_sql_composite_column() -> None:
     )
 
 
+def test_create_indexes_sql_partial_where() -> None:
+    table = TableMetadata._from_dict_raw({
+        "schema": "games",
+        "table": "move_characteristics",
+        "primary_key": ["move_id"],
+        "indexes": [
+            {
+                "name": "idx_mc_incomplete",
+                "columns": ["account_id", "move_id"],
+                "where": "evaluation_after IS NULL OR candidate_evaluations IS NULL",
+            }
+        ],
+        "columns": [
+            {"name": "move_id", "data_type": "text", "nullable": False},
+            {"name": "account_id", "data_type": "text", "nullable": False},
+            {"name": "evaluation_after", "data_type": "double precision", "nullable": True},
+            {"name": "candidate_evaluations", "data_type": "jsonb", "nullable": True},
+        ],
+    })
+    assert table.indexes[0].where is not None
+    sql = table.create_indexes_sql()
+    assert sql == [
+        'CREATE INDEX IF NOT EXISTS "idx_mc_incomplete" ON "games"."move_characteristics" '
+        '("account_id", "move_id") '
+        "WHERE evaluation_after IS NULL OR candidate_evaluations IS NULL;"
+    ]
+
+
 def test_parse_indexes_skips_primary_key_duplicate() -> None:
     table = TableMetadata._from_dict_raw({
         "schema": "games",

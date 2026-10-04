@@ -69,6 +69,7 @@ def test_expensive_load_filters_incomplete_in_incremental() -> None:
     step = EnrichExpensiveMoveCharacteristicsStep(mode=PipelineMode.INCREMENTAL)
     db_client = MagicMock()
     db_client.table_exists.return_value = True
+    db_client.exists.return_value = True
     captured_sql: list[str] = []
 
     def capture_query(sql: str, _params: dict) -> list[dict]:
@@ -89,12 +90,26 @@ def test_expensive_load_filters_incomplete_in_incremental() -> None:
     context = PipelineContext(user_id="u1", account_id="acct-1")
     df = step._load_records(db_client, context)
     assert df.height == 1
+    assert db_client.exists.called
     assert len(captured_sql) == 1
+    assert "FROM" in captured_sql[0] and "move_characteristics" in captured_sql[0]
     assert "evaluation_after IS NULL" in captured_sql[0]
     assert "candidate_evaluations IS NULL" in captured_sql[0]
     assert "acct-1" in captured_sql[0]
-    assert "ORDER BY" in captured_sql[0]
+    assert 'ORDER BY mc."move_id"' in captured_sql[0]
     assert "LIMIT 2000" in captured_sql[0]
+
+
+def test_expensive_load_fast_path_skips_when_complete() -> None:
+    step = EnrichExpensiveMoveCharacteristicsStep(mode=PipelineMode.INCREMENTAL)
+    db_client = MagicMock()
+    db_client.table_exists.return_value = True
+    db_client.exists.return_value = False
+    context = PipelineContext(user_id="u1", account_id="acct-1")
+    df = step._load_records(db_client, context)
+    assert df.height == 0
+    db_client.exists.assert_called_once()
+    db_client.engine.execute_parameterized_query.assert_not_called()
 
 
 def test_expensive_load_keyset_pagination() -> None:
@@ -110,7 +125,8 @@ def test_expensive_load_keyset_pagination() -> None:
     db_client.engine.execute_parameterized_query.side_effect = capture_query
     context = PipelineContext(user_id="u1", account_id="acct-1")
     step._load_records(db_client, context, after_key="move-100")
-    assert 'm."move_id" >' in captured_sql[0]
+    db_client.exists.assert_not_called()
+    assert 'mc."move_id" >' in captured_sql[0]
     assert "move-100" in captured_sql[0]
     assert "LIMIT 2000" in captured_sql[0]
 
@@ -129,8 +145,34 @@ def test_expensive_load_skips_incomplete_filter_on_reprocess() -> None:
     context = PipelineContext(user_id="u1", account_id="acct-1")
     df = step._load_records(db_client, context)
     assert df.height == 0
+    db_client.exists.assert_not_called()
     assert "evaluation_after IS NULL" not in captured_sql[0]
-    assert 'm."account_id"' in captured_sql[0] or 'm."account_id" =' in captured_sql[0]
+    assert "acct-1" in captured_sql[0]
+
+
+def test_cheap_load_fast_path_skips_when_counts_match() -> None:
+    step = EnrichCheapMoveCharacteristicsStep(mode=PipelineMode.INCREMENTAL)
+    db_client = MagicMock()
+    db_client.table_exists.return_value = True
+    db_client.get_row_count.return_value = 100
+    context = PipelineContext(user_id="u1", account_id="acct-1")
+    df = step._load_records(db_client, context)
+    assert df.height == 0
+    assert db_client.get_row_count.call_count == 2
+    db_client.read.assert_not_called()
+
+
+def test_cheap_load_runs_anti_join_when_moves_ahead() -> None:
+    step = EnrichCheapMoveCharacteristicsStep(mode=PipelineMode.INCREMENTAL)
+    db_client = MagicMock()
+    db_client.table_exists.return_value = True
+    db_client.get_row_count.side_effect = [5, 3]
+    db_client.read.return_value = __import__("polars").DataFrame({
+        column: [] for column in EnrichCheapMoveCharacteristicsStep._SOURCE_COLUMNS
+    })
+    context = PipelineContext(user_id="u1", account_id="acct-1")
+    step._load_records(db_client, context)
+    db_client.read.assert_called_once()
 
 
 def test_expensive_step_save_path_uses_upsert() -> None:
@@ -139,7 +181,7 @@ def test_expensive_step_save_path_uses_upsert() -> None:
     db_client = MagicMock()
     db_client.ensure_metadata.return_value = None
     db_client.table_exists.return_value = True
-    db_client.engine.execute_parameterized_query.return_value = []
+    db_client.exists.return_value = False
 
     context = PipelineContext(user_id="u1", account_id="acct-1")
     step.run(db_client, context)

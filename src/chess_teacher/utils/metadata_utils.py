@@ -155,6 +155,7 @@ class ColumnMetadata:
 class IndexMetadata:
     name: str
     columns: tuple[str, ...]
+    where: str | None = None
 
     def __post_init__(self) -> None:
         name = require_ident(self.name.strip().lower(), what="index name")
@@ -166,6 +167,15 @@ class IndexMetadata:
             for column in self.columns
         )
         object.__setattr__(self, "columns", normalized_columns)
+        where = self.where.strip() if self.where else None
+        if where is not None:
+            if ";" in where:
+                logger.log_and_raise(
+                    MetadataError(f"Index {name!r} where clause cannot contain ';'")
+                )
+            object.__setattr__(self, "where", where)
+        else:
+            object.__setattr__(self, "where", None)
 
     @staticmethod
     def from_dict(raw: dict[str, Any]) -> IndexMetadata:
@@ -177,7 +187,9 @@ class IndexMetadata:
             columns_list = [str(column) for column in columns_raw]
         else:
             columns_list = []
-        return IndexMetadata(name=str(name), columns=tuple(columns_list))
+        where_raw = raw.get("where")
+        where = str(where_raw).strip() if where_raw is not None else None
+        return IndexMetadata(name=str(name), columns=tuple(columns_list), where=where)
 
 
 def _parse_indexes_from_raw(
@@ -455,11 +467,14 @@ class TableMetadata:
 
     def create_indexes_sql(self) -> list[str]:
         qname = self.qualified_name_sql()
-        return [
-            f"CREATE INDEX IF NOT EXISTS {quote_ident(index.name)} ON {qname} "
-            f"({', '.join(quote_ident(column) for column in index.columns)});"
-            for index in self.indexes
-        ]
+        statements: list[str] = []
+        for index in self.indexes:
+            cols = ", ".join(quote_ident(column) for column in index.columns)
+            sql = f"CREATE INDEX IF NOT EXISTS {quote_ident(index.name)} ON {qname} ({cols})"
+            if index.where:
+                sql += f" WHERE {index.where}"
+            statements.append(sql + ";")
+        return statements
 
     def create_schema_sql(self, *, if_not_exists: bool = True) -> str:
         ine = "IF NOT EXISTS " if if_not_exists else ""

@@ -167,6 +167,10 @@ tables:
         columns: [game_id]
       - name: idx_move_characteristics_account_id
         columns: [account_id]
+      # Speeds empty expensive-enrich probes on large already-complete accounts.
+      - name: idx_move_characteristics_expensive_incomplete
+        columns: [account_id, move_id]
+        where: "evaluation_after IS NULL OR candidate_evaluations IS NULL"
     columns:
       - name: move_id
         data_type: text
