@@ -20,7 +20,7 @@ class AssignGameSplitsStep(PipelineStep):
     """
 
     def __init__(self, *, split_version: str = DEFAULT_SPLIT_SALT) -> None:
-        super().__init__(name="AssignGameSplits")
+        super().__init__(name="AssignGameSplits", run_if_earlier_step_failed=True)
         self.split_version = split_version
 
     def run(self, db_client: DatabaseClient, context: PipelineContext) -> None:

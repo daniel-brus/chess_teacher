@@ -107,6 +107,7 @@ class PipelineStep(ABC):
         max_retries: int = 3,
         backoff_factor: float = 2.0,
         critical: bool = True,
+        run_if_earlier_step_failed: bool = False,
         no_retry_on: tuple[type[Exception], ...] = _DEFAULT_NO_RETRY_ON,
         logger: EnhancedLogger | None = None,
     ) -> None:
@@ -114,6 +115,7 @@ class PipelineStep(ABC):
         self.max_retries = max_retries
         self.backoff_factor = backoff_factor
         self.critical = critical
+        self.run_if_earlier_step_failed = run_if_earlier_step_failed
         self.no_retry_on = no_retry_on
         self.logger = logger or get_logger()
 
@@ -258,7 +260,10 @@ class Pipeline:
             )
             self._pre_run(started_at)
 
+            skip_until_flagged = False
             for step_index, step in enumerate(self.steps, start=1):
+                if skip_until_flagged and not step.run_if_earlier_step_failed:
+                    continue
                 self.context.progress_pop()  # pop the previous step result
                 self.context.progress_update(
                     f"Running step {step_index}/{total_steps}: {step.name}..."
@@ -270,13 +275,14 @@ class Pipeline:
                 if step_result.result == PipelineResult.FAILURE:
                     if step.critical:
                         self.logger.error(
-                            f"[Pipeline:{self.name}] Critical step '{step.name}' failed. Aborting."
+                            f"[Pipeline:{self.name}] Critical step '{step.name}' failed. "
+                            "Skipping later steps that do not run after failure."
                         )
                         # self.context.progress_error(
                         #     f"Pipeline stopped: critical step '{step.name}' failed."
                         # )
                         pipeline_result = PipelineResult.FAILURE
-                        break
+                        skip_until_flagged = True
                     else:
                         self.logger.warning(
                             f"[Pipeline:{self.name}] Non-critical step '{step.name}' "

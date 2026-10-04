@@ -25,3 +25,4 @@ def test_preprocessing_pipeline_assigns_splits_last() -> None:
     steps = kwargs["steps"]
     assert isinstance(steps[-2], EnrichExpensiveMoveCharacteristicsStep)
     assert isinstance(steps[-1], AssignGameSplitsStep)
+    assert steps[-1].run_if_earlier_step_failed is True
