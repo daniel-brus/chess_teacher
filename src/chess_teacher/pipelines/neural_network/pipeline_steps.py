@@ -32,6 +32,9 @@ logger = get_logger()
 MIN_NEW_MOVES_BASELINE = 1000
 # Cap each incremental train batch (oldest-first); avoids first-run OOM on huge backlog.
 MAX_MOVES_PER_BASELINE_BATCH = 10_000
+# Cap registry-val moves for scheme train/promote scoring (game_id ASC prefix).
+# Full-bucket val is for offline tools; nightly promote does not need ~100k+ moves.
+MAX_MOVES_PER_REGISTRY_VAL_EVAL = 10_000
 
 
 def _should_skip(context: PipelineContext) -> bool:

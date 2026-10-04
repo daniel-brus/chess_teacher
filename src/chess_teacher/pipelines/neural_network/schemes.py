@@ -34,6 +34,7 @@ from chess_teacher.pipelines.neural_network.models import (
 from chess_teacher.pipelines.neural_network.offline_eval import load_registry_val_datums
 from chess_teacher.pipelines.neural_network.pipeline_steps import (
     MAX_MOVES_PER_BASELINE_BATCH,
+    MAX_MOVES_PER_REGISTRY_VAL_EVAL,
     MIN_NEW_MOVES_BASELINE,
 )
 from chess_teacher.pipelines.neural_network.split_registry import SplitRegistry
@@ -293,7 +294,7 @@ class ModelTraining:
         return load_registry_val_datums(
             db_client,
             split_version=self.split_version,
-            full=True,
+            limit=MAX_MOVES_PER_REGISTRY_VAL_EVAL,
             extra_where=self._account_filter(db_client),
         )
 
