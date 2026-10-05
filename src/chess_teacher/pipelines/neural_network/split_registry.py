@@ -185,8 +185,10 @@ class SplitRegistry:
     ) -> BackfillResult:
         """Assign training-eligible games not yet in the registry.
 
-        When ``account_id`` is set, only that account's games are scanned
-        (used by the daily user pipeline). Platform-wide backfill omits it.
+        When ``account_id`` is set (daily user pipeline), load all eligible
+        ``game_id``s for that account in one query, then ``ensure_games`` in
+        chunks. Platform-wide repair (no ``account_id``) keeps OFFSET batches
+        so a huge catalog is not held in memory at once.
         """
         if batch_size < 1:
             raise ValueError(f"batch_size must be >= 1, got {batch_size}")
@@ -196,8 +198,59 @@ class SplitRegistry:
             Game.get_metadata(),
             MoveCharacteristics.get_metadata(),
         )
+        if account_id is not None:
+            return self._backfill_eligible_games_for_account(
+                account_id,
+                batch_size=batch_size,
+            )
+        return self._backfill_eligible_games_platform_wide(batch_size=batch_size)
 
+    def _backfill_eligible_games_for_account(
+        self,
+        account_id: str,
+        *,
+        batch_size: int,
+    ) -> BackfillResult:
+        """One-shot eligible-id list for one account, then chunked inserts."""
+        if not account_id:
+            raise ValueError("account_id is required")
         eligible = self._count_eligible_games(account_id=account_id)
+        game_ids = self._fetch_all_eligible_game_ids(account_id=account_id)
+        logger.info(
+            "Account split backfill loaded ids split_version=%s account_id=%s "
+            "eligible=%s ids=%s chunk=%s",
+            self.split_version,
+            account_id,
+            eligible,
+            len(game_ids),
+            batch_size,
+        )
+        newly_assigned = 0
+        already_assigned = 0
+        total = len(game_ids)
+        for offset in range(0, total, batch_size):
+            chunk = game_ids[offset : offset + batch_size]
+            existing = self.fetch_buckets(chunk)
+            already_assigned += len(existing)
+            newly_assigned += self.ensure_games(chunk)
+            logger.info(
+                "Backfill progress split_version=%s account_id=%s offset=%s/%s batch=%s",
+                self.split_version,
+                account_id,
+                offset + len(chunk),
+                total,
+                len(chunk),
+            )
+        return BackfillResult(
+            split_version=self.split_version,
+            eligible_games=eligible,
+            newly_assigned=newly_assigned,
+            already_assigned=already_assigned,
+        )
+
+    def _backfill_eligible_games_platform_wide(self, *, batch_size: int) -> BackfillResult:
+        """OFFSET-batched scan for platform-wide repair tools."""
+        eligible = self._count_eligible_games(account_id=None)
         newly_assigned = 0
         already_assigned = 0
         offset = 0
@@ -205,7 +258,7 @@ class SplitRegistry:
             game_ids = self._fetch_eligible_game_ids(
                 limit=batch_size,
                 offset=offset,
-                account_id=account_id,
+                account_id=None,
             )
             if not game_ids:
                 break
@@ -216,7 +269,7 @@ class SplitRegistry:
             logger.info(
                 "Backfill progress split_version=%s account_id=%s offset=%s/%s batch=%s",
                 self.split_version,
-                account_id,
+                None,
                 offset,
                 eligible,
                 len(game_ids),
@@ -232,9 +285,13 @@ class SplitRegistry:
         self,
         account_id: str,
         *,
-        batch_size: int = 500,
+        batch_size: int = 2000,
     ) -> BackfillResult:
-        """Assign eligible games for one account (idempotent)."""
+        """Assign eligible games for one account (idempotent).
+
+        Default chunk size is for ``ensure_games`` inserts only; eligible ids
+        are loaded once per account (not OFFSET-scanned).
+        """
         if not account_id:
             raise ValueError("account_id is required")
         return self.backfill_eligible_games(batch_size=batch_size, account_id=account_id)
@@ -374,6 +431,19 @@ class SplitRegistry:
             "LIMIT :limit OFFSET :offset"
         )
         params = {**params, "limit": limit, "offset": offset}
+        rows = self.db_client.engine.execute_parameterized_query(
+            sql,
+            params,
+            session_settings=_MOVES_QUERY_SESSION_SETTINGS,
+        )
+        return [str(row["game_id"]) for row in rows]
+
+    def _fetch_all_eligible_game_ids(self, *, account_id: str) -> list[str]:
+        """All eligible ``game_id``s for one account (no OFFSET). Account-scoped only."""
+        if not account_id:
+            raise ValueError("account_id is required for one-shot eligible fetch")
+        from_sql, params = self._eligible_from_sql(account_id=account_id)
+        sql = f"SELECT DISTINCT m.game_id AS game_id{from_sql} ORDER BY m.game_id"
         rows = self.db_client.engine.execute_parameterized_query(
             sql,
             params,

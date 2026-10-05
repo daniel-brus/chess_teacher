@@ -182,6 +182,81 @@ def test_ensure_eligible_games_for_account_requires_id() -> None:
         registry.ensure_eligible_games_for_account("")
 
 
+def test_account_backfill_loads_ids_once_then_chunks_ensure() -> None:
+    db = MagicMock()
+    registry = SplitRegistry(db, split_version=DEFAULT_SPLIT_SALT)
+    game_ids = [f"g{i}" for i in range(5)]
+
+    with (
+        patch.object(SplitRegistry, "_count_eligible_games", return_value=5) as count,
+        patch.object(
+            SplitRegistry,
+            "_fetch_all_eligible_game_ids",
+            return_value=game_ids,
+        ) as fetch_all,
+        patch.object(SplitRegistry, "_fetch_eligible_game_ids") as fetch_page,
+        patch.object(SplitRegistry, "fetch_buckets", return_value={}) as buckets,
+        patch.object(SplitRegistry, "ensure_games", side_effect=[2, 2, 1]) as ensure,
+    ):
+        result = registry.ensure_eligible_games_for_account("acct-1", batch_size=2)
+
+    count.assert_called_once_with(account_id="acct-1")
+    fetch_all.assert_called_once_with(account_id="acct-1")
+    fetch_page.assert_not_called()
+    assert buckets.call_count == 3
+    assert ensure.call_args_list[0].args[0] == ["g0", "g1"]
+    assert ensure.call_args_list[1].args[0] == ["g2", "g3"]
+    assert ensure.call_args_list[2].args[0] == ["g4"]
+    assert result.eligible_games == 5
+    assert result.newly_assigned == 5
+    assert result.already_assigned == 0
+
+
+def test_fetch_all_eligible_game_ids_requires_account() -> None:
+    db = MagicMock()
+    registry = SplitRegistry(db, split_version=DEFAULT_SPLIT_SALT)
+    with pytest.raises(ValueError, match="account_id is required"):
+        registry._fetch_all_eligible_game_ids(account_id="")
+
+
+def test_fetch_all_eligible_game_ids_has_no_offset() -> None:
+    db = MagicMock()
+    db.engine.execute_parameterized_query.return_value = [{"game_id": "g1"}]
+    registry = SplitRegistry(db, split_version=DEFAULT_SPLIT_SALT)
+    ids = registry._fetch_all_eligible_game_ids(account_id="acct-1")
+    assert ids == ["g1"]
+    sql = db.engine.execute_parameterized_query.call_args.args[0]
+    params = db.engine.execute_parameterized_query.call_args.args[1]
+    assert "OFFSET" not in sql
+    assert "LIMIT" not in sql
+    assert "ORDER BY m.game_id" in sql
+    assert params["account_id"] == "acct-1"
+
+
+def test_platform_backfill_still_uses_offset_pages() -> None:
+    db = MagicMock()
+    registry = SplitRegistry(db, split_version=DEFAULT_SPLIT_SALT)
+
+    with (
+        patch.object(SplitRegistry, "_count_eligible_games", return_value=3),
+        patch.object(
+            SplitRegistry,
+            "_fetch_eligible_game_ids",
+            side_effect=[["g1", "g2"], ["g3"]],
+        ) as fetch_page,
+        patch.object(SplitRegistry, "_fetch_all_eligible_game_ids") as fetch_all,
+        patch.object(SplitRegistry, "fetch_buckets", return_value={}),
+        patch.object(SplitRegistry, "ensure_games", return_value=1),
+    ):
+        result = registry.backfill_eligible_games(batch_size=2)
+
+    fetch_all.assert_not_called()
+    assert fetch_page.call_count == 2
+    assert fetch_page.call_args_list[0].kwargs["offset"] == 0
+    assert fetch_page.call_args_list[1].kwargs["offset"] == 2
+    assert result.eligible_games == 3
+
+
 def test_mark_processed_updates_train_null_flag_only() -> None:
     db = MagicMock()
     db.update_where.return_value = 2
