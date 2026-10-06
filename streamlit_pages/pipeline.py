@@ -51,7 +51,7 @@ if not accounts:
     st.info("There are no platform accounts linked.")
 
 st.caption(
-    "Run ingestion, preprocessing, then game-split assignment for every linked account, matching the scheduled worker job."
+    "Run ingestion and preprocessing for every linked account, then train this user's model, matching the scheduled worker job."
 )
 
 with st.form("pipeline_form"):

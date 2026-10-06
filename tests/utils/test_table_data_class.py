@@ -10,6 +10,7 @@ from chess_teacher.pipelines.ingestion.raw_games import RawGame
 from chess_teacher.pipelines.neural_network.models import (
     BaselineModel,
     GameSplitAssignment,
+    PersonalModel,
     TrainingState,
 )
 from chess_teacher.pipelines.preprocessing.games import Game
@@ -34,6 +35,7 @@ CLASSES_TO_TEST: list[type[TableDataClass]] = [
     Move,
     MoveCharacteristics,
     BaselineModel,
+    PersonalModel,
     TrainingState,
     GameSplitAssignment,
 ]

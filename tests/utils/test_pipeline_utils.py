@@ -114,6 +114,44 @@ class NoopPostRunPipeline(Pipeline):
         return None
 
 
+class _FailingStep(PipelineStep):
+    def __init__(self) -> None:
+        super().__init__("failing", max_retries=0)
+
+    def run(self, db_client: FakeDatabaseClient, context: PipelineContext) -> None:
+        raise ValueError("boom")
+
+
+class _RecordingStep(PipelineStep):
+    def __init__(self, name: str, *, run_if_earlier_step_failed: bool = False) -> None:
+        super().__init__(
+            name,
+            max_retries=0,
+            run_if_earlier_step_failed=run_if_earlier_step_failed,
+        )
+        self.ran = False
+
+    def run(self, db_client: FakeDatabaseClient, context: PipelineContext) -> None:
+        self.ran = True
+
+
+def test_step_flagged_to_run_after_failure_still_runs() -> None:
+    skipped = _RecordingStep("skipped")
+    assigned = _RecordingStep("assigned", run_if_earlier_step_failed=True)
+    pipeline = NoopPostRunPipeline(
+        "after_failure",
+        [_FailingStep(), skipped, assigned],
+        user_id="u1",
+        account_id="a1",
+        db_client=FakeDatabaseClient(),  # type: ignore[arg-type]
+    )
+    result = pipeline.run()
+    assert result.result.value == "failure"
+    assert [step.name for step in result.step_results] == ["failing", "assigned"]
+    assert skipped.ran is False
+    assert assigned.ran is True
+
+
 class TestPipelineLock:
     def test_concurrent_pipeline_with_same_name_and_user_is_blocked_by_active_lock(
         self,

@@ -43,6 +43,7 @@ ALLOWED_SCRIPTS = frozenset({
     "ops/backfill_candidate_evals.py",
     "ops/baseline_reset_training.py",
     "ops/baseline_train_until_caught_up.py",
+    "ops/mlflow_db_upgrade.py",
 })
 
 _SCRIPT_JOB_TEMPLATE = REPO_ROOT / "orchestration" / "k8s" / "job" / "script.yaml"

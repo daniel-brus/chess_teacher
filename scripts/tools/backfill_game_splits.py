@@ -3,9 +3,8 @@
 Assigns every training-eligible ``game_id`` to train/val/test for a ``split_version``
 (salt) and stores rows in ``ml.game_split_assignments``. Idempotent.
 
-Daily catch-up: ``AssignGameSplitsStep`` in the per-account user pipeline
-(``PipelineRunner`` after preprocess). Use this script for empty DBs or
-platform-wide repair.
+Daily catch-up: ``AssignGameSplitsStep`` at the end of preprocessing.
+Use this script for empty DBs or platform-wide repair.
 
 Run (dev)::
 

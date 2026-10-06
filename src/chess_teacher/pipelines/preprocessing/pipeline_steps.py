@@ -165,6 +165,30 @@ class EnrichCheapMoveCharacteristicsStep(TransformStep):
             batch_size=_PREPROCESS_MOVE_BATCH_SIZE,
         )
 
+    def _load_records(
+        self,
+        db_client: DatabaseClient,
+        context: PipelineContext,
+        *,
+        after_key: str | None = None,
+    ) -> pl.DataFrame:
+        """Skip the NOT EXISTS anti-join when account move/mc counts already match."""
+        empty = pl.DataFrame({column: [] for column in self._SOURCE_COLUMNS})
+        if self.on is not None and after_key is None and context.account_id is not None:
+            moves_meta = Move.get_metadata()
+            mc_meta = MoveCharacteristics.get_metadata()
+            if db_client.table_exists(moves_meta) and db_client.table_exists(mc_meta):
+                scope = generate_ident_is_literal("account_id", context.account_id)
+                n_moves = db_client.get_row_count(moves_meta, where=scope)
+                n_mc = db_client.get_row_count(mc_meta, where=scope)
+                if n_moves == 0 or n_moves == n_mc:
+                    self.logger.info(
+                        f"[{self.name}] Fast-path skip: moves={n_moves} mc={n_mc} "
+                        "(no missing cheap rows)."
+                    )
+                    return empty
+        return super()._load_records(db_client, context, after_key=after_key)
+
 
 class EnrichExpensiveMoveCharacteristicsStep(TransformStep):
     """Fill Stockfish evaluation + candidate_evaluations on incomplete mc rows.
@@ -219,32 +243,52 @@ class EnrichExpensiveMoveCharacteristicsStep(TransformStep):
         mc_meta = MoveCharacteristics.get_metadata()
         moves_sql = moves_meta.qualified_name_sql()
         mc_sql = mc_meta.qualified_name_sql()
+        empty = pl.DataFrame({column: [] for column in self._LOAD_COLUMNS})
 
         if not db_client.table_exists(moves_meta) or not db_client.table_exists(mc_meta):
             self.logger.warning(f"[{self.name}] Source tables missing; using empty frame.")
-            return pl.DataFrame({column: [] for column in self._LOAD_COLUMNS})
+            return empty
+
+        if context.account_id is None:
+            if context.user_id is not None:
+                raise PipelineError(
+                    f"[{self.name}] Cannot scope by user_id alone; account_id is required."
+                )
+        else:
+            account_scope = generate_ident_is_literal("account_id", context.account_id)
+            # Empty incomplete probe (partial index) before ordered join+limit.
+            if (
+                self._mode in (PipelineMode.INCREMENTAL, PipelineMode.RETRY)
+                and after_key is None
+                and not db_client.exists(
+                    mc_meta,
+                    f"{account_scope} AND {MoveCharacteristics.sql_expensive_incomplete('')}",
+                )
+            ):
+                self.logger.info(
+                    f"[{self.name}] Fast-path skip: no incomplete expensive rows "
+                    f"for account_id={context.account_id}."
+                )
+                return empty
 
         context.progress_update(f"Reading characteristics rows from {mc_sql}...")
         select_cols = ", ".join(f"m.{quote_ident(col)}" for col in self._LOAD_COLUMNS)
+        # Drive from mc so incomplete filters / partial index apply before the join.
         sql = (
             f"SELECT {select_cols}\n"
-            f"FROM {moves_sql} AS m\n"
-            f"INNER JOIN {mc_sql} AS mc ON mc.{quote_ident('move_id')} = m.{quote_ident('move_id')}"
+            f"FROM {mc_sql} AS mc\n"
+            f"INNER JOIN {moves_sql} AS m ON m.{quote_ident('move_id')} = mc.{quote_ident('move_id')}"
         )
         clauses: list[str] = []
         if context.account_id is not None:
-            clauses.append(f"m.{generate_ident_is_literal('account_id', context.account_id)}")
-        elif context.user_id is not None:
-            raise PipelineError(
-                f"[{self.name}] Cannot scope by user_id alone; account_id is required."
-            )
+            clauses.append(f"mc.{generate_ident_is_literal('account_id', context.account_id)}")
         if self._mode in (PipelineMode.INCREMENTAL, PipelineMode.RETRY):
             clauses.append(MoveCharacteristics.sql_expensive_incomplete("mc"))
         if after_key is not None:
-            clauses.append(f"m.{quote_ident('move_id')} > {quote_literal(after_key)}")
+            clauses.append(f"mc.{quote_ident('move_id')} > {quote_literal(after_key)}")
         if clauses:
             sql += "\nWHERE " + " AND ".join(f"({c})" for c in clauses)
-        sql += f"\nORDER BY m.{quote_ident('move_id')}"
+        sql += f"\nORDER BY mc.{quote_ident('move_id')}"
         if self.batch_size is not None:
             sql += f"\nLIMIT {int(self.batch_size)}"
         sql += ";"
@@ -255,5 +299,5 @@ class EnrichExpensiveMoveCharacteristicsStep(TransformStep):
             f"(mode={self._mode.value}, after_key={after_key!r})."
         )
         if not rows:
-            return pl.DataFrame({column: [] for column in self._LOAD_COLUMNS})
+            return empty
         return pl.DataFrame(rows)

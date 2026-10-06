@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
+import pytest
 
 from chess_teacher.pipelines.neural_network.candidate_eval import (
     CANDIDATE_MOVE_FEAT_KEYS,
@@ -10,12 +13,14 @@ from chess_teacher.pipelines.neural_network.candidate_eval import (
 )
 from chess_teacher.pipelines.neural_network.eval_metrics import (
     EvalMetrics,
+    PackedCandidateEval,
     compute_candidate_style_metrics,
     details_from_packed,
     format_error_shortlist,
     format_eval_delta,
     format_phase_eval_rows,
     phase_from_features,
+    score_models_on_datums,
     slice_datums_by_phase,
 )
 
@@ -39,6 +44,75 @@ def _synthetic_batch(
         feats[i, labels[i], delta_i] = np.tanh(delta / 5.0)
     plies = [10] * n
     return logits, mask, labels, feats, plies
+
+
+class _SequencedLogitModel:
+    """Return successive logit rows in call order (one cursor per model)."""
+
+    def __init__(self, logits: np.ndarray) -> None:
+        self.logits = logits
+        self.pos = 0
+        self.inputs = [type("I", (), {"name": "state"})(), type("I", (), {"name": "move_feats"})()]
+
+    def predict(self, feed: dict[str, Any], verbose: int = 0) -> np.ndarray:
+        del verbose
+        n = int(np.asarray(feed["move_feats"]).shape[0])
+        out = self.logits[self.pos : self.pos + n]
+        self.pos += n
+        return out
+
+
+def test_score_models_chunked_matches_full_pack(monkeypatch: pytest.MonkeyPatch) -> None:
+    logits, mask, labels, feats, plies = _synthetic_batch(n=5, max_candidates=8)
+    kept = [type("D", (), {"ply": ply, "game_id": f"g{i}"})() for i, ply in enumerate(plies)]
+
+    def fake_pack(
+        datums: list[object],
+        *,
+        max_candidates: int = 8,
+    ) -> PackedCandidateEval:
+        start = int(getattr(datums[0], "game_id")[1:])
+        end = start + len(datums)
+        return PackedCandidateEval(
+            kept_datums=kept[start:end],  # type: ignore[arg-type]
+            feats=feats[start:end],
+            mask=mask[start:end],
+            labels=labels[start:end],
+            state=np.zeros((end - start, 1), dtype=np.float32),
+            board=np.zeros((end - start, 1), dtype=np.float32),
+            n_input=len(datums),
+            max_candidates=max_candidates,
+        )
+
+    monkeypatch.setattr(
+        "chess_teacher.pipelines.neural_network.eval_metrics.pack_datums_for_eval",
+        fake_pack,
+    )
+    model = _SequencedLogitModel(logits)
+    full = compute_candidate_style_metrics(
+        logits=logits,
+        mask=mask,
+        labels=labels,
+        move_feats=feats,
+        plies=plies,
+        n_input=5,
+        max_candidates=8,
+    )
+    datums = [type("D", (), {"game_id": f"g{i}"})() for i in range(5)]
+    chunked = score_models_on_datums(
+        {"model": model},
+        datums,  # type: ignore[arg-type]
+        chunk_size=2,
+        max_candidates=8,
+    )["model"]
+    assert chunked.top1_overall == full.top1_overall
+    assert chunked.top3_overall == full.top3_overall
+    assert chunked.top1_sf_agree == full.top1_sf_agree
+    assert chunked.top1_sf_disagree == full.top1_sf_disagree
+    assert chunked.n_eval == full.n_eval
+    assert chunked.n_sf_agree == full.n_sf_agree
+    assert chunked.n_sf_disagree == full.n_sf_disagree
+    assert chunked.top1_overall_weighted == pytest.approx(full.top1_overall_weighted)
 
 
 def test_perfect_predictions_top1_is_one() -> None:

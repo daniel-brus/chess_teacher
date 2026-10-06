@@ -1,6 +1,6 @@
 # ML training roadmap — baseline + personalized bots
 
-**Status:** Phase 1 + 1b on `develop`. Game-split **assignment** runs in the daily user `PipelineRunner` after preprocess (not train/promote). Phase 2a **tools + `DEFAULT_EPOCHS=20`**. Phase 2b **tools + first 10k experiments** (keep `128/64`; feat v4 skipped). Phase 2c **closed** (hybrid encoder + `sf_mix`@α=0 loss default; see `.agents/docs/ml-phase2c-board-encoder.md`). Production train/promote unchanged until Phase 4. **Next: Phase 3** (new branch).
+**Status:** Phases 1–5 play selection are on `develop`. Phase 4 wires one baseline train-and-promote into the nightly job and one personal train-and-promote into the daily user pipeline. `AssignGameSplitsStep` is the last step of preprocessing. E16 and E18 are still open.
 
 **Audience:** humans and coding agents working on `src/chess_teacher/pipelines/neural_network/`
 
@@ -85,7 +85,7 @@ This document captures the agreed phased plan for:
 
 During **Phases 1–3**, implement **library code** under `pipelines/neural_network/` plus **thin scripts** under `scripts/tools/` and `scripts/ops/`. Do **not** wire new logic into `run_baseline_training_pipeline()` / `run_baseline_promotion_pipeline()` until Phase 4.
 
-**Interim (Phases 1–3):** `AssignGameSplitsStep` runs from the per-account user `PipelineRunner` via `run_assign_game_splits_pipeline()` so `ml.game_split_assignments` stays current. That is assignment only — not train exclusion or promotion eval. **Phase 4:** drop the standalone split “pipeline”; fold assignment into preprocessing (or a direct `split_registry` call). See [Pipeline consolidation](#pipeline-consolidation-phase-4).
+**Split assignment:** `AssignGameSplitsStep` is the last step of `run_preprocessing_pipeline()`. There is no standalone split pipeline. See [Pipeline consolidation](#pipeline-consolidation-phase-4).
 
 ---
 
@@ -213,7 +213,7 @@ Notebook may call pipeline functions **or** offline library helpers — prefer *
 | Develop notebook | `training_develop.ipynb` — interactive baseline train/inspect (pipeline today; extend for split eval) |
 | Personalization | Not implemented; `fetch_for_account()` and `training_state.scope = user:{id}` exist as scaffolding |
 | Style weighting | `ply_weights.py` — ply reweight + SF-disagree boost (default max 2×) |
-| Split registry | User `PipelineRunner` assigns after preprocess (`AssignGameSplitsStep`). Train/promote still ignore it until Phase 4 |
+| Split registry | `AssignGameSplitsStep` is the last step of preprocessing |
 
 Key files:
 
@@ -223,7 +223,7 @@ Key files:
 - `src/chess_teacher/pipelines/neural_network/ply_weights.py` — sample weights
 - `src/chess_teacher/pipelines/neural_network/main.py` — production entrypoints
 - `src/chess_teacher/pipelines/neural_network/offline_eval.py` — shared offline split/URI helpers
-- `src/chess_teacher/pipelines/neural_network/split_steps.py` — `AssignGameSplitsStep` (user pipeline)
+- `src/chess_teacher/pipelines/neural_network/split_steps.py` — `AssignGameSplitsStep` (last preprocessing step)
 
 ---
 
@@ -342,7 +342,7 @@ Log per-split: game counts, move counts, SF-disagree fraction.
 | Schema | `metadata.yml` → `ml.game_split_assignments` | PK `(split_version, game_id)`; columns `bucket`, `assigned_at` |
 | Registry module | `split_registry.py` | `get_bucket(game_id)`, `ensure_assigned(game_id)`, bulk backfill, SQL exclude clause for val/test |
 | Backfill script | `scripts/tools/backfill_game_splits.py` | One-shot assign all known games; idempotent. Daily catch-up is the user-pipeline step |
-| User pipeline step | `AssignGameSplitsStep` via `run_assign_game_splits_pipeline` | After preprocess in `PipelineRunner`; account-scoped; ≤1 day lag for new games |
+| User pipeline step | `AssignGameSplitsStep` last in `run_preprocessing_pipeline` | Account-scoped; ≤1 day lag for new games |
 | Wire offline tools | `offline_baseline_train_eval.py`, later epoch sweep | Filter datums via registry (or assign-on-read) instead of only in-memory split |
 | Tests | `test_split_registry.py` | Deterministic assign; idempotent backfill; exclude filter |
 
@@ -361,7 +361,7 @@ game_split_assignments:
 
 **Assign rule:** same as `game_split_bucket()` — registry is the persistence layer, not a new policy.
 
-**Production assignment (user pipeline):** after cheap + expensive move-characteristics enrichment, `PipelineRunner` runs `game_split_assignment` for that account. New eligible games enter the registry on the next user-pipeline run (cron / Streamlit; typically ≤1 day). `--full-val` is the official frozen val set plus that lag. One-shot `backfill_game_splits.py` remains for empty environments.
+**Production assignment (user pipeline):** after cheap + expensive move-characteristics enrichment, preprocessing runs `AssignGameSplitsStep` for that account. New eligible games enter the registry on the next user-pipeline run (cron / Streamlit; typically ≤1 day). `--full-val` is the official frozen val set plus that lag. One-shot `backfill_game_splits.py` remains for empty environments.
 
 **Phase 1b does not wire production training or promotion** — no `fetch_since` exclusion, no registry eval in `baseline_promotion`. Phase 4 adds those.
 
@@ -552,7 +552,7 @@ When wiring neural-network work into orchestration, **collapse today’s fragmen
 
 | Today (interim) | Phase 4 target |
 |-----------------|----------------|
-| `run_assign_game_splits_pipeline()` — full `Pipeline` with one step | **Not a pipeline.** Call `SplitRegistry.ensure_games()` / `AssignGameSplitsStep` logic inline at the **end of preprocessing** (per account), or as the last step inside `run_preprocessing_pipeline()` — same as any other small transform |
+| `run_assign_game_splits_pipeline()` was a one-step pipeline | **Done.** `AssignGameSplitsStep` is the last step of `run_preprocessing_pipeline()` |
 | `run_baseline_training_pipeline()` | Part of **one** platform baseline orchestration surface (see below) |
 | `run_baseline_promotion_pipeline()` | Same — not a third scheduled “pipeline” unless ops genuinely need independent cadence |
 | `baseline_train_until_caught_up` (ops job) | Same train/promote library; optional loop wrapper in `scripts/ops/` or a single orchestrated job |
@@ -596,12 +596,20 @@ Test set: manual / release-tag evaluation only — never promotion or epoch tuni
 
 ---
 
-## Phase 5 — Product polish (later)
+## Phase 5 — Product polish
 
-- Re-train user bot when enough new **registry-train** games for that account are unprocessed
+**Play selection (this phase):**
+
+- The Play page **Personal bot** category lists this user's promoted and archived personal models (candidate-style weights only). Candidates stay off the page.
+- When that user has no promoted personal model, the same category offers the current platform production baseline and says so. That is the fallback, not a second training path.
+- Personal and baseline opponents share the temperature slider, the neural loading status, and the candidate panel.
+- The nightly job may run several baseline train-and-promote rounds. `BASELINE_NIGHTLY_ROUNDS` defaults to **1** (also set on the nightly CronJob). Round 1 always runs. A later round runs only while unprocessed registry-train moves stay at or above the minimum. A failed round stops the loop.
+
+**Still later:**
+
 - Inference blend by game count: `(1-alpha)·baseline + alpha·user`
-- UI: personalized vs baseline fallback
 - “Recent opening” messaging when recency + opening **weights** apply (still registry splits)
+- E16 (no val/test leakage in orchestrated batches) and E18 (platform catch-up matches the offline sibling round by round)
 
 ---
 
@@ -629,9 +637,9 @@ Test set: manual / release-tag evaluation only — never promotion or epoch tuni
 | 7b | `offline_user_promotion.py` + `offline_user_catch_up.py` (registry-train queue) | **ops** | No | |
 | 7c | Notebook: user finetune section | notebook | No | |
 | 8 | Promotion + train exclusion via registry | entrypoints | **Yes** | |
-| 8b | Consolidate NN pipelines; fold split assign into preprocess | entrypoints + runner | **Yes** | |
-| 9 | User finetune pipeline + inference | entrypoints | **Yes** | |
-| 10 | Orchestration parity check (E16–E18) | entrypoints + ops | **Yes** | |
+| 8b | Consolidate NN pipelines; fold split assign into preprocess | entrypoints + runner | **Yes** | split assign folded into preprocessing |
+| 9 | User finetune pipeline + play selection (personal, else platform baseline) | entrypoints + play | **Yes** | play selection in progress; blend later |
+| 10 | Orchestration parity check (E16–E18) | entrypoints + ops | **Yes** | open |
 
 ---
 
@@ -659,9 +667,9 @@ When asked to implement part of this roadmap:
 2. **Phase 2a** — epoch sweep + promotion sibling + `DEFAULT_EPOCHS=20` (justified pick) ✅
 3. **Phase 2b** — tools + 10k experiments ✅ (keep 128/64; feat v4 skipped)
 4. **Phase 2c** — board encoder + training signal ✅ (hybrid preferred; default loss `sf_mix` α=0; sandbox cleanup later). Detail: `.agents/docs/ml-phase2c-board-encoder.md`
-5. **Phase 3** — user tools + user ops siblings + notebook ← **you are here** (`feature/ml-phase3-user-finetune`). Kickoff: `.agents/docs/ml-phase3-user-finetune.md`
-6. **Phase 4** — merge into entrypoints; **consolidate** NN pipelines (≤2); fold split assign into preprocess; **orchestrated** train / promote / catch-up
-7. **Phase 5** — product polish
+5. **Phase 3** — user tools + user ops siblings + notebook ✅. Kickoff: `.agents/docs/ml-phase3-user-finetune.md`
+6. **Phase 4** — nightly baseline train/promote and daily personal train/promote are on `develop`. Split assignment is the last preprocessing step. E16 and E18 are open.
+7. **Phase 5** — play selection: personal model, or the platform baseline as a labeled fallback. Nightly baseline round budget defaults to 1. Blend and recent-opening copy stay later. ← **you are here**
 
 Each phase should close the **experimental questions** (E1–E18) listed above for that scope.
 
@@ -669,4 +677,4 @@ Each phase should close the **experimental questions** (E1–E18) listed above f
 
 ## Related conversation
 
-Plan derived from architecture review session (baseline bot maturity, personalization, recency, ops siblings, `training_develop.ipynb`). Production **train/promote** stay unchanged until Phase 4. Game-split **assignment** runs in the daily user pipeline today (interim); Phase 4 folds it into preprocessing and consolidates NN orchestration.
+Plan derived from architecture review session (baseline bot maturity, personalization, recency, ops siblings, `training_develop.ipynb`). Production **train/promote** stay unchanged until Phase 4. Game-split assignment is the last step of preprocessing.

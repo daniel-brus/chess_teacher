@@ -5,7 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from chess_teacher.pipelines.ingestion.main import run_ingestion_pipeline
 from chess_teacher.pipelines.modes import PipelineMode
-from chess_teacher.pipelines.neural_network.main import run_assign_game_splits_pipeline
+from chess_teacher.pipelines.neural_network.main import run_personal_training_pipeline
 from chess_teacher.pipelines.preprocessing.main import run_preprocessing_pipeline
 from chess_teacher.platform.account import Account
 from chess_teacher.platform.user import User
@@ -42,7 +42,7 @@ def resolve_max_account_workers(
 
 
 class PipelineRunner:
-    """Top-level orchestrator: ingestion → preprocessing → game-split assignment per account."""
+    """Per account: ingestion, then preprocessing. Then one user training run."""
 
     def __init__(
         self,
@@ -66,12 +66,13 @@ class PipelineRunner:
             return []
 
         if self.progress_window is not None:
-            return self._run_accounts_sequential(accounts)
-
-        if len(accounts) == 1:
-            return self._run_account(accounts[0])
-
-        return self._run_accounts_parallel(accounts)
+            results = self._run_accounts_sequential(accounts)
+        elif len(accounts) == 1:
+            results = self._run_account(accounts[0])
+        else:
+            results = self._run_accounts_parallel(accounts)
+        results.append(self._run_user_training())
+        return results
 
     def _run_account(self, account: Account) -> list[PipelineRunResult]:
         account_started = snapshot_host_pressure()
@@ -111,33 +112,13 @@ class PipelineRunner:
             mode=self.mode,
             progress_window=self.progress_window,
         )
+        ended = snapshot_host_pressure()
         logger.info(
             "Finished preprocessing for user=%s account=%s with result=%s duration_s=%.2f.",
             self.user.user_id,
             account.account_id,
             preprocessing_result.result.value,
             time.monotonic() - preprocessing_t0,
-        )
-
-        logger.info(
-            "Starting game-split assignment for user=%s account=%s (%s).",
-            self.user.user_id,
-            account.account_id,
-            account.format_label(),
-        )
-        split_t0 = time.monotonic()
-        split_result = run_assign_game_splits_pipeline(
-            self.user.user_id,
-            account,
-            progress_window=self.progress_window,
-        )
-        ended = snapshot_host_pressure()
-        logger.info(
-            "Finished game-split assignment for user=%s account=%s with result=%s duration_s=%.2f.",
-            self.user.user_id,
-            account.account_id,
-            split_result.result.value,
-            time.monotonic() - split_t0,
         )
         logger.info(
             "Finished account pipeline user=%s account=%s duration_s=%.2f delta_rss_mb=%.1f %s",
@@ -147,8 +128,24 @@ class PipelineRunner:
             ended.rss_mb - account_started.rss_mb,
             ended.format_fields(),
         )
-        # Follow-up: run_user_finetune_pipeline(self.user.user_id) after baseline exists.
-        return [ingestion_result, preprocessing_result, split_result]
+        return [ingestion_result, preprocessing_result]
+
+    def _run_user_training(self) -> PipelineRunResult:
+        """One model for this user, across every linked account."""
+        logger.info("Starting user model training for user=%s.", self.user.user_id)
+        started = time.monotonic()
+        result = run_personal_training_pipeline(
+            self.user.user_id,
+            promote=True,
+            progress_window=self.progress_window,
+        )
+        logger.info(
+            "Finished user model training for user=%s result=%s duration_s=%.2f.",
+            self.user.user_id,
+            result.result.value,
+            time.monotonic() - started,
+        )
+        return result
 
     def _run_accounts_sequential(self, accounts: list[Account]) -> list[PipelineRunResult]:
         results: list[PipelineRunResult] = []
@@ -182,7 +179,7 @@ def run_pipeline(
     mode: PipelineMode = PipelineMode.INCREMENTAL,
     progress_window: ProgressWindow | None = None,
 ) -> list[PipelineRunResult]:
-    """Run ingestion, preprocessing, then game-split assignment for every linked account."""
+    """Run ingestion and preprocessing per account, then user training."""
     return PipelineRunner(
         user,
         db_client,

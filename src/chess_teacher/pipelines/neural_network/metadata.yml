@@ -10,6 +10,8 @@ tables:
         columns: [status]
       - name: idx_baseline_models_version
         columns: [version]
+      - name: idx_baseline_models_parent_baseline
+        columns: [is_parent_baseline]
     columns:
       - name: id
         data_type: text
@@ -32,6 +34,11 @@ tables:
         nullable: false
         default: "candidate"
         comment: candidate | production | archived
+      - name: is_parent_baseline
+        data_type: boolean
+        nullable: false
+        default: false
+        comment: True only for the platform model that personal runs warm-start from after a parent reset. Independent of production status.
       - name: parent_version
         data_type: text
         nullable: true
@@ -48,6 +55,66 @@ tables:
         data_type: text
         nullable: true
         comment: JSON metrics blob (held-out eval later)
+      - name: git_commit_hash
+        data_type: text
+        nullable: true
+        comment: Git commit at train time if available
+
+  personal_models:
+    schema: ml
+    table: personal_models
+    comment: Per-user finetune candidates and the model currently served for that user
+    primary_key:
+      - id
+    indexes:
+      - name: idx_personal_models_user_status
+        columns: [user_id, status]
+    columns:
+      - name: id
+        data_type: text
+        nullable: false
+        comment: Hashed ID from user_id and version
+      - name: user_id
+        data_type: text
+        nullable: false
+        comment: User whose linked accounts' registry-train moves produced this row
+      - name: version
+        data_type: text
+        nullable: false
+        comment: Per-user monotonic version label (e.g. v3)
+      - name: mlflow_run_id
+        data_type: text
+        nullable: true
+        comment: MLflow run id for this training session
+      - name: model_uri
+        data_type: text
+        nullable: true
+        comment: Artifact URI / S3 key for model weights
+      - name: status
+        data_type: text
+        nullable: false
+        default: "candidate"
+        comment: candidate | production | archived
+      - name: parent_version
+        data_type: text
+        nullable: true
+        comment: Version key of the weights this run warm-started from
+      - name: parent_kind
+        data_type: text
+        nullable: true
+        comment: baseline or personal, matching the parent handle kind
+      - name: parent_baseline_version
+        data_type: text
+        nullable: true
+        comment: Platform baseline version this model descends from. Copied forward when a personal run warm-starts from another personal model.
+      - name: trained_at
+        data_type: timestamptz
+        nullable: false
+        comment: When this row was written
+      - name: eval_metrics
+        data_type: text
+        nullable: true
+        comment: JSON metrics blob (train metrics plus registry-val scores)
       - name: git_commit_hash
         data_type: text
         nullable: true

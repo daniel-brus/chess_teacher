@@ -29,6 +29,18 @@ def test_bot_thinking_message_baseline() -> None:
     assert MSG_BASELINE_THINKING in msg
 
 
+def test_bot_thinking_message_personal() -> None:
+    msg = bot_thinking_message("personal:user:v1", label="Personal v1")
+    assert "Personal v1" in msg
+    assert MSG_BASELINE_THINKING in msg
+
+
+def test_initial_bot_loading_message_personal() -> None:
+    from streamlit_utils.play_loading import MSG_PERSONAL_PREPARE
+
+    assert initial_bot_loading_message("personal:user:v1") == MSG_PERSONAL_PREPARE
+
+
 def test_bot_thinking_message_stockfish() -> None:
     assert bot_thinking_message(stockfish_preset_key(3), label="Stockfish") == (
         "Stockfish is thinking…"

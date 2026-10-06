@@ -1,4 +1,4 @@
-"""Neural-network pipelines (baseline train/promote; game-split assignment).
+"""Neural-network pipelines (baseline and personal train/promote).
 
 POC package — disposable until Phase 4 greenfield lands
 =======================================================

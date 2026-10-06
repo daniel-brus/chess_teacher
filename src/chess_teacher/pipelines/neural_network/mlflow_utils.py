@@ -20,6 +20,53 @@ from chess_teacher.utils.object_storage.factory import (
 logger = get_logger()
 
 
+def resolve_mlflow_tracking_uri(tracking_uri: str | None = None) -> str:
+    """Same resolution as ``MLflowTracker``: explicit → env → app Postgres URL."""
+    return tracking_uri or get_optional_env_variable("MLFLOW_TRACKING_URI") or postgres_url_string()
+
+
+def mlflow_tracking_schema_status(
+    tracking_uri: str | None = None,
+) -> tuple[str | None, str | None]:
+    """Return ``(current_revision, head_revision)`` for the tracking DB.
+
+    ``current_revision`` is ``None`` when the DB has no alembic version yet.
+    Uses MLflow's store helpers (same path as ``mlflow db upgrade``).
+    """
+    from alembic.script import ScriptDirectory
+    from mlflow.store.db.utils import _get_alembic_config, _get_schema_version
+    from sqlalchemy import create_engine
+
+    uri = resolve_mlflow_tracking_uri(tracking_uri)
+    engine = create_engine(uri)
+    try:
+        current = _get_schema_version(engine)
+    finally:
+        engine.dispose()
+    config = _get_alembic_config(uri)
+    head = ScriptDirectory.from_config(config).get_current_head()
+    return current, head
+
+
+def upgrade_mlflow_tracking_db(tracking_uri: str | None = None) -> tuple[str | None, str | None]:
+    """Apply pending MLflow tracking-schema migrations; return ``(before, after)``.
+
+    Idempotent when already at head. Prefer a DB backup before first production run.
+    """
+    from mlflow.store.db.utils import _get_schema_version, _upgrade_db
+    from sqlalchemy import create_engine
+
+    uri = resolve_mlflow_tracking_uri(tracking_uri)
+    engine = create_engine(uri)
+    try:
+        before = _get_schema_version(engine)
+        _upgrade_db(engine)
+        after = _get_schema_version(engine)
+    finally:
+        engine.dispose()
+    return before, after
+
+
 def _log_tracking_uri(uri: str) -> str:
     """Hide password in tracking URI logs (SQLAlchemy render when possible)."""
     try:
@@ -55,11 +102,7 @@ class MLflowTracker:
         tracking_uri: str | None = None,
         experiment_name: str | None = None,
     ) -> None:
-        self.tracking_uri = (
-            tracking_uri
-            or get_optional_env_variable("MLFLOW_TRACKING_URI")
-            or postgres_url_string()
-        )
+        self.tracking_uri = resolve_mlflow_tracking_uri(tracking_uri)
         self.experiment_name: str = (
             experiment_name
             or get_optional_env_variable("MLFLOW_EXPERIMENT_NAME")
