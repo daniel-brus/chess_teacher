@@ -925,7 +925,11 @@ class TrainingBatch:
     def candidate_style_targets(
         self,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[int]]:
-        """Stack candidate tensors; drop datums that cannot form a target.
+        """Pack candidate tensors into preallocated arrays; drop unusable datums.
+
+        Fills a single ``(n, max_candidates, feat_dim)`` buffer in-place instead of
+        collecting per-row arrays and ``np.stack``-ing (which peaks near 2x RAM).
+        Trimmed copies release the oversize buffer when some rows were dropped.
 
         Returns ``(feats, mask, labels, kept_indices)`` where kept_indices map
         into ``self.datums``.
@@ -942,19 +946,35 @@ class TrainingBatch:
             MOVE_FEAT_DIM,
             MAX_CANDIDATES,
         )
-        feats_list: list[np.ndarray] = []
-        mask_list: list[np.ndarray] = []
-        labels: list[int] = []
+        if n == 0:
+            return (
+                np.zeros((0, MAX_CANDIDATES, MOVE_FEAT_DIM), dtype=np.float32),
+                np.zeros((0, MAX_CANDIDATES), dtype=np.float32),
+                np.zeros((0,), dtype=np.int32),
+                [],
+            )
+        feats = np.empty((n, MAX_CANDIDATES, MOVE_FEAT_DIM), dtype=np.float32)
+        mask = np.empty((n, MAX_CANDIDATES), dtype=np.float32)
+        labels = np.empty((n,), dtype=np.int32)
         kept: list[int] = []
-        progress_every = max(1, n // 5) if n else 1
+        progress_every = max(1, n // 5)
         for i, d in enumerate(self.datums):
             packed = d.candidate_style_target()
             if packed is None:
+                done = i + 1
+                if done == n or (done % progress_every == 0):
+                    logger.info(
+                        "Candidate feature progress %s/%s kept=%s",
+                        done,
+                        n,
+                        len(kept),
+                    )
                 continue
             f, m, lab = packed
-            feats_list.append(f)
-            mask_list.append(m)
-            labels.append(lab)
+            k = len(kept)
+            feats[k] = f
+            mask[k] = m
+            labels[k] = lab
             kept.append(i)
             done = i + 1
             if done == n or (done % progress_every == 0):
@@ -964,19 +984,18 @@ class TrainingBatch:
                     n,
                     len(kept),
                 )
-        if not feats_list:
+        kept_n = len(kept)
+        if kept_n == 0:
             return (
                 np.zeros((0, MAX_CANDIDATES, MOVE_FEAT_DIM), dtype=np.float32),
                 np.zeros((0, MAX_CANDIDATES), dtype=np.float32),
                 np.zeros((0,), dtype=np.int32),
                 [],
             )
-        return (
-            np.stack(feats_list, axis=0),
-            np.stack(mask_list, axis=0),
-            np.asarray(labels, dtype=np.int32),
-            kept,
-        )
+        if kept_n == n:
+            return feats, mask, labels, kept
+        # Copy trim so the full-n buffers can be freed.
+        return feats[:kept_n].copy(), mask[:kept_n].copy(), labels[:kept_n].copy(), kept
 
     def legacy_matrix(
         self,

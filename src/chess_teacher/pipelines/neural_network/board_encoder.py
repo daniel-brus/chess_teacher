@@ -57,6 +57,7 @@ from chess_teacher.pipelines.neural_network.tf_runtime import ensure_tensorflow_
 from chess_teacher.pipelines.neural_network.train import (
     BaselineTrainer,
     candidate_style_custom_objects,
+    numpy_batches_to_tf_dataset,
 )
 from chess_teacher.utils.general_utils import get_current_datetime
 from chess_teacher.utils.logging import get_logger
@@ -497,27 +498,47 @@ class HybridBoardTrainer:
                 )
 
         fit_t0 = time.monotonic()
-        history = model.fit(
-            {"board": x_board, "state": x_state, "move_feats": feats},
-            y,
+        n_kept = len(kept_datums)
+        n_dropped = len(datums) - n_kept
+        state_dim = int(x_state.shape[1])
+        x_inputs = {"board": x_board, "state": x_state, "move_feats": feats}
+        dataset, n_ds, bs_used = numpy_batches_to_tf_dataset(
+            x_inputs=x_inputs,
+            y=y,
             sample_weight=sample_w,
+            batch_size=self.batch_size,
+        )
+        del x_board, x_state, feats, y, sample_w, x_inputs, mask, labels, kept_datums
+        import gc
+
+        gc.collect()
+        logger.info(
+            "Streaming hybrid Keras fit via tf.data n_samples=%s batch_size=%s epochs=%s %s",
+            n_ds,
+            bs_used,
+            self.epochs,
+            snapshot_host_pressure().format_fields(),
+        )
+        history = model.fit(
+            dataset,
             epochs=self.epochs,
-            batch_size=min(self.batch_size, len(kept_datums)),
             verbose=0,
             callbacks=[_EpochInfoCallback()],
         )
+        del dataset
+        gc.collect()
         metrics: dict[str, float] = {}
         for key, values in history.history.items():
             if values:
                 metrics[key] = float(values[-1])
-        metrics["n_samples"] = float(len(kept_datums))
-        metrics["n_dropped_missing_candidates"] = float(len(datums) - len(kept_datums))
+        metrics["n_samples"] = float(n_kept)
+        metrics["n_dropped_missing_candidates"] = float(n_dropped)
         metrics["max_candidates"] = float(self.max_candidates)
         metrics["move_feat_dim"] = float(self.move_feat_dim)
         metrics["move_feat_version"] = float(CANDIDATE_MOVE_FEAT_VERSION)
         metrics["board_tensor_version"] = float(BOARD_TENSOR_VERSION)
         metrics["board_channels"] = float(BOARD_TENSOR_CHANNELS)
-        metrics["state_dim"] = float(x_state.shape[1])
+        metrics["state_dim"] = float(state_dim)
         metrics["conv_filters"] = float(self.conv_filters)
         metrics["head_candidate_style"] = 1.0
         metrics["encoder_hybrid_board"] = 1.0
@@ -539,7 +560,7 @@ class HybridBoardTrainer:
             "Hybrid Keras fit finished duration_s=%.2f delta_rss_mb=%.1f n_samples=%s %s",
             time.monotonic() - fit_t0,
             fit_ended.rss_mb - fit_started.rss_mb,
-            len(kept_datums),
+            n_kept,
             fit_ended.format_fields(),
         )
         return model, metrics

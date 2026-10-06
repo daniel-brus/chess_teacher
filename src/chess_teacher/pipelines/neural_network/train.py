@@ -7,6 +7,7 @@ Replaces the fixed-vocab policy head. Parent weights load only when compatible w
 
 from __future__ import annotations
 
+import gc
 import time
 from collections.abc import Callable, Mapping
 from datetime import datetime
@@ -86,6 +87,30 @@ pack_candidate_targets = pack_sparse_candidate_targets
 
 def candidate_style_custom_objects(max_candidates: int = MAX_CANDIDATES) -> dict[str, Any]:
     return candidate_loss_custom_objects(max_candidates)
+
+
+def numpy_batches_to_tf_dataset(
+    *,
+    x_inputs: dict[str, np.ndarray],
+    y: np.ndarray,
+    sample_weight: np.ndarray,
+    batch_size: int,
+) -> tuple[Any, int, int]:
+    """Build a batched ``tf.data`` dataset from NumPy train tensors.
+
+    Returns ``(dataset, n_samples, batch_size_used)``. Caller should ``del`` the
+    NumPy inputs and ``gc.collect()`` before ``model.fit(dataset, ...)`` so peak
+    RSS does not hold Python arrays and TF tensors at once.
+    """
+    tf = _import_tensorflow()
+    n = int(y.shape[0])
+    if n < 1:
+        raise ValueError("numpy_batches_to_tf_dataset requires n_samples >= 1")
+    bs = min(int(batch_size), n)
+    weights = np.asarray(sample_weight, dtype=np.float32)
+    ds = tf.data.Dataset.from_tensor_slices((dict(x_inputs), y, weights))
+    ds = ds.batch(bs).prefetch(1)
+    return ds, n, bs
 
 
 def load_candidate_style_keras(
@@ -409,10 +434,11 @@ class BaselineTrainer:
         if not datums:
             raise ValueError("BaselineTrainer.fit requires a non-empty batch")
 
+        n_input = len(datums)
         logger.info(
             "Building candidate move features for %s datums "
             "(SF evals from DB + on-the-fly geometry/material/openness; feat_dim=%s) %s",
-            len(datums),
+            n_input,
             self.move_feat_dim,
             snapshot_host_pressure().format_fields(),
         )
@@ -424,10 +450,15 @@ class BaselineTrainer:
                 "(user move must be in evals)"
             )
         kept_datums = [datums[i] for i in kept]
+        n_kept = len(kept_datums)
+        n_dropped = n_input - n_kept
+        # Free the full input list + packer; keep only the slim kept subset.
+        del datums, batch, kept
+        gc.collect()
         logger.info(
             "Candidate features ready kept=%s dropped=%s; building state matrix…",
-            len(kept_datums),
-            len(datums) - len(kept_datums),
+            n_kept,
+            n_dropped,
         )
         x_state = TrainingBatch(kept_datums).state_matrix()
         y = pack_candidate_targets_for_loss(
@@ -468,6 +499,7 @@ class BaselineTrainer:
                 dtype=np.float64,
             )
             baseline_strength = baseline_disagree_strength(logits, mask, labels)
+            del logits
             if weights_path is not None and weights_path == baseline_weights_path:
                 model = baseline_model
 
@@ -476,7 +508,7 @@ class BaselineTrainer:
                 logger.warning(
                     "recency: %s/%s kept datums missing end_time; strength=0",
                     missing,
-                    len(kept_datums),
+                    n_kept,
                 )
             recency_now = now if now is not None else get_current_datetime()
             sample_w = user_finetune_sample_weights(
@@ -504,6 +536,8 @@ class BaselineTrainer:
             )
         disagree_frac = float(np.mean(disagree_mask))
         mean_strength = float(np.mean(strength))
+        del disagree_mask, strength, plies, aligned, kept_datums, baseline_strength
+        gc.collect()
 
         if model is None:
             model = self.load_or_build(
@@ -516,9 +550,9 @@ class BaselineTrainer:
             "Starting Keras fit samples=%s epochs=%s batch_size=%s "
             "style_disagree_boost=%s scale_pawns=%s forced_scale_pawns=%s "
             "disagree_frac=%.3f mean_strength=%.3f %s",
-            len(kept_datums),
+            n_kept,
             self.epochs,
-            min(self.batch_size, len(kept_datums)),
+            min(self.batch_size, n_kept),
             self.style_disagree_boost,
             self.style_disagree_scale,
             self.forced_scale_pawns,
@@ -539,22 +573,38 @@ class BaselineTrainer:
                 )
 
         fit_t0 = time.monotonic()
-        # Prefer our logger over Keras STDERR progress bars.
-        history = model.fit(
-            {"state": x_state, "move_feats": feats},
-            y,
+        # mask/labels only needed for packing y + weights; drop before TF fit.
+        del mask, labels
+        x_inputs = {"state": x_state, "move_feats": feats}
+        dataset, n_ds, bs_used = numpy_batches_to_tf_dataset(
+            x_inputs=x_inputs,
+            y=y,
             sample_weight=sample_w,
+            batch_size=self.batch_size,
+        )
+        del x_state, feats, y, sample_w, x_inputs
+        gc.collect()
+        logger.info(
+            "Streaming Keras fit via tf.data n_samples=%s batch_size=%s epochs=%s %s",
+            n_ds,
+            bs_used,
+            self.epochs,
+            snapshot_host_pressure().format_fields(),
+        )
+        history = model.fit(
+            dataset,
             epochs=self.epochs,
-            batch_size=min(self.batch_size, len(kept_datums)),
             verbose=0,
             callbacks=[_EpochInfoCallback()],
         )
+        del dataset
+        gc.collect()
         metrics: dict[str, float] = {}
         for key, values in history.history.items():
             if values:
                 metrics[key] = float(values[-1])
-        metrics["n_samples"] = float(len(kept_datums))
-        metrics["n_dropped_missing_candidates"] = float(len(datums) - len(kept_datums))
+        metrics["n_samples"] = float(n_kept)
+        metrics["n_dropped_missing_candidates"] = float(n_dropped)
         metrics["max_candidates"] = float(self.max_candidates)
         metrics["move_feat_dim"] = float(self.move_feat_dim)
         metrics["move_feat_version"] = float(CANDIDATE_MOVE_FEAT_VERSION)
@@ -574,7 +624,7 @@ class BaselineTrainer:
             "Keras fit finished duration_s=%.2f delta_rss_mb=%.1f n_samples=%s %s",
             time.monotonic() - fit_t0,
             fit_ended.rss_mb - fit_started.rss_mb,
-            len(kept_datums),
+            n_kept,
             fit_ended.format_fields(),
         )
         return model, metrics
