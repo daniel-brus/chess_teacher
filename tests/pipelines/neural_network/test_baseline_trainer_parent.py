@@ -9,39 +9,23 @@ import numpy as np
 import pytest
 
 from chess_teacher.pipelines.neural_network import train as train_mod
+from chess_teacher.pipelines.neural_network.candidate_eval import MAX_CANDIDATES, MOVE_FEAT_DIM
 from chess_teacher.pipelines.neural_network.train import BaselineTrainer
 
 
-class _FakeBatch:
-    def __init__(self, datums: list[object]) -> None:
-        self.datums = datums
+class _Datum:
+    def __init__(self, game_id: str = "g1", ply: int = 10) -> None:
+        self.game_id = game_id
+        self.ply = ply
 
-    def candidate_style_targets(self) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[int]]:
-        n, max_c, feat_dim = 1, 8, 4
-        return (
-            np.zeros((n, max_c, feat_dim)),
-            np.ones((n, max_c)),
-            np.array([0]),
-            [0],
-        )
+    def state_vector(self) -> np.ndarray:
+        return np.zeros((16,), dtype=np.float32)
 
-    def state_matrix(self) -> np.ndarray:
-        return np.zeros((1, 16))
-
-
-def _patch_fit_stack(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(train_mod, "TrainingBatch", _FakeBatch)
-    monkeypatch.setattr(
-        train_mod,
-        "pack_candidate_targets_for_loss",
-        lambda **_k: np.zeros((1, 10), dtype=np.float32),
-    )
-    monkeypatch.setattr(train_mod, "user_not_sf_best_mask", lambda *_a, **_k: np.array([True]))
-    monkeypatch.setattr(train_mod, "user_sf_disagree_strength", lambda *_a, **_k: np.array([0.5]))
-    monkeypatch.setattr(train_mod, "baseline_disagree_strength", lambda *_a, **_k: np.array([1.0]))
-    monkeypatch.setattr(
-        train_mod, "user_finetune_sample_weights", lambda *_a, **_k: np.array([1.0])
-    )
+    def candidate_style_target(self) -> tuple[np.ndarray, np.ndarray, int]:
+        feats = np.zeros((MAX_CANDIDATES, MOVE_FEAT_DIM), dtype=np.float32)
+        mask = np.zeros((MAX_CANDIDATES,), dtype=np.float32)
+        mask[0] = 1.0
+        return feats, mask, 0
 
 
 def _history() -> MagicMock:
@@ -62,7 +46,7 @@ def test_fit_predicts_baseline_before_keras_fit(monkeypatch: pytest.MonkeyPatch)
 
     def _predict(*_a: object, **_k: object) -> np.ndarray:
         call_order.append("predict")
-        return np.zeros((1, 8), dtype=np.float64)
+        return np.zeros((1, MAX_CANDIDATES), dtype=np.float64)
 
     def _fit(*_a: object, **_k: object) -> MagicMock:
         call_order.append("fit")
@@ -71,11 +55,9 @@ def test_fit_predicts_baseline_before_keras_fit(monkeypatch: pytest.MonkeyPatch)
     model.predict.side_effect = _predict
     model.fit.side_effect = _fit
     monkeypatch.setattr(trainer, "load_or_build", lambda **_k: model)
-    _patch_fit_stack(monkeypatch)
 
-    datum = MagicMock(game_id="g1", ply=10)
     trainer.fit(
-        [datum],
+        [_Datum()],  # type: ignore[list-item]
         recency_lambda=None,
         weights_path=path,
         baseline_weights_path=path,
@@ -93,7 +75,7 @@ def test_fit_predicts_frozen_baseline_not_resume(monkeypatch: pytest.MonkeyPatch
 
     def _baseline_predict(*_a: object, **_k: object) -> np.ndarray:
         call_order.append("baseline_predict")
-        return np.zeros((1, 8), dtype=np.float64)
+        return np.zeros((1, MAX_CANDIDATES), dtype=np.float64)
 
     def _resume_fit(*_a: object, **_k: object) -> MagicMock:
         call_order.append("resume_fit")
@@ -106,11 +88,9 @@ def test_fit_predicts_frozen_baseline_not_resume(monkeypatch: pytest.MonkeyPatch
         return baseline_model if kwargs.get("weights_path") == baseline_path else resume_model
 
     monkeypatch.setattr(trainer, "load_or_build", _load)
-    _patch_fit_stack(monkeypatch)
 
-    datum = MagicMock(game_id="g1", ply=10)
     trainer.fit(
-        [datum],
+        [_Datum()],  # type: ignore[list-item]
         recency_lambda=None,
         weights_path=resume_path,
         baseline_weights_path=baseline_path,
@@ -121,9 +101,8 @@ def test_fit_predicts_frozen_baseline_not_resume(monkeypatch: pytest.MonkeyPatch
     resume_model.predict.assert_not_called()
 
 
-def test_fit_baseline_disagree_requires_baseline_path(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_fit_baseline_disagree_requires_baseline_path() -> None:
     trainer = BaselineTrainer(baseline_disagree_boost=4.0, epochs=1)
-    _patch_fit_stack(monkeypatch)
     with pytest.raises(ValueError, match="requires baseline_weights_path"):
         trainer.fit([MagicMock(game_id="g1", ply=10)], recency_lambda=None)
 
