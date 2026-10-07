@@ -6,7 +6,7 @@ See ``.agents/docs/ml-training-roadmap.md`` Phase 1.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -28,6 +28,9 @@ logger = get_logger()
 # Packing move_feats (N x 128 x 55) + board/state for a full registry-val set OOMs
 # laptop/k3d jobs (~120k moves). Score in chunks; metrics merge exactly.
 EVAL_PACK_CHUNK_SIZE = 4_000
+# model.predict on a whole chunk copies that NumPy block into TensorFlow.
+# Feed this many rows at a time so the copy stays one training batch.
+PREDICT_BATCH_ROWS = 64
 
 PHASE_OPENING = "opening"
 PHASE_MIDDLE = "middle"
@@ -230,23 +233,55 @@ def _model_input_names(model: Any) -> set[str]:
     return names
 
 
+def _predict_mapped(
+    model: Any,
+    n: int,
+    feed_at: Callable[[int, int], dict[str, np.ndarray]],
+    *,
+    batch_size: int = PREDICT_BATCH_ROWS,
+) -> np.ndarray:
+    """Run ``model.predict`` on row slices so TensorFlow never copies all of ``n``."""
+    if n < 1:
+        return np.zeros((0,), dtype=np.float64)
+    bs = max(1, int(batch_size))
+    parts: list[np.ndarray] = []
+    for start in range(0, n, bs):
+        end = min(n, start + bs)
+        parts.append(np.asarray(model.predict(feed_at(start, end), verbose=0), dtype=np.float64))
+    if len(parts) == 1:
+        return parts[0]
+    return np.concatenate(parts, axis=0)
+
+
 def predict_candidate_logits(
     model: Any,
     kept_datums: list[TrainingDatum],
     move_feats: np.ndarray,
+    *,
+    batch_size: int = PREDICT_BATCH_ROWS,
 ) -> np.ndarray:
     """``model.predict`` for flat-state and/or hybrid-board candidate models."""
     names = _model_input_names(model)
-    feed: dict[str, np.ndarray] = {"move_feats": move_feats}
+    n = int(np.asarray(move_feats).shape[0])
+    board: np.ndarray | None = None
+    state: np.ndarray | None = None
     if "board" in names:
         from chess_teacher.pipelines.neural_network.board_tensor import pack_board_tensors
 
-        feed["board"] = pack_board_tensors(kept_datums)
-    if "state" in names:
-        feed["state"] = TrainingBatch(kept_datums).state_matrix()
-    if "board" not in feed and "state" not in feed:
-        feed["state"] = TrainingBatch(kept_datums).state_matrix()
-    return np.asarray(model.predict(feed, verbose=0), dtype=np.float64)
+        board = pack_board_tensors(kept_datums)
+    needs_state = "state" in names or board is None
+    if needs_state:
+        state = TrainingBatch(kept_datums).state_matrix()
+
+    def feed_at(start: int, end: int) -> dict[str, np.ndarray]:
+        feed: dict[str, np.ndarray] = {"move_feats": move_feats[start:end]}
+        if board is not None:
+            feed["board"] = board[start:end]
+        if state is not None and ("state" in names or board is None):
+            feed["state"] = state[start:end]
+        return feed
+
+    return _predict_mapped(model, n, feed_at, batch_size=batch_size)
 
 
 @dataclass(frozen=True)
@@ -293,16 +328,26 @@ def pack_datums_for_eval(
     )
 
 
-def _predict_packed_logits(model: Any, packed: PackedCandidateEval) -> np.ndarray:
+def _predict_packed_logits(
+    model: Any,
+    packed: PackedCandidateEval,
+    *,
+    batch_size: int = PREDICT_BATCH_ROWS,
+) -> np.ndarray:
     names = _model_input_names(model)
-    feed: dict[str, np.ndarray] = {"move_feats": packed.feats}
-    if "board" in names:
-        feed["board"] = packed.board
-    if "state" in names:
-        feed["state"] = packed.state
-    if "board" not in feed and "state" not in feed:
-        feed["state"] = packed.state
-    return np.asarray(model.predict(feed, verbose=0), dtype=np.float64)
+    n = int(packed.feats.shape[0])
+
+    def feed_at(start: int, end: int) -> dict[str, np.ndarray]:
+        feed: dict[str, np.ndarray] = {"move_feats": packed.feats[start:end]}
+        if "board" in names:
+            feed["board"] = packed.board[start:end]
+        if "state" in names:
+            feed["state"] = packed.state[start:end]
+        if "board" not in feed and "state" not in feed:
+            feed["state"] = packed.state[start:end]
+        return feed
+
+    return _predict_mapped(model, n, feed_at, batch_size=batch_size)
 
 
 def evaluate_packed(model: Any, packed: PackedCandidateEval) -> EvalMetrics:
@@ -631,10 +676,12 @@ def format_phase_error_report(
         return format_phase_eval_rows(by_name)
     kept_datums = [datums[i] for i in kept]
     x_state = TrainingBatch(kept_datums).state_matrix()
-    logits = np.asarray(
-        model.predict({"state": x_state, "move_feats": feats}, verbose=0),
-        dtype=np.float64,
-    )
+    n_kept = len(kept_datums)
+
+    def feed_at(start: int, end: int) -> dict[str, np.ndarray]:
+        return {"state": x_state[start:end], "move_feats": feats[start:end]}
+
+    logits = _predict_mapped(model, n_kept, feed_at)
     details = details_from_packed(
         logits=logits,
         mask=mask,
