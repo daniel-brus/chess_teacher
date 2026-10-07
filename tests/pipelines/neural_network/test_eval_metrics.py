@@ -12,8 +12,10 @@ from chess_teacher.pipelines.neural_network.candidate_eval import (
     MOVE_FEAT_DIM,
 )
 from chess_teacher.pipelines.neural_network.eval_metrics import (
+    PREDICT_BATCH_ROWS,
     EvalMetrics,
     PackedCandidateEval,
+    _predict_packed_logits,
     compute_candidate_style_metrics,
     details_from_packed,
     format_error_shortlist,
@@ -285,3 +287,37 @@ def test_details_from_packed_and_error_shortlist() -> None:
     assert "fen=fen1" in text
     assert "game_id=g3" in text
     assert "game_id=g0" not in text
+
+
+def test_predict_packed_logits_slices_batches() -> None:
+    n = PREDICT_BATCH_ROWS * 2 + 2
+    max_candidates = 8
+    feats = np.zeros((n, max_candidates, MOVE_FEAT_DIM), dtype=np.float32)
+    seen: list[int] = []
+
+    class _BatchModel:
+        def __init__(self) -> None:
+            self.inputs = [
+                type("I", (), {"name": "state"})(),
+                type("I", (), {"name": "move_feats"})(),
+            ]
+
+        def predict(self, feed: dict[str, Any], verbose: int = 0) -> np.ndarray:
+            del verbose
+            rows = int(np.asarray(feed["move_feats"]).shape[0])
+            seen.append(rows)
+            return np.zeros((rows, max_candidates), dtype=np.float64)
+
+    packed = PackedCandidateEval(
+        kept_datums=[],
+        feats=feats,
+        mask=np.ones((n, max_candidates), dtype=np.float32),
+        labels=np.zeros((n,), dtype=np.int32),
+        state=np.zeros((n, 1), dtype=np.float32),
+        board=np.zeros((n, 1), dtype=np.float32),
+        n_input=n,
+        max_candidates=max_candidates,
+    )
+    logits = _predict_packed_logits(_BatchModel(), packed)
+    assert seen == [PREDICT_BATCH_ROWS, PREDICT_BATCH_ROWS, 2]
+    assert logits.shape == (n, max_candidates)
