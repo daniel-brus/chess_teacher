@@ -5,6 +5,12 @@ on:
     branches:
       - main
       - develop
+    # The bump below commits only pyproject.toml and pushes it to develop.
+    # Ignoring that path keeps the bump from starting a second CD run.
+    # Leave the skip-ci trailer off the bump message: it also skips
+    # pull_request workflows, so a develop -> main release PR would never run CI.
+    paths-ignore:
+      - pyproject.toml
 
 concurrency:
   group: cd-${{ github.ref }}
@@ -99,7 +105,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add pyproject.toml
-          git commit -m "chore: bump version to v${{ steps.bump.outputs.version }} [skip ci]"
+          git commit -m "chore: bump version to v${{ steps.bump.outputs.version }}"
           git tag "v${{ steps.bump.outputs.version }}-dev"
           git push origin develop --follow-tags
 
