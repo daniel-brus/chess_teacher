@@ -8,7 +8,6 @@ reused for the candidate and the served model.
 from __future__ import annotations
 
 import json
-import tempfile
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -34,6 +33,7 @@ from chess_teacher.utils.pipeline_utils.pipeline_base import (
     PipelineStep,
     register_pipeline_cleanup,
 )
+from chess_teacher.utils.pipeline_utils.step_process import StepProcess
 
 logger = get_logger()
 
@@ -180,11 +180,10 @@ class PrepareTrainingStep(PipelineStep):
 
 
 class TrainModelStep(PipelineStep):
-    """Download parent weights if needed, fit, and keep only the saved file."""
+    """Download parent weights if needed, then fit inside this step's child process."""
 
-    def __init__(self, scheme: TrainingScheme) -> None:
-        super().__init__(name="TrainModel")
-        self._scheme = scheme
+    def __init__(self, *, process: StepProcess | None = None) -> None:
+        super().__init__(name="TrainModel", process=process)
 
     def run(self, db_client: DatabaseClient, context: PipelineContext) -> None:
         del db_client
@@ -195,6 +194,8 @@ class TrainModelStep(PipelineStep):
         if not datums:
             context.extras[SKIP_KEY] = True
             return
+        if self.process is None:
+            raise ValueError("TrainModel requires a step process")
 
         parent: ModelHandle | None = context.extras.get("parent")
         weights_path: Path | None = None
@@ -204,16 +205,18 @@ class TrainModelStep(PipelineStep):
             logger.info("Downloading parent weights uri=%s", parent.weights_uri)
             weights_path = MLflowTracker().download_keras_weights(parent.weights_uri)
 
-        model, metrics = self._scheme.fit(datums, weights_path=weights_path)
-        out_path = Path(tempfile.mkdtemp(prefix="scheme_model_")) / "model.keras"
-        self._scheme.save(model, out_path)
-        context.extras["trained_model_path"] = out_path
-        context.extras["train_metrics"] = metrics
-        # Free the batch before the eval load. A retry of this step already
-        # finished only after this assignment, so a later score retry still
-        # has the file.
+        fitted = self.process.call("fit", datums=datums, weights_path=weights_path)
+        context.extras["trained_model_path"] = Path(fitted["model_path"])
+        context.extras["train_metrics"] = fitted["metrics"]
+        # The child keeps the batch until it finishes the fit. Drop the parent's copy
+        # before the eval load. A retry of this step already finished only after this
+        # assignment, so a later score retry still has the file.
         context.extras.pop("train_datums", None)
-        logger.info("TrainModel saved path=%s n_samples=%s", out_path, metrics.get("n_samples"))
+        logger.info(
+            "TrainModel saved path=%s n_samples=%s",
+            context.extras["trained_model_path"],
+            fitted["metrics"].get("n_samples"),
+        )
 
 
 class PrepareEvaluationStep(PipelineStep):
@@ -236,21 +239,15 @@ class PrepareEvaluationStep(PipelineStep):
 
 
 class ScoreEvaluationStep(PipelineStep):
-    """Score the new file and the served model on the prepared eval list."""
+    """Score the new file and the served model inside this step's child process."""
 
-    def __init__(self) -> None:
-        super().__init__(name="ScoreEvaluation")
+    def __init__(self, *, process: StepProcess | None = None) -> None:
+        super().__init__(name="ScoreEvaluation", process=process)
 
     def run(self, db_client: DatabaseClient, context: PipelineContext) -> None:
         del db_client
         if _skipped(context):
             return
-
-        from chess_teacher.pipelines.neural_network.eval_metrics import (
-            score_models_on_datums,
-        )
-        from chess_teacher.pipelines.neural_network.mlflow_utils import MLflowTracker
-        from chess_teacher.pipelines.neural_network.train import load_candidate_style_keras
 
         datums = context.extras.get("eval_datums") or []
         model_path: Path | None = context.extras.get("trained_model_path")
@@ -261,18 +258,24 @@ class ScoreEvaluationStep(PipelineStep):
             context.extras["candidate_eval"] = None
             context.extras["parent_eval"] = None
             return
+        if self.process is None:
+            raise ValueError("ScoreEvaluation requires a step process")
 
-        candidate_model = load_candidate_style_keras(model_path, compile_model=False)
-        models: dict[str, object] = {"candidate": candidate_model}
+        from chess_teacher.pipelines.neural_network.mlflow_utils import MLflowTracker
 
+        parent_weights_path: Path | None = None
         parent: ModelHandle | None = context.extras.get("parent")
         if parent is not None and parent.compatible and parent.weights_uri:
-            parent_path = MLflowTracker().require_keras_weights(parent.weights_uri)
-            models["parent"] = load_candidate_style_keras(parent_path, compile_model=False)
+            parent_weights_path = MLflowTracker().require_keras_weights(parent.weights_uri)
 
-        scored = score_models_on_datums(models, datums)
-        context.extras["candidate_eval"] = scored["candidate"]
-        context.extras["parent_eval"] = scored.get("parent")
+        scored = self.process.call(
+            "score",
+            model_path=model_path,
+            parent_weights_path=parent_weights_path,
+            datums=datums,
+        )
+        context.extras["candidate_eval"] = scored["candidate_eval"]
+        context.extras["parent_eval"] = scored["parent_eval"]
         if context.extras["parent_eval"] is None:
             logger.info(
                 "ScoreEvaluation candidate only (cold start). n_eval=%s",
@@ -539,13 +542,18 @@ def build_training_scheme_steps(
     *,
     promote: bool = False,
 ) -> list[PipelineStep]:
-    """Same step classes for every scheme. ``promote`` adds the write steps."""
+    """Same step classes for every scheme. ``promote`` adds the write steps.
+
+    Train and score share one child interpreter. The runner starts it at TrainModel
+    and exits it after ScoreEvaluation, which is the last step holding that object.
+    """
+    tensorflow = StepProcess("chess_teacher.pipelines.neural_network.tf_worker")
     steps: list[PipelineStep] = [
         WaitForTrainingSlotStep(scheme),
         PrepareTrainingStep(scheme),
-        TrainModelStep(scheme),
+        TrainModelStep(process=tensorflow),
         PrepareEvaluationStep(scheme),
-        ScoreEvaluationStep(),
+        ScoreEvaluationStep(process=tensorflow),
         RecordCandidateStep(scheme),
         AdvanceTrainingCursorStep(scheme),
     ]
