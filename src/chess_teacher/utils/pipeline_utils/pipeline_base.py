@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -56,6 +57,15 @@ _DEFAULT_NO_RETRY_ON: tuple[type[Exception], ...] = (
 # Stashed on PipelineContext.extras once the run lock exists, so later steps
 # can key one row per run without reading the pipeline object.
 PIPELINE_RUN_ID_EXTRA = "pipeline_run_id"
+PIPELINE_CLEANUPS_EXTRA = "pipeline_cleanups"
+
+
+def register_pipeline_cleanup(context: PipelineContext, callback: Callable[[], None]) -> None:
+    """Run ``callback`` when the pipeline finishes, including after a failed step."""
+    cleanups = context.extras.setdefault(PIPELINE_CLEANUPS_EXTRA, [])
+    if not isinstance(cleanups, list):
+        raise TypeError(f"{PIPELINE_CLEANUPS_EXTRA} must be a list")
+    cleanups.append(callback)
 
 
 @dataclass(frozen=True)
@@ -330,7 +340,10 @@ class Pipeline:
                     self.context.progress_update(f"Finishing {self.name}...")
                     self._post_run(run_result)
                 finally:
-                    self._release_lock()
+                    try:
+                        self._run_registered_cleanups()
+                    finally:
+                        self._release_lock()
 
         if run_error is not None:
             self.logger.log_and_raise(
@@ -448,6 +461,17 @@ class Pipeline:
         self.logger.info(f"[Pipeline:{self.name}] Lock acquired (run_id={run_id}).")
         self.context.progress_pop()
         self.context.progress_success("Succesfully registered current pipeline run.")
+
+    def _run_registered_cleanups(self) -> None:
+        """Run callbacks registered during the run. One failure does not skip the rest."""
+        cleanups = self.context.extras.get(PIPELINE_CLEANUPS_EXTRA) or []
+        if not isinstance(cleanups, list):
+            return
+        for cleanup in cleanups:
+            try:
+                cleanup()
+            except Exception:
+                self.logger.exception("[Pipeline:%s] Cleanup failed.", self.name)
 
     def _release_lock(self) -> bool:
         """

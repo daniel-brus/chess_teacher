@@ -137,6 +137,15 @@ class _Scheme:
         return candidate
 
 
+def test_prepare_does_not_load_when_the_round_was_already_skipped() -> None:
+    scheme = _Scheme()
+    context = PipelineContext()
+    context.extras[SKIP_KEY] = True
+    PrepareTrainingStep(scheme).run(MagicMock(), context)  # type: ignore[arg-type]
+    assert scheme.checked == 0
+    assert "train_datums" not in context.extras
+
+
 def test_prepare_skips_without_loading_when_pending_is_low() -> None:
     scheme = _Scheme()
     scheme.pending = 3
@@ -296,6 +305,7 @@ def test_both_scopes_build_the_same_step_classes() -> None:
     personal = build_training_scheme_steps(ModelTraining("user-1"), promote=True)
     assert [type(step) for step in baseline] == [type(step) for step in personal]
     assert [step.name for step in baseline] == [
+        "WaitForTrainingSlot",
         "PrepareTraining",
         "TrainModel",
         "PrepareEvaluation",

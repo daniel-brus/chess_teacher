@@ -14,11 +14,6 @@ from chess_teacher.utils.pipeline_utils.pipeline_helpers import (
 )
 
 
-@pytest.fixture(autouse=True)
-def _memory_available(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(nightly, "pipeline_host_has_memory", lambda: True)
-
-
 def _result(result: PipelineResult) -> PipelineRunResult:
     now = datetime.now(UTC)
     return PipelineRunResult(
@@ -30,20 +25,6 @@ def _result(result: PipelineResult) -> PipelineRunResult:
         started_at=now,
         finished_at=now,
     )
-
-
-def test_low_memory_skips_baseline_rounds(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls: list[bool] = []
-
-    def _train(*, promote: bool = False) -> PipelineRunResult:
-        calls.append(promote)
-        return _result(PipelineResult.SUCCESS)
-
-    monkeypatch.setattr(nightly, "pipeline_host_has_memory", lambda: False)
-    monkeypatch.setattr(nightly, "run_baseline_training_pipeline", _train)
-
-    assert nightly.run_nightly_baseline_rounds(2) == ()
-    assert calls == []
 
 
 def test_resolve_baseline_nightly_rounds_defaults_to_one() -> None:

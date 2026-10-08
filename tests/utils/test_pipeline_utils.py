@@ -7,7 +7,12 @@ from typing import Any
 from chess_teacher.utils.db.client import WriteResult, WriteStrategy
 from chess_teacher.utils.exception_utils import PipelineError
 from chess_teacher.utils.metadata_utils import TableMetadata
-from chess_teacher.utils.pipeline_utils.pipeline_base import Pipeline, PipelineContext, PipelineStep
+from chess_teacher.utils.pipeline_utils.pipeline_base import (
+    Pipeline,
+    PipelineContext,
+    PipelineStep,
+    register_pipeline_cleanup,
+)
 
 
 class FakeEngine:
@@ -133,6 +138,30 @@ class _RecordingStep(PipelineStep):
 
     def run(self, db_client: FakeDatabaseClient, context: PipelineContext) -> None:
         self.ran = True
+
+
+class _CleanupThenFailStep(PipelineStep):
+    def __init__(self, log: list[str]) -> None:
+        super().__init__("cleanup_source", max_retries=0)
+        self.log = log
+
+    def run(self, db_client: FakeDatabaseClient, context: PipelineContext) -> None:
+        register_pipeline_cleanup(context, lambda: self.log.append("released"))
+        raise ValueError("boom")
+
+
+def test_registered_cleanup_runs_when_a_step_fails() -> None:
+    log: list[str] = []
+    pipeline = NoopPostRunPipeline(
+        "cleanup",
+        [_CleanupThenFailStep(log)],
+        user_id="u1",
+        account_id="a1",
+        db_client=FakeDatabaseClient(),  # type: ignore[arg-type]
+    )
+    result = pipeline.run()
+    assert result.result.value == "failure"
+    assert log == ["released"]
 
 
 def test_step_flagged_to_run_after_failure_still_runs() -> None:

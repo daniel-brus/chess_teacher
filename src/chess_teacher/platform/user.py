@@ -100,7 +100,6 @@ class User(TableDataClass):
     latest_pipeline_run: str | None = None
     cron_time: time = DEFAULT_CRON_TIME
     timezone: str = DEFAULT_TIMEZONE
-    run_pipeline_immediately: bool = False
     default_light_theme_id: str | None = None
     default_dark_theme_id: str | None = None
 
@@ -250,24 +249,6 @@ class User(TableDataClass):
         if local_now < scheduled:
             return False
         return local_now < scheduled + DISPATCH_INTERVAL
-
-    def is_pipeline_dispatch_due(self, now: datetime | None = None) -> bool:
-        """True in the cron window, or when ``run_pipeline_immediately`` is set.
-
-        The flag tells the next dispatcher tick to take this user even outside
-        ``cron_time``. The 24-hour cooldown still applies.
-        """
-        if self.run_pipeline_immediately:
-            return True
-        return self.is_cron_due(now)
-
-    def set_run_pipeline_immediately(self, db_client: DatabaseClient, value: bool) -> Self:
-        """Set or clear the next-tick flag. A no-op when the stored value already matches."""
-        if self.run_pipeline_immediately == value:
-            return self
-        self.upsert_field(db_client, "run_pipeline_immediately", value)
-        self.run_pipeline_immediately = value
-        return self
 
     def pipeline_allowed_to_run(self, db_client: DatabaseClient) -> bool:
         """Check if the pipeline is allowed to run for this user.

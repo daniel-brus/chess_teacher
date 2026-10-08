@@ -11,7 +11,6 @@ from chess_teacher.maintenance.pipeline_steps import (
 )
 from chess_teacher.pipelines.neural_network.main import run_baseline_training_pipeline
 from chess_teacher.pipelines.neural_network.schemes import ModelTraining
-from chess_teacher.platform.dispatch import pipeline_host_has_memory
 from chess_teacher.utils.db.client import get_db_client
 from chess_teacher.utils.env_utils import get_optional_env_variable
 from chess_teacher.utils.logging import get_logger
@@ -68,15 +67,11 @@ def run_maintenance() -> PipelineRunResult:
 def run_nightly_baseline_rounds(rounds: int) -> tuple[PipelineRunResult, ...]:
     """Run up to ``rounds`` platform train-and-promote passes.
 
-    The first pass runs when MemAvailable can hold a training run, including
-    when that pass will skip for lack of data. Later passes run only while
-    unprocessed registry-train moves stay at or above the training minimum.
-    A failed pass stops the loop. Low memory skips the night.
+    The first pass always runs, including when it will skip for lack of data.
+    Later passes run only while unprocessed registry-train moves stay at or
+    above the training minimum. A failed pass stops the loop.
     """
     rounds = max(1, int(rounds))
-    if not pipeline_host_has_memory():
-        logger.info("Nightly baseline skipped: MemAvailable is below the training minimum.")
-        return ()
     results: list[PipelineRunResult] = []
     scheme: ModelTraining | None = None
     db_client = None

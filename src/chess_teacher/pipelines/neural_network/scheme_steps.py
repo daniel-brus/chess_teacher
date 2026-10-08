@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 import tempfile
+import time
+from collections.abc import Callable
 from pathlib import Path
 
 from chess_teacher.pipelines.neural_network.eval_metrics import EvalMetrics
@@ -17,6 +19,12 @@ from chess_teacher.pipelines.neural_network.training_scheme import (
     ParentBaselineDecision,
     TrainingScheme,
 )
+from chess_teacher.pipelines.neural_network.training_slot import (
+    TRAINING_SLOT_POLL_SECONDS,
+    TRAINING_SLOT_WAIT_LIMIT,
+    DbTrainingSlot,
+    pipeline_host_has_memory,
+)
 from chess_teacher.utils.db.client import DatabaseClient
 from chess_teacher.utils.general_utils import get_current_datetime
 from chess_teacher.utils.logging import get_logger
@@ -24,6 +32,7 @@ from chess_teacher.utils.pipeline_utils.pipeline_base import (
     PIPELINE_RUN_ID_EXTRA,
     PipelineContext,
     PipelineStep,
+    register_pipeline_cleanup,
 )
 
 logger = get_logger()
@@ -48,6 +57,86 @@ def _model_id(handle: ModelHandle) -> str:
     return model_id
 
 
+class WaitForTrainingSlotStep(PipelineStep):
+    """Wait until this run holds the global training slot and the host has memory.
+
+    Ingest and preprocess stay outside this step. The slot is released when the
+    training pipeline finishes, including when a later step fails.
+    """
+
+    def __init__(
+        self,
+        scheme: TrainingScheme,
+        *,
+        slot: DbTrainingSlot | None = None,
+        memory_available: Callable[[], bool] | None = None,
+        sleep: Callable[[float], None] = time.sleep,
+        monotonic: Callable[[], float] = time.monotonic,
+        poll_seconds: float = TRAINING_SLOT_POLL_SECONDS,
+        wait_seconds: float = TRAINING_SLOT_WAIT_LIMIT.total_seconds(),
+    ) -> None:
+        super().__init__(name="WaitForTrainingSlot", max_retries=0)
+        self._scheme = scheme
+        self._slot = slot
+        self._memory_available = memory_available or pipeline_host_has_memory
+        self._sleep = sleep
+        self._monotonic = monotonic
+        self._poll_seconds = poll_seconds
+        self._wait_seconds = wait_seconds
+
+    def run(self, db_client: DatabaseClient, context: PipelineContext) -> None:
+        if _skipped(context):
+            return
+        pending = self._scheme.count_pending(db_client)
+        if pending < self._scheme.min_new_moves:
+            self._scheme.note_checked(db_client)
+            logger.info(
+                "WaitForTrainingSlot skip: pending=%s < min=%s",
+                pending,
+                self._scheme.min_new_moves,
+            )
+            context.extras[SKIP_KEY] = True
+            return
+
+        run_id = context.extras.get(PIPELINE_RUN_ID_EXTRA)
+        if not isinstance(run_id, str) or not run_id:
+            raise ValueError("WaitForTrainingSlot requires a pipeline run id")
+
+        slot = self._slot or DbTrainingSlot(db_client)
+        started = self._monotonic()
+        while True:
+            if slot.try_acquire(run_id, now=get_current_datetime()):
+                if self._memory_available():
+                    register_pipeline_cleanup(context, lambda: slot.release(run_id))
+                    logger.info("Training slot acquired run_id=%s", run_id)
+                    return
+                slot.release(run_id)
+                logger.info(
+                    "Training slot released: MemAvailable is below the training minimum. run_id=%s",
+                    run_id,
+                )
+            else:
+                logger.info("Training slot busy run_id=%s", run_id)
+
+            elapsed = self._monotonic() - started
+            if elapsed >= self._wait_seconds:
+                self._scheme.note_checked(db_client)
+                logger.warning(
+                    "Training slot wait exceeded %.0fs; skipping this training round. run_id=%s",
+                    self._wait_seconds,
+                    run_id,
+                )
+                context.extras[SKIP_KEY] = True
+                context.progress_warning(
+                    "Training waited too long for a free slot; skipping this round."
+                )
+                return
+
+            delay = min(self._poll_seconds, self._wait_seconds - elapsed)
+            context.progress_update("Waiting for another training run to finish...")
+            self._sleep(delay)
+
+
 class PrepareTrainingStep(PipelineStep):
     """Count pending moves, then load the parent, the served model, and the train batch."""
 
@@ -56,6 +145,8 @@ class PrepareTrainingStep(PipelineStep):
         self._scheme = scheme
 
     def run(self, db_client: DatabaseClient, context: PipelineContext) -> None:
+        if _skipped(context):
+            return
         self._scheme.note_checked(db_client)
         pending = self._scheme.count_pending(db_client)
         context.extras["pending_count"] = pending
@@ -450,6 +541,7 @@ def build_training_scheme_steps(
 ) -> list[PipelineStep]:
     """Same step classes for every scheme. ``promote`` adds the write steps."""
     steps: list[PipelineStep] = [
+        WaitForTrainingSlotStep(scheme),
         PrepareTrainingStep(scheme),
         TrainModelStep(scheme),
         PrepareEvaluationStep(scheme),

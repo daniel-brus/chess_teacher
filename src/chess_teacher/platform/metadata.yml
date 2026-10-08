@@ -80,12 +80,6 @@ tables:
         default: "Europe/Amsterdam"
         comment: Timezone applicable to the cron_time (e.g. Europe/Amsterdam).
 
-      - name: run_pipeline_immediately
-        data_type: boolean
-        nullable: false
-        default: false
-        comment: When true, the dispatcher starts this user on the next tick even outside cron_time. Cleared once the job is created.
-
       - name: default_light_theme_id
         data_type: text
         nullable: true
