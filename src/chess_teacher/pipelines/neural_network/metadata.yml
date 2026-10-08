@@ -288,3 +288,23 @@ tables:
         data_type: double precision
         nullable: true
         comment: Weighted val_top3 on the Stockfish-disagree slice. Null when the slice is empty.
+
+  training_slot:
+    schema: ml
+    table: training_slot
+    comment: One global slot so only one neural training fit runs at a time.
+    primary_key:
+      - slot_name
+    columns:
+      - name: slot_name
+        data_type: text
+        nullable: false
+        comment: Fixed name for the single machine-wide training slot.
+      - name: holder_run_id
+        data_type: text
+        nullable: true
+        comment: platform.pipeline_runs.run_id that currently holds the slot. Null when free.
+      - name: acquired_at
+        data_type: timestamptz
+        nullable: true
+        comment: When the current holder took the slot. Older than the stale window can be taken over.
