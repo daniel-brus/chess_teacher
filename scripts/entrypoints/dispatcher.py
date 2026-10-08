@@ -9,6 +9,13 @@ from typing import Any
 
 import yaml
 
+from chess_teacher.platform.dispatch import (
+    DEFER_ACTIVE_JOB,
+    DEFER_MEMORY,
+    DEFER_WAITING_TURN,
+    pipeline_host_has_memory,
+    plan_pipeline_dispatch,
+)
 from chess_teacher.platform.user import User
 from chess_teacher.utils.db.client import DatabaseClient, get_db_client
 from chess_teacher.utils.env_utils import get_env_variable
@@ -38,6 +45,7 @@ class DispatchResult:
     skipped_active_job: int
     skipped_not_due: int
     skipped_cooldown: int
+    deferred: int
 
 
 def work_item_key(user_id: str) -> str:
@@ -162,9 +170,12 @@ def dispatch_pipeline_jobs(
     db_client: DatabaseClient | None = None,
     namespace: str | None = None,
 ) -> DispatchResult:
-    """
-    Spawn parallel pipeline Jobs in Kubernetes for every user that does not
-    already have an active Job.
+    """Start at most one user pipeline job, and queue the rest for the next tick.
+
+    A user is eligible in their cron window, or later the same local day when a
+    previous tick left ``pipeline_retry_at`` set. The next dispatcher run (30
+    minutes later) tries that user again. Nobody new starts while a pipeline
+    job is still running, or while MemAvailable is under the training minimum.
 
     Intended to run inside the ingestion-dispatcher CronJob pod.
     """
@@ -174,68 +185,86 @@ def dispatch_pipeline_jobs(
 
     users = User.fetch_all_from_db(db)
     active_jobs = list_active_pipeline_jobs(namespace=k8s_namespace)
-    cron_due_count = sum(1 for user in users if user.is_cron_due(now))
+    users_by_id = {user.user_id: user for user in users}
+    active_user_ids = {user.user_id for user in users if work_item_key(user.user_id) in active_jobs}
+    cooldown_blocked = {
+        user.user_id
+        for user in users
+        if user.is_pipeline_dispatch_due(now) and not user.pipeline_allowed_to_run(db)
+    }
+    due_count = sum(1 for user in users if user.is_pipeline_dispatch_due(now))
+    memory_available = pipeline_host_has_memory()
     logger.info(
-        "Dispatch scan: namespace=%s users=%s cron_due=%s active_pipeline_jobs=%s",
+        "Dispatch scan: namespace=%s users=%s dispatch_due=%s active_pipeline_jobs=%s memory_available=%s",
         k8s_namespace,
         len(users),
-        cron_due_count,
+        due_count,
         len(active_jobs),
+        memory_available,
     )
 
-    spawned: list[str] = []
-    skipped_active = 0
-    skipped_not_due = 0
-    skipped_cooldown = 0
-
-    for user in users:
-        if not user.is_cron_due(now):
-            skipped_not_due += 1
-            continue
-        if not user.pipeline_allowed_to_run(db):
-            skipped_cooldown += 1
-            logger.info(
-                "Skipping user=%s: pipeline cooldown active.",
-                user.user_id,
-            )
-            continue
-
-        user_key = work_item_key(user.user_id)
-        if user_key in active_jobs:
-            skipped_active += 1
-            logger.info(
-                "Skipping user=%s: pipeline job already active.",
-                user.user_id,
-            )
-            continue
-
+    plan = plan_pipeline_dispatch(
+        users,
+        now=now,
+        active_user_ids=active_user_ids,
+        pipeline_job_active=bool(active_jobs),
+        cooldown_blocked_user_ids=cooldown_blocked,
+        memory_available=memory_available,
+    )
+    for user_id in plan.defer_user_ids:
+        users_by_id[user_id].defer_pipeline_retry(db, now)
+    if plan.defer_reason == DEFER_MEMORY:
         logger.info(
-            "Dispatching pipeline job for user=%s cron_time=%s timezone=%s",
+            "Deferring users until the next dispatcher tick: MemAvailable is below the training minimum. users=%s",
+            ",".join(plan.defer_user_ids),
+        )
+    elif plan.defer_reason == DEFER_ACTIVE_JOB:
+        logger.info(
+            "Deferring users until the next dispatcher tick: a pipeline job is still running. users=%s",
+            ",".join(plan.defer_user_ids),
+        )
+    elif plan.defer_reason == DEFER_WAITING_TURN:
+        logger.info(
+            "Deferred users to the next dispatcher tick so one pipeline starts at a time. users=%s",
+            ",".join(plan.defer_user_ids),
+        )
+
+    spawned: list[str] = []
+    if plan.spawn_user_id is not None:
+        user = users_by_id[plan.spawn_user_id]
+        queued = user.pipeline_retry_at is not None
+        logger.info(
+            "Dispatching pipeline job for user=%s cron_time=%s timezone=%s queued=%s",
             user.user_id,
             user.cron_time.strftime("%H:%M"),
             user.timezone,
+            queued,
         )
+        # Keep the retry if job creation fails, so the next tick tries again.
+        user.defer_pipeline_retry(db, now)
         job_name = create_pipeline_job(
             namespace=k8s_namespace,
             user_id=user.user_id,
         )
+        user.clear_pipeline_retry(db)
         spawned.append(job_name)
-        active_jobs.add(user_key)
 
     result = DispatchResult(
         scanned_users=len(users),
         spawned_jobs=tuple(spawned),
-        skipped_active_job=skipped_active,
-        skipped_not_due=skipped_not_due,
-        skipped_cooldown=skipped_cooldown,
+        skipped_active_job=plan.skipped_active_job,
+        skipped_not_due=plan.skipped_not_due,
+        skipped_cooldown=plan.skipped_cooldown,
+        deferred=len(plan.defer_user_ids),
     )
     logger.info(
-        "Dispatch finished: users=%s spawned=%s skipped_active=%s skipped_not_due=%s skipped_cooldown=%s",
+        "Dispatch finished: users=%s spawned=%s skipped_active=%s skipped_not_due=%s skipped_cooldown=%s deferred=%s",
         result.scanned_users,
         len(result.spawned_jobs),
         result.skipped_active_job,
         result.skipped_not_due,
         result.skipped_cooldown,
+        result.deferred,
     )
     return result
 
@@ -249,11 +278,12 @@ def main() -> int:
     if result.spawned_jobs:
         logger.info("Pipeline dispatcher spawned jobs: %s", ", ".join(result.spawned_jobs))
     logger.info(
-        "Pipeline dispatcher completed: spawned=%s skipped_active=%s skipped_not_due=%s skipped_cooldown=%s",
+        "Pipeline dispatcher completed: spawned=%s skipped_active=%s skipped_not_due=%s skipped_cooldown=%s deferred=%s",
         len(result.spawned_jobs),
         result.skipped_active_job,
         result.skipped_not_due,
         result.skipped_cooldown,
+        result.deferred,
     )
     return 0
 
