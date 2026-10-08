@@ -7,7 +7,12 @@ from typing import Any
 from chess_teacher.utils.db.client import WriteResult, WriteStrategy
 from chess_teacher.utils.exception_utils import PipelineError
 from chess_teacher.utils.metadata_utils import TableMetadata
-from chess_teacher.utils.pipeline_utils.pipeline_base import Pipeline, PipelineContext, PipelineStep
+from chess_teacher.utils.pipeline_utils.pipeline_base import (
+    Pipeline,
+    PipelineContext,
+    PipelineStep,
+    register_pipeline_cleanup,
+)
 
 
 class FakeEngine:
@@ -133,6 +138,128 @@ class _RecordingStep(PipelineStep):
 
     def run(self, db_client: FakeDatabaseClient, context: PipelineContext) -> None:
         self.ran = True
+
+
+class _CleanupThenFailStep(PipelineStep):
+    def __init__(self, log: list[str]) -> None:
+        super().__init__("cleanup_source", max_retries=0)
+        self.log = log
+
+    def run(self, db_client: FakeDatabaseClient, context: PipelineContext) -> None:
+        register_pipeline_cleanup(context, lambda: self.log.append("released"))
+        raise ValueError("boom")
+
+
+class _IdleProcess:
+    """Records start and close without launching an interpreter."""
+
+    def __init__(self) -> None:
+        self.running = False
+        self.starts = 0
+        self.closes = 0
+
+    def start(self) -> None:
+        self.starts += 1
+        self.running = True
+
+    def close(self) -> None:
+        self.closes += 1
+        self.running = False
+
+
+class _ProcessStep(PipelineStep):
+    def __init__(self, name: str, process: _IdleProcess) -> None:
+        super().__init__(name, max_retries=0, process=process)  # type: ignore[arg-type]
+
+    def run(self, db_client: FakeDatabaseClient, context: PipelineContext) -> None:
+        del db_client, context
+
+
+class _WatchProcessStep(PipelineStep):
+    def __init__(self, process: _IdleProcess) -> None:
+        super().__init__("watch", max_retries=0)
+        self._process = process
+        self.saw_running = False
+
+    def run(self, db_client: FakeDatabaseClient, context: PipelineContext) -> None:
+        del db_client, context
+        self.saw_running = self._process.running
+
+
+def test_shared_process_starts_once_and_exits_after_its_last_step() -> None:
+    process = _IdleProcess()
+    watch = _WatchProcessStep(process)
+    pipeline = NoopPostRunPipeline(
+        "shared_process",
+        [
+            _ProcessStep("fit", process),
+            watch,
+            _ProcessStep("score", process),
+        ],
+        user_id="u1",
+        account_id="a1",
+        db_client=FakeDatabaseClient(),  # type: ignore[arg-type]
+    )
+    result = pipeline.run()
+    assert result.result.value == "success"
+    assert process.starts == 1
+    assert watch.saw_running is True
+    assert process.running is False
+
+
+class _FailWithProcess(PipelineStep):
+    def __init__(self, process: _IdleProcess) -> None:
+        super().__init__("fit", max_retries=0, process=process)  # type: ignore[arg-type]
+
+    def run(self, db_client: FakeDatabaseClient, context: PipelineContext) -> None:
+        del db_client, context
+        raise ValueError("boom")
+
+
+def test_failed_holder_exits_the_process_before_later_holders() -> None:
+    process = _IdleProcess()
+    later = _ProcessStep("score", process)
+    pipeline = NoopPostRunPipeline(
+        "failed_holder",
+        [_FailWithProcess(process), later],
+        user_id="u1",
+        account_id="a1",
+        db_client=FakeDatabaseClient(),  # type: ignore[arg-type]
+    )
+    result = pipeline.run()
+    assert result.result.value == "failure"
+    assert process.starts == 1
+    assert process.running is False
+    assert [step.name for step in result.step_results] == ["fit"]
+
+
+def test_process_is_not_started_when_its_steps_are_skipped() -> None:
+    process = _IdleProcess()
+    pipeline = NoopPostRunPipeline(
+        "skipped_process",
+        [_FailingStep(), _ProcessStep("fit", process), _ProcessStep("score", process)],
+        user_id="u1",
+        account_id="a1",
+        db_client=FakeDatabaseClient(),  # type: ignore[arg-type]
+    )
+    result = pipeline.run()
+    assert result.result.value == "failure"
+    assert process.starts == 0
+    assert process.closes == 0
+
+
+def test_registered_cleanup_runs_when_a_step_fails() -> None:
+    log: list[str] = []
+    pipeline = NoopPostRunPipeline(
+        "cleanup",
+        [_CleanupThenFailStep(log)],
+        user_id="u1",
+        account_id="a1",
+        db_client=FakeDatabaseClient(),  # type: ignore[arg-type]
+    )
+    result = pipeline.run()
+    assert result.result.value == "failure"
+    assert log == ["released"]
 
 
 def test_step_flagged_to_run_after_failure_still_runs() -> None:

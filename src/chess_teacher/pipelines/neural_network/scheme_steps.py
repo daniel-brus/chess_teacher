@@ -8,7 +8,8 @@ reused for the candidate and the served model.
 from __future__ import annotations
 
 import json
-import tempfile
+import time
+from collections.abc import Callable
 from pathlib import Path
 
 from chess_teacher.pipelines.neural_network.eval_metrics import EvalMetrics
@@ -16,6 +17,12 @@ from chess_teacher.pipelines.neural_network.training_scheme import (
     ModelHandle,
     ParentBaselineDecision,
     TrainingScheme,
+)
+from chess_teacher.pipelines.neural_network.training_slot import (
+    TRAINING_SLOT_POLL_SECONDS,
+    TRAINING_SLOT_WAIT_LIMIT,
+    DbTrainingSlot,
+    pipeline_host_has_memory,
 )
 from chess_teacher.utils.db.client import DatabaseClient
 from chess_teacher.utils.general_utils import get_current_datetime
@@ -25,6 +32,7 @@ from chess_teacher.utils.pipeline_utils.pipeline_base import (
     PipelineContext,
     PipelineStep,
 )
+from chess_teacher.utils.pipeline_utils.step_process import StepProcess
 
 logger = get_logger()
 
@@ -48,6 +56,107 @@ def _model_id(handle: ModelHandle) -> str:
     return model_id
 
 
+class WaitForTrainingSlotStep(PipelineStep):
+    """Wait until this run holds the global training slot and the host has memory.
+
+    This sits immediately before the TensorFlow steps. ``ReleaseTrainingSlot`` drops
+    the slot once that child has exited, including when the fit or the score failed.
+    """
+
+    def __init__(
+        self,
+        scheme: TrainingScheme,
+        *,
+        slot: DbTrainingSlot | None = None,
+        memory_available: Callable[[], bool] | None = None,
+        sleep: Callable[[float], None] = time.sleep,
+        monotonic: Callable[[], float] = time.monotonic,
+        poll_seconds: float = TRAINING_SLOT_POLL_SECONDS,
+        wait_seconds: float = TRAINING_SLOT_WAIT_LIMIT.total_seconds(),
+    ) -> None:
+        super().__init__(name="WaitForTrainingSlot", max_retries=0)
+        self._scheme = scheme
+        self._slot = slot
+        self._memory_available = memory_available or pipeline_host_has_memory
+        self._sleep = sleep
+        self._monotonic = monotonic
+        self._poll_seconds = poll_seconds
+        self._wait_seconds = wait_seconds
+
+    def run(self, db_client: DatabaseClient, context: PipelineContext) -> None:
+        if _skipped(context):
+            return
+        pending = self._scheme.count_pending(db_client)
+        if pending < self._scheme.min_new_moves:
+            self._scheme.note_checked(db_client)
+            logger.info(
+                "WaitForTrainingSlot skip: pending=%s < min=%s",
+                pending,
+                self._scheme.min_new_moves,
+            )
+            context.extras[SKIP_KEY] = True
+            return
+
+        run_id = context.extras.get(PIPELINE_RUN_ID_EXTRA)
+        if not isinstance(run_id, str) or not run_id:
+            raise ValueError("WaitForTrainingSlot requires a pipeline run id")
+
+        slot = self._slot or DbTrainingSlot(db_client)
+        started = self._monotonic()
+        while True:
+            if slot.try_acquire(run_id, now=get_current_datetime()):
+                if self._memory_available():
+                    logger.info("Training slot acquired run_id=%s", run_id)
+                    return
+                slot.release(run_id)
+                logger.info(
+                    "Training slot released: MemAvailable is below the training minimum. run_id=%s",
+                    run_id,
+                )
+            else:
+                logger.info("Training slot busy run_id=%s", run_id)
+
+            elapsed = self._monotonic() - started
+            if elapsed >= self._wait_seconds:
+                self._scheme.note_checked(db_client)
+                logger.warning(
+                    "Training slot wait exceeded %.0fs; skipping this training round. run_id=%s",
+                    self._wait_seconds,
+                    run_id,
+                )
+                context.extras[SKIP_KEY] = True
+                context.progress_warning(
+                    "Training waited too long for a free slot; skipping this round."
+                )
+                return
+
+            delay = min(self._poll_seconds, self._wait_seconds - elapsed)
+            context.progress_update("Waiting for another training run to finish...")
+            self._sleep(delay)
+
+
+class ReleaseTrainingSlotStep(PipelineStep):
+    """Drop the training slot after the TensorFlow child has exited."""
+
+    def __init__(self, *, slot: DbTrainingSlot | None = None) -> None:
+        super().__init__(
+            name="ReleaseTrainingSlot",
+            max_retries=0,
+            critical=False,
+            run_if_earlier_step_failed=True,
+        )
+        self._slot = slot
+
+    def run(self, db_client: DatabaseClient, context: PipelineContext) -> None:
+        run_id = context.extras.get(PIPELINE_RUN_ID_EXTRA)
+        if not isinstance(run_id, str) or not run_id:
+            logger.info("ReleaseTrainingSlot skipped: no pipeline run id")
+            return
+        slot = self._slot or DbTrainingSlot(db_client)
+        slot.release(run_id)
+        logger.info("Training slot released run_id=%s", run_id)
+
+
 class PrepareTrainingStep(PipelineStep):
     """Count pending moves, then load the parent, the served model, and the train batch."""
 
@@ -56,6 +165,8 @@ class PrepareTrainingStep(PipelineStep):
         self._scheme = scheme
 
     def run(self, db_client: DatabaseClient, context: PipelineContext) -> None:
+        if _skipped(context):
+            return
         self._scheme.note_checked(db_client)
         pending = self._scheme.count_pending(db_client)
         context.extras["pending_count"] = pending
@@ -89,11 +200,10 @@ class PrepareTrainingStep(PipelineStep):
 
 
 class TrainModelStep(PipelineStep):
-    """Download parent weights if needed, fit, and keep only the saved file."""
+    """Download parent weights if needed, then fit inside this step's child process."""
 
-    def __init__(self, scheme: TrainingScheme) -> None:
-        super().__init__(name="TrainModel")
-        self._scheme = scheme
+    def __init__(self, *, process: StepProcess | None = None) -> None:
+        super().__init__(name="TrainModel", process=process)
 
     def run(self, db_client: DatabaseClient, context: PipelineContext) -> None:
         del db_client
@@ -104,6 +214,8 @@ class TrainModelStep(PipelineStep):
         if not datums:
             context.extras[SKIP_KEY] = True
             return
+        if self.process is None:
+            raise ValueError("TrainModel requires a step process")
 
         parent: ModelHandle | None = context.extras.get("parent")
         weights_path: Path | None = None
@@ -113,16 +225,18 @@ class TrainModelStep(PipelineStep):
             logger.info("Downloading parent weights uri=%s", parent.weights_uri)
             weights_path = MLflowTracker().download_keras_weights(parent.weights_uri)
 
-        model, metrics = self._scheme.fit(datums, weights_path=weights_path)
-        out_path = Path(tempfile.mkdtemp(prefix="scheme_model_")) / "model.keras"
-        self._scheme.save(model, out_path)
-        context.extras["trained_model_path"] = out_path
-        context.extras["train_metrics"] = metrics
-        # Free the batch before the eval load. A retry of this step already
-        # finished only after this assignment, so a later score retry still
-        # has the file.
+        fitted = self.process.call("fit", datums=datums, weights_path=weights_path)
+        context.extras["trained_model_path"] = Path(fitted["model_path"])
+        context.extras["train_metrics"] = fitted["metrics"]
+        # The child keeps the batch until it finishes the fit. Drop the parent's copy
+        # before the eval load. A retry of this step already finished only after this
+        # assignment, so a later score retry still has the file.
         context.extras.pop("train_datums", None)
-        logger.info("TrainModel saved path=%s n_samples=%s", out_path, metrics.get("n_samples"))
+        logger.info(
+            "TrainModel saved path=%s n_samples=%s",
+            context.extras["trained_model_path"],
+            fitted["metrics"].get("n_samples"),
+        )
 
 
 class PrepareEvaluationStep(PipelineStep):
@@ -145,21 +259,15 @@ class PrepareEvaluationStep(PipelineStep):
 
 
 class ScoreEvaluationStep(PipelineStep):
-    """Score the new file and the served model on the prepared eval list."""
+    """Score the new file and the served model inside this step's child process."""
 
-    def __init__(self) -> None:
-        super().__init__(name="ScoreEvaluation")
+    def __init__(self, *, process: StepProcess | None = None) -> None:
+        super().__init__(name="ScoreEvaluation", process=process)
 
     def run(self, db_client: DatabaseClient, context: PipelineContext) -> None:
         del db_client
         if _skipped(context):
             return
-
-        from chess_teacher.pipelines.neural_network.eval_metrics import (
-            score_models_on_datums,
-        )
-        from chess_teacher.pipelines.neural_network.mlflow_utils import MLflowTracker
-        from chess_teacher.pipelines.neural_network.train import load_candidate_style_keras
 
         datums = context.extras.get("eval_datums") or []
         model_path: Path | None = context.extras.get("trained_model_path")
@@ -170,18 +278,24 @@ class ScoreEvaluationStep(PipelineStep):
             context.extras["candidate_eval"] = None
             context.extras["parent_eval"] = None
             return
+        if self.process is None:
+            raise ValueError("ScoreEvaluation requires a step process")
 
-        candidate_model = load_candidate_style_keras(model_path, compile_model=False)
-        models: dict[str, object] = {"candidate": candidate_model}
+        from chess_teacher.pipelines.neural_network.mlflow_utils import MLflowTracker
 
+        parent_weights_path: Path | None = None
         parent: ModelHandle | None = context.extras.get("parent")
         if parent is not None and parent.compatible and parent.weights_uri:
-            parent_path = MLflowTracker().require_keras_weights(parent.weights_uri)
-            models["parent"] = load_candidate_style_keras(parent_path, compile_model=False)
+            parent_weights_path = MLflowTracker().require_keras_weights(parent.weights_uri)
 
-        scored = score_models_on_datums(models, datums)
-        context.extras["candidate_eval"] = scored["candidate"]
-        context.extras["parent_eval"] = scored.get("parent")
+        scored = self.process.call(
+            "score",
+            model_path=model_path,
+            parent_weights_path=parent_weights_path,
+            datums=datums,
+        )
+        context.extras["candidate_eval"] = scored["candidate_eval"]
+        context.extras["parent_eval"] = scored["parent_eval"]
         if context.extras["parent_eval"] is None:
             logger.info(
                 "ScoreEvaluation candidate only (cold start). n_eval=%s",
@@ -377,27 +491,50 @@ class ApplyPromotionStep(PipelineStep):
         logger.info("ApplyPromotion served=%s", promoted.key)
 
 
-def _parent_baseline_eval(
-    context: PipelineContext,
-    current: ModelHandle,
-) -> EvalMetrics | None:
-    """Reuse the training-parent score when it is already the parent baseline."""
-    scored = context.extras.get("parent")
-    if scored is not None and scored.key == current.key and scored.kind == current.kind:
-        return context.extras.get("parent_eval")
+class ScoreParentBaselineStep(PipelineStep):
+    """Score a parent baseline that is not the model we just trained.
 
-    datums = context.extras.get("eval_datums") or []
-    if not datums or not current.weights_uri:
-        return None
+    This holds the same child as fit and score, so the extra load stays inside
+    the training slot. When the pointer already is the training parent, the
+    score from ``ScoreEvaluation`` is reused and the child is not called.
+    """
 
-    from chess_teacher.pipelines.neural_network.eval_metrics import evaluate_datums
-    from chess_teacher.pipelines.neural_network.mlflow_utils import MLflowTracker
-    from chess_teacher.pipelines.neural_network.train import load_candidate_style_keras
+    def __init__(self, scheme: TrainingScheme, *, process: StepProcess | None = None) -> None:
+        super().__init__(name="ScoreParentBaseline", process=process)
+        self._scheme = scheme
 
-    logger.info("Scoring parent baseline key=%s", current.key)
-    weights_path = MLflowTracker().require_keras_weights(current.weights_uri)
-    model = load_candidate_style_keras(weights_path, compile_model=False)
-    return evaluate_datums(model, datums)
+    def run(self, db_client: DatabaseClient, context: PipelineContext) -> None:
+        if _skipped(context) or not self._scheme.considers_parent_baseline:
+            return
+
+        current = self._scheme.current_parent_baseline(db_client)
+        if current is None or not current.compatible or not current.weights_uri:
+            context.extras["parent_baseline_eval"] = None
+            return
+
+        scored = context.extras.get("parent")
+        if scored is not None and scored.key == current.key and scored.kind == current.kind:
+            context.extras["parent_baseline_eval"] = context.extras.get("parent_eval")
+            logger.info("ScoreParentBaseline reuse key=%s", current.key)
+            return
+
+        datums = context.extras.get("eval_datums") or []
+        if not datums:
+            logger.info("ScoreParentBaseline skipped: empty eval set.")
+            context.extras["parent_baseline_eval"] = None
+            return
+        if self.process is None:
+            raise ValueError("ScoreParentBaseline requires a step process")
+
+        from chess_teacher.pipelines.neural_network.mlflow_utils import MLflowTracker
+
+        logger.info("Scoring parent baseline key=%s", current.key)
+        weights_path = MLflowTracker().require_keras_weights(current.weights_uri)
+        context.extras["parent_baseline_eval"] = self.process.call(
+            "score_weights",
+            weights_path=weights_path,
+            datums=datums,
+        )
 
 
 class AdoptParentBaselineStep(PipelineStep):
@@ -422,9 +559,7 @@ class AdoptParentBaselineStep(PipelineStep):
             return
 
         current = self._scheme.current_parent_baseline(db_client)
-        parent_eval = None
-        if current is not None and current.compatible and current.weights_uri:
-            parent_eval = _parent_baseline_eval(context, current)
+        parent_eval = context.extras.get("parent_baseline_eval")
         decision = self._scheme.decide_parent_baseline(
             candidate_eval=context.extras.get("candidate_eval"),
             parent=current,
@@ -448,15 +583,29 @@ def build_training_scheme_steps(
     *,
     promote: bool = False,
 ) -> list[PipelineStep]:
-    """Same step classes for every scheme. ``promote`` adds the write steps."""
+    """Same step classes for every scheme. ``promote`` adds the write steps.
+
+    Train and score share one child interpreter. The runner starts it at TrainModel
+    and exits it after the last step that holds that object. On a platform run
+    that can adopt a parent baseline, that last step scores the baseline inside
+    the same child. The training slot wraps that window and is dropped on the
+    next step.
+    """
+    tensorflow = StepProcess("chess_teacher.pipelines.neural_network.tf_worker")
     steps: list[PipelineStep] = [
         PrepareTrainingStep(scheme),
-        TrainModelStep(scheme),
+        WaitForTrainingSlotStep(scheme),
+        TrainModelStep(process=tensorflow),
         PrepareEvaluationStep(scheme),
-        ScoreEvaluationStep(),
+        ScoreEvaluationStep(process=tensorflow),
+    ]
+    if promote and scheme.considers_parent_baseline:
+        steps.append(ScoreParentBaselineStep(scheme, process=tensorflow))
+    steps.extend([
+        ReleaseTrainingSlotStep(),
         RecordCandidateStep(scheme),
         AdvanceTrainingCursorStep(scheme),
-    ]
+    ])
     if promote:
         steps.extend([
             DecideFromScoresStep(scheme),
