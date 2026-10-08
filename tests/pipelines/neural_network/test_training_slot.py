@@ -9,6 +9,7 @@ import pytest
 
 from chess_teacher.pipelines.neural_network.scheme_steps import (
     SKIP_KEY,
+    ReleaseTrainingSlotStep,
     WaitForTrainingSlotStep,
 )
 from chess_teacher.pipelines.neural_network.training_slot import (
@@ -111,7 +112,7 @@ def test_low_pending_skips_without_taking_the_slot() -> None:
     assert slot.acquire_calls == 0
 
 
-def test_free_slot_and_memory_acquire_and_register_release() -> None:
+def test_free_slot_and_memory_acquire_without_a_cleanup_hook() -> None:
     scheme = _Scheme()
     slot = _Slot()
     context = _context()
@@ -121,8 +122,14 @@ def test_free_slot_and_memory_acquire_and_register_release() -> None:
     assert sleeps == []
     assert slot.holder == "run-1"
     assert SKIP_KEY not in context.extras
-    cleanups = context.extras[PIPELINE_CLEANUPS_EXTRA]
-    cleanups[0]()
+    assert PIPELINE_CLEANUPS_EXTRA not in context.extras
+
+
+def test_release_step_drops_the_holder() -> None:
+    slot = _Slot()
+    slot.holder = "run-1"
+    context = _context()
+    ReleaseTrainingSlotStep(slot=slot).run(MagicMock(), context)  # type: ignore[arg-type]
     assert slot.holder is None
     assert slot.release_calls == 1
 

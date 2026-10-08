@@ -31,7 +31,6 @@ from chess_teacher.utils.pipeline_utils.pipeline_base import (
     PIPELINE_RUN_ID_EXTRA,
     PipelineContext,
     PipelineStep,
-    register_pipeline_cleanup,
 )
 from chess_teacher.utils.pipeline_utils.step_process import StepProcess
 
@@ -60,8 +59,8 @@ def _model_id(handle: ModelHandle) -> str:
 class WaitForTrainingSlotStep(PipelineStep):
     """Wait until this run holds the global training slot and the host has memory.
 
-    Ingest and preprocess stay outside this step. The slot is released when the
-    training pipeline finishes, including when a later step fails.
+    This sits immediately before the TensorFlow steps. ``ReleaseTrainingSlot`` drops
+    the slot once that child has exited, including when the fit or the score failed.
     """
 
     def __init__(
@@ -107,7 +106,6 @@ class WaitForTrainingSlotStep(PipelineStep):
         while True:
             if slot.try_acquire(run_id, now=get_current_datetime()):
                 if self._memory_available():
-                    register_pipeline_cleanup(context, lambda: slot.release(run_id))
                     logger.info("Training slot acquired run_id=%s", run_id)
                     return
                 slot.release(run_id)
@@ -135,6 +133,28 @@ class WaitForTrainingSlotStep(PipelineStep):
             delay = min(self._poll_seconds, self._wait_seconds - elapsed)
             context.progress_update("Waiting for another training run to finish...")
             self._sleep(delay)
+
+
+class ReleaseTrainingSlotStep(PipelineStep):
+    """Drop the training slot after the TensorFlow child has exited."""
+
+    def __init__(self, *, slot: DbTrainingSlot | None = None) -> None:
+        super().__init__(
+            name="ReleaseTrainingSlot",
+            max_retries=0,
+            critical=False,
+            run_if_earlier_step_failed=True,
+        )
+        self._slot = slot
+
+    def run(self, db_client: DatabaseClient, context: PipelineContext) -> None:
+        run_id = context.extras.get(PIPELINE_RUN_ID_EXTRA)
+        if not isinstance(run_id, str) or not run_id:
+            logger.info("ReleaseTrainingSlot skipped: no pipeline run id")
+            return
+        slot = self._slot or DbTrainingSlot(db_client)
+        slot.release(run_id)
+        logger.info("Training slot released run_id=%s", run_id)
 
 
 class PrepareTrainingStep(PipelineStep):
@@ -546,14 +566,17 @@ def build_training_scheme_steps(
 
     Train and score share one child interpreter. The runner starts it at TrainModel
     and exits it after ScoreEvaluation, which is the last step holding that object.
+    The training slot is acquired on the step before that child and dropped on the
+    step after it.
     """
     tensorflow = StepProcess("chess_teacher.pipelines.neural_network.tf_worker")
     steps: list[PipelineStep] = [
-        WaitForTrainingSlotStep(scheme),
         PrepareTrainingStep(scheme),
+        WaitForTrainingSlotStep(scheme),
         TrainModelStep(process=tensorflow),
         PrepareEvaluationStep(scheme),
         ScoreEvaluationStep(process=tensorflow),
+        ReleaseTrainingSlotStep(),
         RecordCandidateStep(scheme),
         AdvanceTrainingCursorStep(scheme),
     ]

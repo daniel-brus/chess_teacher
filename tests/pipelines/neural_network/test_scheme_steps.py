@@ -301,11 +301,12 @@ def test_both_scopes_build_the_same_step_classes() -> None:
     assert baseline[3].process is None
     assert personal[2].process is not baseline[2].process
     assert [step.name for step in baseline] == [
-        "WaitForTrainingSlot",
         "PrepareTraining",
+        "WaitForTrainingSlot",
         "TrainModel",
         "PrepareEvaluation",
         "ScoreEvaluation",
+        "ReleaseTrainingSlot",
         "RecordCandidate",
         "AdvanceTrainingCursor",
         "DecideFromScores",
