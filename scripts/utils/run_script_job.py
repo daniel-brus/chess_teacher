@@ -41,6 +41,7 @@ ALLOWED_SCRIPTS = frozenset({
     "entrypoints/baseline_promotion.py",
     "entrypoints/maintenance.py",
     "ops/backfill_candidate_evals.py",
+    "ops/backfill_training_scores.py",
     "ops/baseline_reset_training.py",
     "ops/baseline_train_until_caught_up.py",
     "ops/mlflow_db_upgrade.py",

@@ -30,6 +30,7 @@ app_pages = [
     st.Page("streamlit_pages/pipeline.py", title="Pipeline"),
     st.Page("streamlit_pages/play.py", title="Play"),
     st.Page("streamlit_pages/statistics.py", title="Statistics"),
+    st.Page("streamlit_pages/training.py", title="Training"),
     st.Page("streamlit_pages/settings.py", title="Settings"),
 ]
 admin_page = st.Page("streamlit_pages/admin.py", title="Admin")
