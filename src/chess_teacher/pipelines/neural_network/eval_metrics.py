@@ -19,6 +19,7 @@ from chess_teacher.pipelines.neural_network.create_training_set import (
 )
 from chess_teacher.pipelines.neural_network.ply_weights import (
     candidate_style_sample_weights,
+    labeled_delta_vs_best_pawns,
     user_not_sf_best_mask,
 )
 from chess_teacher.utils.logging import get_logger
@@ -54,6 +55,10 @@ class EvalMetrics:
     n_sf_agree: int
     n_sf_disagree: int
     sf_disagree_frac: float
+    # Mean/median pawn gap of the model's chosen move versus Stockfish's best.
+    # 0 = picked the engine's best move. Negative = worse, in pawns (user POV).
+    sf_delta_mean_pawns: float = 0.0
+    sf_delta_median_pawns: float = 0.0
 
     def as_dict(self) -> dict[str, float]:
         out: dict[str, float] = {
@@ -65,6 +70,8 @@ class EvalMetrics:
             "n_sf_agree": float(self.n_sf_agree),
             "n_sf_disagree": float(self.n_sf_disagree),
             "sf_disagree_frac": self.sf_disagree_frac,
+            "sf_delta_mean_pawns": self.sf_delta_mean_pawns,
+            "sf_delta_median_pawns": self.sf_delta_median_pawns,
         }
         if self.top1_sf_agree is not None:
             out["top1_sf_agree"] = self.top1_sf_agree
@@ -180,6 +187,20 @@ def _mean_or_none(hits: np.ndarray, selector: np.ndarray) -> float | None:
     return float(np.mean(hits[idx]))
 
 
+def predicted_sf_delta_pawns(
+    logits: np.ndarray,
+    mask: np.ndarray,
+    move_feats: np.ndarray,
+) -> np.ndarray:
+    """Pawn gap of each row's argmax move versus Stockfish's best (user POV).
+
+    ``0`` is the engine's best legal move. Negative values are pawns worse.
+    """
+    masked = np.where(np.asarray(mask) > 0.5, np.asarray(logits, dtype=np.float64), -np.inf)
+    chosen = np.argmax(masked, axis=1)
+    return labeled_delta_vs_best_pawns(move_feats, chosen)
+
+
 def compute_candidate_style_metrics(
     *,
     logits: np.ndarray,
@@ -198,6 +219,7 @@ def compute_candidate_style_metrics(
     top1, top3 = _topk_hits(logits_arr, mask, labels, max_candidates=max_candidates)
     disagree = user_not_sf_best_mask(move_feats, labels)
     agree = ~disagree
+    sf_delta = predicted_sf_delta_pawns(logits_arr, mask, move_feats)
 
     weights = candidate_style_sample_weights(plies, move_feats, labels)
     w_sum = float(np.sum(weights))
@@ -216,6 +238,8 @@ def compute_candidate_style_metrics(
         n_sf_agree=int(np.sum(agree)),
         n_sf_disagree=int(np.sum(disagree)),
         sf_disagree_frac=float(np.mean(disagree)),
+        sf_delta_mean_pawns=float(np.mean(sf_delta)),
+        sf_delta_median_pawns=float(np.median(sf_delta)),
     )
 
 
@@ -370,6 +394,7 @@ def _metrics_from_hit_buffers(
     top3: np.ndarray,
     disagree: np.ndarray,
     weights: np.ndarray,
+    sf_delta_pawns: np.ndarray,
     n_input: int,
 ) -> EvalMetrics:
     """Build ``EvalMetrics`` from per-kept-row buffers (no logits retained)."""
@@ -394,6 +419,8 @@ def _metrics_from_hit_buffers(
         n_sf_agree=int(np.sum(agree)),
         n_sf_disagree=int(np.sum(disagree)),
         sf_disagree_frac=float(np.mean(disagree)),
+        sf_delta_mean_pawns=float(np.mean(sf_delta_pawns)),
+        sf_delta_median_pawns=float(np.median(sf_delta_pawns)),
     )
 
 
@@ -419,6 +446,7 @@ def score_models_on_datums(
     keys = list(models.keys())
     top1_parts: dict[str, list[np.ndarray]] = {key: [] for key in keys}
     top3_parts: dict[str, list[np.ndarray]] = {key: [] for key in keys}
+    delta_parts: dict[str, list[np.ndarray]] = {key: [] for key in keys}
     disagree_parts: list[np.ndarray] = []
     weight_parts: list[np.ndarray] = []
 
@@ -455,6 +483,7 @@ def score_models_on_datums(
             )
             top1_parts[key].append(np.asarray(top1, dtype=bool))
             top3_parts[key].append(np.asarray(top3, dtype=bool))
+            delta_parts[key].append(predicted_sf_delta_pawns(logits, packed.mask, packed.feats))
 
         logger.info(
             "Eval chunk %s/%s kept=%s / chunk_in=%s",
@@ -480,6 +509,7 @@ def score_models_on_datums(
             top3=np.concatenate(top3_parts[key]),
             disagree=disagree_all,
             weights=weights_all,
+            sf_delta_pawns=np.concatenate(delta_parts[key]),
             n_input=n_input,
         )
     return out

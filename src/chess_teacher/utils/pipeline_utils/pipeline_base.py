@@ -53,6 +53,11 @@ _DEFAULT_NO_RETRY_ON: tuple[type[Exception], ...] = (
 )
 
 
+# Stashed on PipelineContext.extras once the run lock exists, so later steps
+# can key one row per run without reading the pipeline object.
+PIPELINE_RUN_ID_EXTRA = "pipeline_run_id"
+
+
 @dataclass(frozen=True)
 class PipelineContext:
     user_id: str | None = None
@@ -439,6 +444,7 @@ class Pipeline:
         ).save_new_to_db(self.db_client)
 
         self._run_id = run_id
+        self.context.extras[PIPELINE_RUN_ID_EXTRA] = run_id
         self.logger.info(f"[Pipeline:{self.name}] Lock acquired (run_id={run_id}).")
         self.context.progress_pop()
         self.context.progress_success("Succesfully registered current pipeline run.")

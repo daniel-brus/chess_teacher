@@ -115,6 +115,8 @@ def test_score_models_chunked_matches_full_pack(monkeypatch: pytest.MonkeyPatch)
     assert chunked.n_sf_agree == full.n_sf_agree
     assert chunked.n_sf_disagree == full.n_sf_disagree
     assert chunked.top1_overall_weighted == pytest.approx(full.top1_overall_weighted)
+    assert chunked.sf_delta_mean_pawns == pytest.approx(full.sf_delta_mean_pawns)
+    assert chunked.sf_delta_median_pawns == pytest.approx(full.sf_delta_median_pawns)
 
 
 def test_perfect_predictions_top1_is_one() -> None:
@@ -134,6 +136,9 @@ def test_perfect_predictions_top1_is_one() -> None:
     assert m.top1_sf_disagree == 1.0
     assert m.n_sf_agree == 2
     assert m.n_sf_disagree == 2
+    # Label deltas on the four rows are 0, -1, 0, -2 pawns, and top-1 hits them.
+    assert m.sf_delta_mean_pawns == pytest.approx(-0.75)
+    assert m.sf_delta_median_pawns == pytest.approx(-0.5)
 
 
 def test_wrong_top1_on_disagree_only() -> None:
@@ -171,7 +176,35 @@ def test_as_dict_includes_stratified_keys() -> None:
     d = m.as_dict()
     assert "top1_sf_agree" in d
     assert "top1_sf_disagree" in d
+    assert "sf_delta_mean_pawns" in d
+    assert "sf_delta_median_pawns" in d
     assert d["n_eval"] == 2.0
+
+
+def test_sf_delta_uses_the_chosen_move() -> None:
+    """Strength is the model's pick versus Stockfish, not the labeled move."""
+    logits, mask, labels, feats, plies = _synthetic_batch(n=2, max_candidates=4)
+    delta_i = CANDIDATE_MOVE_FEAT_KEYS.index("delta_vs_best")
+    scale = 5.0
+    for row in range(2):
+        label = int(labels[row])
+        chosen = (label + 1) % 4
+        feats[row, label, delta_i] = np.tanh(-0.4 / scale)
+        feats[row, chosen, delta_i] = np.tanh(-0.25 / scale)
+        logits[row, :] = -10.0
+        logits[row, chosen] = 10.0
+    metrics = compute_candidate_style_metrics(
+        logits=logits,
+        mask=mask,
+        labels=labels,
+        move_feats=feats,
+        plies=plies,
+        n_input=2,
+        max_candidates=4,
+    )
+    assert metrics.top1_overall == 0.0
+    assert metrics.sf_delta_mean_pawns == pytest.approx(-0.25)
+    assert metrics.sf_delta_median_pawns == pytest.approx(-0.25)
 
 
 def _metrics(*, top1: float, agree: float, disagree: float) -> EvalMetrics:

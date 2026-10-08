@@ -18,8 +18,13 @@ from chess_teacher.pipelines.neural_network.training_scheme import (
     TrainingScheme,
 )
 from chess_teacher.utils.db.client import DatabaseClient
+from chess_teacher.utils.general_utils import get_current_datetime
 from chess_teacher.utils.logging import get_logger
-from chess_teacher.utils.pipeline_utils.pipeline_base import PipelineContext, PipelineStep
+from chess_teacher.utils.pipeline_utils.pipeline_base import (
+    PIPELINE_RUN_ID_EXTRA,
+    PipelineContext,
+    PipelineStep,
+)
 
 logger = get_logger()
 
@@ -28,6 +33,19 @@ SKIP_KEY = "model_run_skip"
 
 def _skipped(context: PipelineContext) -> bool:
     return bool(context.extras.get(SKIP_KEY))
+
+
+def _fmt_optional(value: float | None) -> str:
+    if value is None:
+        return "none"
+    return f"{value:.4f}"
+
+
+def _model_id(handle: ModelHandle) -> str:
+    model_id = getattr(handle.payload, "id", None)
+    if not isinstance(model_id, str) or not model_id:
+        raise ValueError("RecordCandidate model handle has no id")
+    return model_id
 
 
 class PrepareTrainingStep(PipelineStep):
@@ -238,6 +256,56 @@ class RecordCandidateStep(PipelineStep):
         )
         context.extras["candidate"] = handle
         logger.info("RecordCandidate version=%s uri=%s", handle.key, artifact_uri)
+        self._save_training_score(
+            db_client,
+            context,
+            version=version,
+            model_id=_model_id(handle),
+            candidate_eval=candidate_eval,
+        )
+
+    def _save_training_score(
+        self,
+        db_client: DatabaseClient,
+        context: PipelineContext,
+        *,
+        version: str,
+        model_id: str,
+        candidate_eval: EvalMetrics | None,
+    ) -> None:
+        """One row for this run's final model. Skipped when the eval set was empty."""
+        if candidate_eval is None:
+            logger.info("RecordCandidate: no val scores to store.")
+            return
+
+        from chess_teacher.pipelines.neural_network.training_scores import (
+            training_score_from_eval,
+        )
+
+        run_id = context.extras.get(PIPELINE_RUN_ID_EXTRA)
+        if not isinstance(run_id, str) or not run_id:
+            raise ValueError("RecordCandidate requires pipeline_run_id to store training scores")
+        row = training_score_from_eval(
+            run_id=run_id,
+            pipeline_name=self._scheme.pipeline_name,
+            user_id=context.user_id,
+            version=version,
+            model_id=model_id,
+            scored_at=get_current_datetime(),
+            metrics=candidate_eval,
+        )
+        row.save_to_db(db_client)
+        logger.info(
+            "TrainingScore run_id=%s version=%s n_eval=%s val_top1=%.4f "
+            "val_top1_disagree=%s sf_delta_mean_pawns=%.4f sf_delta_median_pawns=%.4f",
+            row.run_id,
+            row.version,
+            row.n_eval,
+            row.val_top1,
+            _fmt_optional(row.val_top1_disagree),
+            row.sf_delta_mean_pawns,
+            row.sf_delta_median_pawns,
+        )
 
 
 class AdvanceTrainingCursorStep(PipelineStep):
