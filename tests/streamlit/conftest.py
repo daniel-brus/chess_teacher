@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 import polars as pl
 import pytest
 
+from chess_teacher.pipelines.neural_network.training_progress import TrainingProgress
 from chess_teacher.platform.user import User
 
 
@@ -82,5 +83,9 @@ def patch_streamlit_page_deps(
     monkeypatch.setattr(
         "chess_teacher.maintenance.log_analytics.load_exception_hourly_counts",
         lambda _db: empty,
+    )
+    monkeypatch.setattr(
+        "chess_teacher.pipelines.neural_network.training_progress.load_training_progress",
+        lambda _db, _user_id: TrainingProgress(baselines=(), personals=(), scores=()),
     )
     return smoke_user

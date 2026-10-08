@@ -46,7 +46,9 @@ def test_home_page_renders_welcome(
     at = _run_page("home.py")
     assert any("Welcome to Chess Teacher" in title for title in _title_values(at))
     assert any("Smoke Tester" in title for title in _title_values(at))
-    assert any("linking a chess.com or lichess account" in info.lower() for info in _info_values(at))
+    assert any(
+        "linking a chess.com or lichess account" in info.lower() for info in _info_values(at)
+    )
 
 
 def test_pipeline_page_renders_empty_accounts_state(
@@ -100,6 +102,58 @@ def test_admin_page_renders_empty_aggregates_state(
     at = _run_page("admin.py")
     assert "Logging dashboard" in _title_values(at)
     assert any("no log aggregates yet" in info.lower() for info in _info_values(at))
+
+
+def test_training_page_renders_empty_state(
+    patch_streamlit_page_deps: User,
+) -> None:
+    at = _run_page("training.py")
+    assert "Training" in _title_values(at)
+    assert any("no training models yet" in info.lower() for info in _info_values(at))
+
+
+def test_training_page_renders_scores_and_lineage(
+    patch_streamlit_page_deps: User,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from datetime import UTC, datetime
+
+    from chess_teacher.pipelines.neural_network.models import BaselineModel, BaselineModelStatus
+    from chess_teacher.pipelines.neural_network.training_progress import TrainingProgress
+    from chess_teacher.pipelines.neural_network.training_scores import training_score_from_eval
+    from tests.pipelines.neural_network.test_training_progress import _metrics
+
+    trained_at = datetime(2026, 10, 2, tzinfo=UTC)
+    baseline = BaselineModel(
+        id="base-v1",
+        version="v1",
+        trained_at=trained_at,
+        status=BaselineModelStatus.PRODUCTION,
+        is_parent_baseline=True,
+    )
+    score = training_score_from_eval(
+        run_id="run-base-v1",
+        pipeline_name="baseline_training",
+        user_id=None,
+        version="v1",
+        model_id=baseline.id,
+        scored_at=trained_at,
+        metrics=_metrics(disagree=0.2),
+    )
+    monkeypatch.setattr(
+        "chess_teacher.pipelines.neural_network.training_progress.load_training_progress",
+        lambda _db, _user_id: TrainingProgress(
+            baselines=(baseline,),
+            personals=(),
+            scores=(score,),
+        ),
+    )
+    at = _run_page("training.py")
+    assert "Training" in _title_values(at)
+    assert any(str(box.label) == "Metrics" for box in at.multiselect)
+    assert at.dataframe
+    captions = [str(caption.value) for caption in at.caption]
+    assert any("personal model" in caption for caption in captions)
 
 
 def test_privacy_page_renders() -> None:
