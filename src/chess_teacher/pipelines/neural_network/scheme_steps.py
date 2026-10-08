@@ -491,27 +491,50 @@ class ApplyPromotionStep(PipelineStep):
         logger.info("ApplyPromotion served=%s", promoted.key)
 
 
-def _parent_baseline_eval(
-    context: PipelineContext,
-    current: ModelHandle,
-) -> EvalMetrics | None:
-    """Reuse the training-parent score when it is already the parent baseline."""
-    scored = context.extras.get("parent")
-    if scored is not None and scored.key == current.key and scored.kind == current.kind:
-        return context.extras.get("parent_eval")
+class ScoreParentBaselineStep(PipelineStep):
+    """Score a parent baseline that is not the model we just trained.
 
-    datums = context.extras.get("eval_datums") or []
-    if not datums or not current.weights_uri:
-        return None
+    This holds the same child as fit and score, so the extra load stays inside
+    the training slot. When the pointer already is the training parent, the
+    score from ``ScoreEvaluation`` is reused and the child is not called.
+    """
 
-    from chess_teacher.pipelines.neural_network.eval_metrics import evaluate_datums
-    from chess_teacher.pipelines.neural_network.mlflow_utils import MLflowTracker
-    from chess_teacher.pipelines.neural_network.train import load_candidate_style_keras
+    def __init__(self, scheme: TrainingScheme, *, process: StepProcess | None = None) -> None:
+        super().__init__(name="ScoreParentBaseline", process=process)
+        self._scheme = scheme
 
-    logger.info("Scoring parent baseline key=%s", current.key)
-    weights_path = MLflowTracker().require_keras_weights(current.weights_uri)
-    model = load_candidate_style_keras(weights_path, compile_model=False)
-    return evaluate_datums(model, datums)
+    def run(self, db_client: DatabaseClient, context: PipelineContext) -> None:
+        if _skipped(context) or not self._scheme.considers_parent_baseline:
+            return
+
+        current = self._scheme.current_parent_baseline(db_client)
+        if current is None or not current.compatible or not current.weights_uri:
+            context.extras["parent_baseline_eval"] = None
+            return
+
+        scored = context.extras.get("parent")
+        if scored is not None and scored.key == current.key and scored.kind == current.kind:
+            context.extras["parent_baseline_eval"] = context.extras.get("parent_eval")
+            logger.info("ScoreParentBaseline reuse key=%s", current.key)
+            return
+
+        datums = context.extras.get("eval_datums") or []
+        if not datums:
+            logger.info("ScoreParentBaseline skipped: empty eval set.")
+            context.extras["parent_baseline_eval"] = None
+            return
+        if self.process is None:
+            raise ValueError("ScoreParentBaseline requires a step process")
+
+        from chess_teacher.pipelines.neural_network.mlflow_utils import MLflowTracker
+
+        logger.info("Scoring parent baseline key=%s", current.key)
+        weights_path = MLflowTracker().require_keras_weights(current.weights_uri)
+        context.extras["parent_baseline_eval"] = self.process.call(
+            "score_weights",
+            weights_path=weights_path,
+            datums=datums,
+        )
 
 
 class AdoptParentBaselineStep(PipelineStep):
@@ -536,9 +559,7 @@ class AdoptParentBaselineStep(PipelineStep):
             return
 
         current = self._scheme.current_parent_baseline(db_client)
-        parent_eval = None
-        if current is not None and current.compatible and current.weights_uri:
-            parent_eval = _parent_baseline_eval(context, current)
+        parent_eval = context.extras.get("parent_baseline_eval")
         decision = self._scheme.decide_parent_baseline(
             candidate_eval=context.extras.get("candidate_eval"),
             parent=current,
@@ -565,9 +586,10 @@ def build_training_scheme_steps(
     """Same step classes for every scheme. ``promote`` adds the write steps.
 
     Train and score share one child interpreter. The runner starts it at TrainModel
-    and exits it after ScoreEvaluation, which is the last step holding that object.
-    The training slot is acquired on the step before that child and dropped on the
-    step after it.
+    and exits it after the last step that holds that object. On a platform run
+    that can adopt a parent baseline, that last step scores the baseline inside
+    the same child. The training slot wraps that window and is dropped on the
+    next step.
     """
     tensorflow = StepProcess("chess_teacher.pipelines.neural_network.tf_worker")
     steps: list[PipelineStep] = [
@@ -576,10 +598,14 @@ def build_training_scheme_steps(
         TrainModelStep(process=tensorflow),
         PrepareEvaluationStep(scheme),
         ScoreEvaluationStep(process=tensorflow),
+    ]
+    if promote and scheme.considers_parent_baseline:
+        steps.append(ScoreParentBaselineStep(scheme, process=tensorflow))
+    steps.extend([
         ReleaseTrainingSlotStep(),
         RecordCandidateStep(scheme),
         AdvanceTrainingCursorStep(scheme),
-    ]
+    ])
     if promote:
         steps.extend([
             DecideFromScoresStep(scheme),

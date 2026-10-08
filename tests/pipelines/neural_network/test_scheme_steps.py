@@ -23,6 +23,7 @@ from chess_teacher.pipelines.neural_network.scheme_steps import (
     PrepareEvaluationStep,
     PrepareTrainingStep,
     ScoreEvaluationStep,
+    ScoreParentBaselineStep,
     TrainModelStep,
     build_training_scheme_steps,
 )
@@ -295,12 +296,7 @@ def test_apply_does_not_archive_a_different_chain() -> None:
 def test_both_scopes_build_the_same_step_classes() -> None:
     baseline = build_training_scheme_steps(ModelTraining(), promote=True)
     personal = build_training_scheme_steps(ModelTraining("user-1"), promote=True)
-    assert [type(step) for step in baseline] == [type(step) for step in personal]
-    assert baseline[2].process is baseline[4].process
-    assert baseline[2].process is not None
-    assert baseline[3].process is None
-    assert personal[2].process is not baseline[2].process
-    assert [step.name for step in baseline] == [
+    shared = [
         "PrepareTraining",
         "WaitForTrainingSlot",
         "TrainModel",
@@ -313,6 +309,20 @@ def test_both_scopes_build_the_same_step_classes() -> None:
         "ApplyPromotion",
         "AdoptParentBaseline",
     ]
+    assert [step.name for step in personal] == shared
+    assert [step.name for step in baseline] == [
+        *shared[:5],
+        "ScoreParentBaseline",
+        *shared[5:],
+    ]
+    assert baseline[2].process is baseline[4].process
+    assert baseline[2].process is baseline[5].process
+    assert baseline[2].process is not None
+    assert baseline[3].process is None
+    assert personal[2].process is personal[4].process
+    assert personal[5].name == "ReleaseTrainingSlot"
+    assert personal[5].process is None
+    assert personal[2].process is not baseline[2].process
 
 
 def test_promotion_blocks_a_disagree_drop() -> None:
@@ -781,6 +791,7 @@ def test_adopt_step_reuses_the_training_parent_score() -> None:
     context.extras["promoted"] = _promoted()
     context.extras["parent"] = pointer
     context.extras["parent_eval"] = held
+    context.extras["parent_baseline_eval"] = held
     context.extras["candidate_eval"] = held
     AdoptParentBaselineStep(scheme).run(MagicMock(), context)  # type: ignore[arg-type]
     assert scheme.seen_parent_eval is held
@@ -788,7 +799,7 @@ def test_adopt_step_reuses_the_training_parent_score() -> None:
     assert context.extras["parent_baseline"].key == "v2"
 
 
-def test_adopt_step_scores_a_different_parent_baseline(monkeypatch: Any) -> None:
+def test_score_parent_baseline_uses_the_child_for_a_different_model(monkeypatch: Any) -> None:
     scheme = _AdoptingScheme()
     scheme.pointer = ModelHandle(
         key="v1",
@@ -797,14 +808,7 @@ def test_adopt_step_scores_a_different_parent_baseline(monkeypatch: Any) -> None
         kind="baseline",
     )
     scored = _metrics(top1=0.3, agree=0.4, disagree=0.1)
-    monkeypatch.setattr(
-        "chess_teacher.pipelines.neural_network.eval_metrics.evaluate_datums",
-        lambda model, datums, **_kwargs: scored,
-    )
-    monkeypatch.setattr(
-        "chess_teacher.pipelines.neural_network.train.load_candidate_style_keras",
-        lambda path, compile_model=False: path,
-    )
+    process = _RecordingProcess(scored)
     _stub_mlflow_tracker(monkeypatch)
     monkeypatch.setattr(
         "chess_teacher.pipelines.neural_network.mlflow_utils.MLflowTracker.require_keras_weights",
@@ -812,7 +816,6 @@ def test_adopt_step_scores_a_different_parent_baseline(monkeypatch: Any) -> None
     )
     context = PipelineContext()
     context.extras[SKIP_KEY] = False
-    context.extras["promoted"] = _promoted("v3")
     context.extras["parent"] = ModelHandle(
         key="v2",
         weights_uri="s3://prod",
@@ -821,6 +824,43 @@ def test_adopt_step_scores_a_different_parent_baseline(monkeypatch: Any) -> None
     )
     context.extras["parent_eval"] = _metrics(top1=0.5, agree=0.5, disagree=0.5)
     context.extras["eval_datums"] = ["move"]
+    ScoreParentBaselineStep(scheme, process=process).run(MagicMock(), context)  # type: ignore[arg-type]
+    op, payload = process.calls[0]
+    assert op == "score_weights"
+    assert payload["weights_path"] == Path("/tmp/old.keras")
+    assert payload["datums"] == ["move"]
+    assert context.extras["parent_baseline_eval"] is scored
+
+
+def test_score_parent_baseline_reuses_the_training_parent() -> None:
+    scheme = _AdoptingScheme()
+    pointer = _parent_handle()
+    scheme.pointer = pointer
+    held = _metrics(top1=0.4, agree=0.5, disagree=0.2)
+    process = _RecordingProcess(held)
+    context = PipelineContext()
+    context.extras[SKIP_KEY] = False
+    context.extras["parent"] = pointer
+    context.extras["parent_eval"] = held
+    context.extras["eval_datums"] = ["move"]
+    ScoreParentBaselineStep(scheme, process=process).run(MagicMock(), context)  # type: ignore[arg-type]
+    assert process.calls == []
+    assert context.extras["parent_baseline_eval"] is held
+
+
+def test_adopt_step_uses_the_score_from_the_child() -> None:
+    scheme = _AdoptingScheme()
+    scheme.pointer = ModelHandle(
+        key="v1",
+        weights_uri="s3://old",
+        compatible=True,
+        kind="baseline",
+    )
+    scored = _metrics(top1=0.3, agree=0.4, disagree=0.1)
+    context = PipelineContext()
+    context.extras[SKIP_KEY] = False
+    context.extras["promoted"] = _promoted("v3")
+    context.extras["parent_baseline_eval"] = scored
     context.extras["candidate_eval"] = _metrics(top1=0.5, agree=0.5, disagree=0.5)
     AdoptParentBaselineStep(scheme).run(MagicMock(), context)  # type: ignore[arg-type]
     assert scheme.seen_parent_eval is scored
@@ -835,7 +875,7 @@ def test_adopt_step_leaves_the_pointer_when_the_gate_fails() -> None:
     context.extras[SKIP_KEY] = False
     context.extras["promoted"] = _promoted()
     context.extras["parent"] = scheme.pointer
-    context.extras["parent_eval"] = _metrics(top1=0.4, agree=0.5, disagree=0.2)
+    context.extras["parent_baseline_eval"] = _metrics(top1=0.4, agree=0.5, disagree=0.2)
     AdoptParentBaselineStep(scheme).run(MagicMock(), context)  # type: ignore[arg-type]
     assert scheme.adopted == []
     assert "parent_baseline" not in context.extras

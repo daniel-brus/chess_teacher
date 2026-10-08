@@ -57,7 +57,8 @@ class StepProcess:
         try:
             pickle.dump({"op": op, "payload": payload}, proc.stdin, protocol=4)
             proc.stdin.flush()
-            response = pickle.load(proc.stdout)
+            # The child is one we spawned. Its stdout is not an untrusted stream.
+            response = pickle.load(proc.stdout)  # nosec B301
         except (EOFError, pickle.UnpicklingError, OSError) as exc:
             raise StepProcessError(f"step process exited during {op}: {exc}") from exc
         if not isinstance(response, dict) or "ok" not in response:
@@ -94,7 +95,8 @@ def serve(ops: Mapping[str, Callable[..., Any]], protocol_out: BinaryIO) -> None
     """Read operations from stdin until shutdown. ``protocol_out`` carries the replies."""
     while True:
         try:
-            message = pickle.load(sys.stdin.buffer)
+            # Requests come from the parent that spawned this process.
+            message = pickle.load(sys.stdin.buffer)  # nosec B301
         except EOFError:
             return
         if not isinstance(message, dict):
