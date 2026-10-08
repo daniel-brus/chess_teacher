@@ -117,6 +117,12 @@ def test_score_models_chunked_matches_full_pack(monkeypatch: pytest.MonkeyPatch)
     assert chunked.top1_overall_weighted == pytest.approx(full.top1_overall_weighted)
     assert chunked.sf_delta_mean_pawns == pytest.approx(full.sf_delta_mean_pawns)
     assert chunked.sf_delta_median_pawns == pytest.approx(full.sf_delta_median_pawns)
+    assert chunked.top3_overall_weighted == pytest.approx(full.top3_overall_weighted)
+    assert chunked.sf_delta_mean_pawns_weighted == pytest.approx(full.sf_delta_mean_pawns_weighted)
+    assert chunked.sf_delta_median_pawns_weighted == pytest.approx(
+        full.sf_delta_median_pawns_weighted
+    )
+    assert chunked.top1_sf_disagree_weighted == pytest.approx(full.top1_sf_disagree_weighted)
 
 
 def test_perfect_predictions_top1_is_one() -> None:
@@ -139,6 +145,13 @@ def test_perfect_predictions_top1_is_one() -> None:
     # Label deltas on the four rows are 0, -1, 0, -2 pawns, and top-1 hits them.
     assert m.sf_delta_mean_pawns == pytest.approx(-0.75)
     assert m.sf_delta_median_pawns == pytest.approx(-0.5)
+    # Disagree rows carry a higher training weight, so the weighted gap is larger.
+    assert m.sf_delta_mean_pawns_weighted == pytest.approx(-1.0)
+    assert m.sf_delta_median_pawns_weighted == pytest.approx(-1.0)
+    assert m.top1_overall_weighted == pytest.approx(1.0)
+    assert m.top3_overall_weighted == pytest.approx(1.0)
+    assert m.top1_sf_agree_weighted == pytest.approx(1.0)
+    assert m.top1_sf_disagree_weighted == pytest.approx(1.0)
 
 
 def test_wrong_top1_on_disagree_only() -> None:
@@ -205,6 +218,36 @@ def test_sf_delta_uses_the_chosen_move() -> None:
     assert metrics.top1_overall == 0.0
     assert metrics.sf_delta_mean_pawns == pytest.approx(-0.25)
     assert metrics.sf_delta_median_pawns == pytest.approx(-0.25)
+
+
+def test_weighted_metrics_follow_heavier_plies() -> None:
+    """A miss on a late ply pulls the weighted scores down more than the plain mean."""
+    logits, mask, labels, feats, _plies = _synthetic_batch(n=2, max_candidates=4)
+    delta_i = CANDIDATE_MOVE_FEAT_KEYS.index("delta_vs_best")
+    # Both labels are the engine's best move, so the style boost stays off.
+    for row in range(2):
+        feats[row, int(labels[row]), delta_i] = 0.0
+    # Row 1 (late ply) misses.
+    wrong = (int(labels[1]) + 1) % 4
+    feats[1, wrong, delta_i] = np.tanh(-1.0 / 5.0)
+    logits[1, :] = -10.0
+    logits[1, int(labels[1])] = -20.0
+    logits[1, wrong] = 10.0
+    metrics = compute_candidate_style_metrics(
+        logits=logits,
+        mask=mask,
+        labels=labels,
+        move_feats=feats,
+        plies=[1, 80],
+        n_input=2,
+        max_candidates=4,
+    )
+    assert metrics.top1_overall == pytest.approx(0.5)
+    assert metrics.top1_overall_weighted < metrics.top1_overall
+    assert metrics.top3_overall_weighted < metrics.top3_overall
+    assert metrics.sf_delta_mean_pawns == pytest.approx(-0.5)
+    assert metrics.sf_delta_mean_pawns_weighted < metrics.sf_delta_mean_pawns
+    assert metrics.sf_delta_median_pawns_weighted == pytest.approx(-1.0)
 
 
 def _metrics(*, top1: float, agree: float, disagree: float) -> EvalMetrics:

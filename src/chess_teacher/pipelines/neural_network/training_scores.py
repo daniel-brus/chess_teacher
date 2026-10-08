@@ -27,13 +27,21 @@ class TrainingScore(TableDataClass):
     n_sf_disagree: int
     val_top1: float
     val_top3: float
+    val_top1_weighted: float
+    val_top3_weighted: float
     sf_delta_mean_pawns: float
     sf_delta_median_pawns: float
+    sf_delta_mean_pawns_weighted: float
+    sf_delta_median_pawns_weighted: float
     user_id: str | None = None
     val_top1_agree: float | None = None
     val_top3_agree: float | None = None
     val_top1_disagree: float | None = None
     val_top3_disagree: float | None = None
+    val_top1_agree_weighted: float | None = None
+    val_top3_agree_weighted: float | None = None
+    val_top1_disagree_weighted: float | None = None
+    val_top3_disagree_weighted: float | None = None
 
     @classmethod
     def get_yaml_path(cls) -> Path:
@@ -71,10 +79,18 @@ def training_score_from_eval(
         n_sf_disagree=metrics.n_sf_disagree,
         val_top1=metrics.top1_overall,
         val_top3=metrics.top3_overall,
+        val_top1_weighted=metrics.top1_overall_weighted,
+        val_top3_weighted=metrics.top3_overall_weighted,
         val_top1_agree=metrics.top1_sf_agree,
         val_top3_agree=metrics.top3_sf_agree,
         val_top1_disagree=metrics.top1_sf_disagree,
         val_top3_disagree=metrics.top3_sf_disagree,
+        val_top1_agree_weighted=metrics.top1_sf_agree_weighted,
+        val_top3_agree_weighted=metrics.top3_sf_agree_weighted,
+        val_top1_disagree_weighted=metrics.top1_sf_disagree_weighted,
+        val_top3_disagree_weighted=metrics.top3_sf_disagree_weighted,
         sf_delta_mean_pawns=metrics.sf_delta_mean_pawns,
         sf_delta_median_pawns=metrics.sf_delta_median_pawns,
+        sf_delta_mean_pawns_weighted=metrics.sf_delta_mean_pawns_weighted,
+        sf_delta_median_pawns_weighted=metrics.sf_delta_median_pawns_weighted,
     )

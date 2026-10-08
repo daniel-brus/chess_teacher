@@ -24,11 +24,11 @@ def _eval() -> EvalMetrics:
     return EvalMetrics(
         top1_overall=0.42,
         top3_overall=0.68,
+        top1_overall_weighted=0.40,
         top1_sf_agree=0.73,
         top3_sf_agree=0.92,
         top1_sf_disagree=0.25,
         top3_sf_disagree=0.54,
-        top1_overall_weighted=0.37,
         n_eval=10027,
         n_dropped=0,
         n_sf_agree=3690,
@@ -36,6 +36,13 @@ def _eval() -> EvalMetrics:
         sf_disagree_frac=0.63,
         sf_delta_mean_pawns=-0.31,
         sf_delta_median_pawns=-0.12,
+        top3_overall_weighted=0.70,
+        sf_delta_mean_pawns_weighted=-0.44,
+        sf_delta_median_pawns_weighted=-0.20,
+        top1_sf_agree_weighted=0.71,
+        top3_sf_agree_weighted=0.90,
+        top1_sf_disagree_weighted=0.22,
+        top3_sf_disagree_weighted=0.50,
     )
 
 
@@ -56,15 +63,23 @@ def test_training_score_copies_val_slices_and_sf_gap() -> None:
     )
     assert row.val_top1 == 0.42
     assert row.val_top3 == 0.68
+    assert row.val_top1_weighted == 0.40
+    assert row.val_top3_weighted == 0.70
     assert row.val_top1_agree == 0.73
     assert row.val_top3_agree == 0.92
     assert row.val_top1_disagree == 0.25
     assert row.val_top3_disagree == 0.54
+    assert row.val_top1_agree_weighted == 0.71
+    assert row.val_top3_agree_weighted == 0.90
+    assert row.val_top1_disagree_weighted == 0.22
+    assert row.val_top3_disagree_weighted == 0.50
     assert row.n_eval == 10027
     assert row.n_sf_agree == 3690
     assert row.n_sf_disagree == 6337
     assert row.sf_delta_mean_pawns == -0.31
     assert row.sf_delta_median_pawns == -0.12
+    assert row.sf_delta_mean_pawns_weighted == -0.44
+    assert row.sf_delta_median_pawns_weighted == -0.20
     assert row.user_id == "user-1"
 
 

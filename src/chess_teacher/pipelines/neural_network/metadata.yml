@@ -223,19 +223,35 @@ tables:
       - name: val_top1
         data_type: double precision
         nullable: false
-        comment: Fraction of eval rows where the model's top move was the labeled move
+        comment: Unweighted fraction of eval rows where the model's top move was the labeled move
       - name: val_top3
         data_type: double precision
         nullable: false
-        comment: Fraction of eval rows where the labeled move was in the model's top 3
+        comment: Unweighted fraction of eval rows where the labeled move was in the model's top 3
+      - name: val_top1_weighted
+        data_type: double precision
+        nullable: false
+        comment: val_top1 with the training sample weights (ply times style-disagree boost)
+      - name: val_top3_weighted
+        data_type: double precision
+        nullable: false
+        comment: val_top3 with the training sample weights (ply times style-disagree boost)
       - name: sf_delta_mean_pawns
         data_type: double precision
         nullable: false
-        comment: Mean pawn gap of the model's chosen move versus Stockfish's best. 0 is the engine move. Negative is worse.
+        comment: Unweighted mean pawn gap of the model's chosen move versus Stockfish's best. 0 is the engine move. Negative is worse.
       - name: sf_delta_median_pawns
         data_type: double precision
         nullable: false
-        comment: Median pawn gap of the model's chosen move versus Stockfish's best. 0 is the engine move. Negative is worse.
+        comment: Unweighted median pawn gap of the model's chosen move versus Stockfish's best. 0 is the engine move. Negative is worse.
+      - name: sf_delta_mean_pawns_weighted
+        data_type: double precision
+        nullable: false
+        comment: Mean pawn gap versus Stockfish's best, weighted by the training sample weights
+      - name: sf_delta_median_pawns_weighted
+        data_type: double precision
+        nullable: false
+        comment: Median pawn gap versus Stockfish's best, weighted by the training sample weights. Equal weights match the unweighted median.
       - name: user_id
         data_type: text
         nullable: true
@@ -256,3 +272,19 @@ tables:
         data_type: double precision
         nullable: true
         comment: val_top3 on the Stockfish-disagree slice. Null when that slice is empty.
+      - name: val_top1_agree_weighted
+        data_type: double precision
+        nullable: true
+        comment: Weighted val_top1 on the Stockfish-agree slice, using those rows' training weights. Null when the slice is empty.
+      - name: val_top3_agree_weighted
+        data_type: double precision
+        nullable: true
+        comment: Weighted val_top3 on the Stockfish-agree slice. Null when the slice is empty.
+      - name: val_top1_disagree_weighted
+        data_type: double precision
+        nullable: true
+        comment: Weighted val_top1 on the Stockfish-disagree slice. Null when the slice is empty.
+      - name: val_top3_disagree_weighted
+        data_type: double precision
+        nullable: true
+        comment: Weighted val_top3 on the Stockfish-disagree slice. Null when the slice is empty.
