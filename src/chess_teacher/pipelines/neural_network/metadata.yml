@@ -177,3 +177,134 @@ tables:
         data_type: timestamptz
         nullable: true
         comment: NULL = unprocessed for this user's current personal train chain; set to now() after a successful personal fit
+
+  training_scores:
+    schema: ml
+    table: training_scores
+    comment: Val scores of the final model from one training run. One row per scored run, not per epoch.
+    primary_key:
+      - run_id
+    indexes:
+      - name: idx_training_scores_scored_at
+        columns: [scored_at]
+    columns:
+      - name: run_id
+        data_type: text
+        nullable: false
+        comment: platform.pipeline_runs.run_id for this baseline_training or personal_training run
+      - name: pipeline_name
+        data_type: text
+        nullable: false
+        comment: baseline_training or personal_training
+      - name: version
+        data_type: text
+        nullable: false
+        comment: Candidate version written for this run (e.g. v3)
+      - name: model_id
+        data_type: text
+        nullable: false
+        comment: baseline_models.id or personal_models.id of the scored candidate
+      - name: scored_at
+        data_type: timestamptz
+        nullable: false
+        comment: When these val scores were stored
+      - name: n_eval
+        data_type: integer
+        nullable: false
+        comment: Eval rows that had a usable candidate target
+      - name: n_sf_agree
+        data_type: integer
+        nullable: false
+        comment: Eval rows whose labeled move was Stockfish's best
+      - name: n_sf_disagree
+        data_type: integer
+        nullable: false
+        comment: Eval rows whose labeled move was worse than Stockfish's best
+      - name: val_top1
+        data_type: double precision
+        nullable: false
+        comment: Unweighted fraction of eval rows where the model's top move was the labeled move
+      - name: val_top3
+        data_type: double precision
+        nullable: false
+        comment: Unweighted fraction of eval rows where the labeled move was in the model's top 3
+      - name: val_top1_weighted
+        data_type: double precision
+        nullable: false
+        comment: val_top1 with the training sample weights (ply times style-disagree boost)
+      - name: val_top3_weighted
+        data_type: double precision
+        nullable: false
+        comment: val_top3 with the training sample weights (ply times style-disagree boost)
+      - name: sf_delta_mean_pawns
+        data_type: double precision
+        nullable: false
+        comment: Unweighted mean pawn gap of the model's chosen move versus Stockfish's best. 0 is the engine move. Negative is worse.
+      - name: sf_delta_median_pawns
+        data_type: double precision
+        nullable: false
+        comment: Unweighted median pawn gap of the model's chosen move versus Stockfish's best. 0 is the engine move. Negative is worse.
+      - name: sf_delta_mean_pawns_weighted
+        data_type: double precision
+        nullable: false
+        comment: Mean pawn gap versus Stockfish's best, weighted by the training sample weights
+      - name: sf_delta_median_pawns_weighted
+        data_type: double precision
+        nullable: false
+        comment: Median pawn gap versus Stockfish's best, weighted by the training sample weights. Equal weights match the unweighted median.
+      - name: user_id
+        data_type: text
+        nullable: true
+        comment: Set for personal_training. Null for the platform baseline.
+      - name: val_top1_agree
+        data_type: double precision
+        nullable: true
+        comment: val_top1 on rows where the labeled move was Stockfish's best. Null when that slice is empty.
+      - name: val_top3_agree
+        data_type: double precision
+        nullable: true
+        comment: val_top3 on the Stockfish-agree slice. Null when that slice is empty.
+      - name: val_top1_disagree
+        data_type: double precision
+        nullable: true
+        comment: val_top1 on rows where the labeled move was worse than Stockfish's best. Null when that slice is empty.
+      - name: val_top3_disagree
+        data_type: double precision
+        nullable: true
+        comment: val_top3 on the Stockfish-disagree slice. Null when that slice is empty.
+      - name: val_top1_agree_weighted
+        data_type: double precision
+        nullable: true
+        comment: Weighted val_top1 on the Stockfish-agree slice, using those rows' training weights. Null when the slice is empty.
+      - name: val_top3_agree_weighted
+        data_type: double precision
+        nullable: true
+        comment: Weighted val_top3 on the Stockfish-agree slice. Null when the slice is empty.
+      - name: val_top1_disagree_weighted
+        data_type: double precision
+        nullable: true
+        comment: Weighted val_top1 on the Stockfish-disagree slice. Null when the slice is empty.
+      - name: val_top3_disagree_weighted
+        data_type: double precision
+        nullable: true
+        comment: Weighted val_top3 on the Stockfish-disagree slice. Null when the slice is empty.
+
+  training_slot:
+    schema: ml
+    table: training_slot
+    comment: One global slot so only one neural training fit runs at a time.
+    primary_key:
+      - slot_name
+    columns:
+      - name: slot_name
+        data_type: text
+        nullable: false
+        comment: Fixed name for the single machine-wide training slot.
+      - name: holder_run_id
+        data_type: text
+        nullable: true
+        comment: platform.pipeline_runs.run_id that currently holds the slot. Null when free.
+      - name: acquired_at
+        data_type: timestamptz
+        nullable: true
+        comment: When the current holder took the slot. Older than the stale window can be taken over.

@@ -19,6 +19,9 @@ from chess_teacher.pipelines.neural_network.create_training_set import (
 )
 from chess_teacher.pipelines.neural_network.ply_weights import (
     candidate_style_sample_weights,
+    candidate_style_weight_factors,
+    labeled_delta_vs_best_pawns,
+    normalize_sample_weights,
     user_not_sf_best_mask,
 )
 from chess_teacher.utils.logging import get_logger
@@ -54,17 +57,33 @@ class EvalMetrics:
     n_sf_agree: int
     n_sf_disagree: int
     sf_disagree_frac: float
+    # Mean/median pawn gap of the model's chosen move versus Stockfish's best.
+    # 0 = picked the engine's best move. Negative = worse, in pawns (user POV).
+    sf_delta_mean_pawns: float = 0.0
+    sf_delta_median_pawns: float = 0.0
+    top3_overall_weighted: float = 0.0
+    sf_delta_mean_pawns_weighted: float = 0.0
+    sf_delta_median_pawns_weighted: float = 0.0
+    top1_sf_agree_weighted: float | None = None
+    top3_sf_agree_weighted: float | None = None
+    top1_sf_disagree_weighted: float | None = None
+    top3_sf_disagree_weighted: float | None = None
 
     def as_dict(self) -> dict[str, float]:
         out: dict[str, float] = {
             "top1_overall": self.top1_overall,
             "top3_overall": self.top3_overall,
             "top1_overall_weighted": self.top1_overall_weighted,
+            "top3_overall_weighted": self.top3_overall_weighted,
             "n_eval": float(self.n_eval),
             "n_dropped": float(self.n_dropped),
             "n_sf_agree": float(self.n_sf_agree),
             "n_sf_disagree": float(self.n_sf_disagree),
             "sf_disagree_frac": self.sf_disagree_frac,
+            "sf_delta_mean_pawns": self.sf_delta_mean_pawns,
+            "sf_delta_median_pawns": self.sf_delta_median_pawns,
+            "sf_delta_mean_pawns_weighted": self.sf_delta_mean_pawns_weighted,
+            "sf_delta_median_pawns_weighted": self.sf_delta_median_pawns_weighted,
         }
         if self.top1_sf_agree is not None:
             out["top1_sf_agree"] = self.top1_sf_agree
@@ -74,6 +93,14 @@ class EvalMetrics:
             out["top1_sf_disagree"] = self.top1_sf_disagree
         if self.top3_sf_disagree is not None:
             out["top3_sf_disagree"] = self.top3_sf_disagree
+        if self.top1_sf_agree_weighted is not None:
+            out["top1_sf_agree_weighted"] = self.top1_sf_agree_weighted
+        if self.top3_sf_agree_weighted is not None:
+            out["top3_sf_agree_weighted"] = self.top3_sf_agree_weighted
+        if self.top1_sf_disagree_weighted is not None:
+            out["top1_sf_disagree_weighted"] = self.top1_sf_disagree_weighted
+        if self.top3_sf_disagree_weighted is not None:
+            out["top3_sf_disagree_weighted"] = self.top3_sf_disagree_weighted
         return out
 
 
@@ -180,6 +207,96 @@ def _mean_or_none(hits: np.ndarray, selector: np.ndarray) -> float | None:
     return float(np.mean(hits[idx]))
 
 
+def _weighted_mean(values: np.ndarray, weights: np.ndarray) -> float:
+    """Weighted mean. A non-positive weight total falls back to the plain mean."""
+    values_f = np.asarray(values, dtype=np.float64)
+    weights_f = np.asarray(weights, dtype=np.float64)
+    total = float(np.sum(weights_f))
+    if total <= 0.0:
+        return float(np.mean(values_f)) if values_f.size else 0.0
+    return float(np.sum(values_f * weights_f) / total)
+
+
+def _weighted_mean_or_none(
+    values: np.ndarray,
+    weights: np.ndarray,
+    selector: np.ndarray,
+) -> float | None:
+    idx = np.flatnonzero(selector)
+    if idx.size == 0:
+        return None
+    return _weighted_mean(values[idx], weights[idx])
+
+
+def _weighted_median(values: np.ndarray, weights: np.ndarray) -> float:
+    """Weighted median. Equal weights match ``np.median``, including even counts."""
+    values_f = np.asarray(values, dtype=np.float64)
+    weights_f = np.asarray(weights, dtype=np.float64)
+    if values_f.size == 0:
+        return 0.0
+    total = float(np.sum(weights_f))
+    if total <= 0.0:
+        return float(np.median(values_f))
+    order = np.argsort(values_f, kind="mergesort")
+    ordered = values_f[order]
+    cdf = np.cumsum(weights_f[order])
+    half = 0.5 * total
+    idx = int(np.searchsorted(cdf, half, side="left"))
+    idx = min(max(idx, 0), ordered.size - 1)
+    if float(cdf[idx]) == half and idx + 1 < ordered.size:
+        return float(0.5 * (ordered[idx] + ordered[idx + 1]))
+    return float(ordered[idx])
+
+
+@dataclass(frozen=True)
+class _WeightedScores:
+    """Training-weight variants. Slice weights are those rows' training weights."""
+
+    top1_overall: float
+    top3_overall: float
+    top1_sf_agree: float | None
+    top3_sf_agree: float | None
+    top1_sf_disagree: float | None
+    top3_sf_disagree: float | None
+    sf_delta_mean_pawns: float
+    sf_delta_median_pawns: float
+
+
+def _weighted_fields(
+    *,
+    top1: np.ndarray,
+    top3: np.ndarray,
+    agree: np.ndarray,
+    disagree: np.ndarray,
+    weights: np.ndarray,
+    sf_delta: np.ndarray,
+) -> _WeightedScores:
+    return _WeightedScores(
+        top1_overall=_weighted_mean(top1, weights),
+        top3_overall=_weighted_mean(top3, weights),
+        top1_sf_agree=_weighted_mean_or_none(top1, weights, agree),
+        top3_sf_agree=_weighted_mean_or_none(top3, weights, agree),
+        top1_sf_disagree=_weighted_mean_or_none(top1, weights, disagree),
+        top3_sf_disagree=_weighted_mean_or_none(top3, weights, disagree),
+        sf_delta_mean_pawns=_weighted_mean(sf_delta, weights),
+        sf_delta_median_pawns=_weighted_median(sf_delta, weights),
+    )
+
+
+def predicted_sf_delta_pawns(
+    logits: np.ndarray,
+    mask: np.ndarray,
+    move_feats: np.ndarray,
+) -> np.ndarray:
+    """Pawn gap of each row's argmax move versus Stockfish's best (user POV).
+
+    ``0`` is the engine's best legal move. Negative values are pawns worse.
+    """
+    masked = np.where(np.asarray(mask) > 0.5, np.asarray(logits, dtype=np.float64), -np.inf)
+    chosen = np.argmax(masked, axis=1)
+    return labeled_delta_vs_best_pawns(move_feats, chosen)
+
+
 def compute_candidate_style_metrics(
     *,
     logits: np.ndarray,
@@ -198,10 +315,17 @@ def compute_candidate_style_metrics(
     top1, top3 = _topk_hits(logits_arr, mask, labels, max_candidates=max_candidates)
     disagree = user_not_sf_best_mask(move_feats, labels)
     agree = ~disagree
+    sf_delta = predicted_sf_delta_pawns(logits_arr, mask, move_feats)
 
     weights = candidate_style_sample_weights(plies, move_feats, labels)
-    w_sum = float(np.sum(weights))
-    top1_weighted = float(np.sum(top1.astype(np.float64) * weights) / w_sum) if w_sum else 0.0
+    weighted = _weighted_fields(
+        top1=top1,
+        top3=top3,
+        agree=agree,
+        disagree=disagree,
+        weights=weights,
+        sf_delta=sf_delta,
+    )
 
     return EvalMetrics(
         top1_overall=float(np.mean(top1)),
@@ -210,12 +334,21 @@ def compute_candidate_style_metrics(
         top3_sf_agree=_mean_or_none(top3, agree),
         top1_sf_disagree=_mean_or_none(top1, disagree),
         top3_sf_disagree=_mean_or_none(top3, disagree),
-        top1_overall_weighted=top1_weighted,
         n_eval=len(labels),
         n_dropped=int(n_input) - len(labels),
         n_sf_agree=int(np.sum(agree)),
         n_sf_disagree=int(np.sum(disagree)),
         sf_disagree_frac=float(np.mean(disagree)),
+        sf_delta_mean_pawns=float(np.mean(sf_delta)),
+        sf_delta_median_pawns=float(np.median(sf_delta)),
+        top1_overall_weighted=weighted.top1_overall,
+        top3_overall_weighted=weighted.top3_overall,
+        sf_delta_mean_pawns_weighted=weighted.sf_delta_mean_pawns,
+        sf_delta_median_pawns_weighted=weighted.sf_delta_median_pawns,
+        top1_sf_agree_weighted=weighted.top1_sf_agree,
+        top3_sf_agree_weighted=weighted.top3_sf_agree,
+        top1_sf_disagree_weighted=weighted.top1_sf_disagree,
+        top3_sf_disagree_weighted=weighted.top3_sf_disagree,
     )
 
 
@@ -370,6 +503,7 @@ def _metrics_from_hit_buffers(
     top3: np.ndarray,
     disagree: np.ndarray,
     weights: np.ndarray,
+    sf_delta_pawns: np.ndarray,
     n_input: int,
 ) -> EvalMetrics:
     """Build ``EvalMetrics`` from per-kept-row buffers (no logits retained)."""
@@ -379,8 +513,14 @@ def _metrics_from_hit_buffers(
             "(user move must be in evals)"
         )
     agree = ~disagree
-    w_sum = float(np.sum(weights))
-    top1_weighted = float(np.sum(top1.astype(np.float64) * weights) / w_sum) if w_sum else 0.0
+    weighted = _weighted_fields(
+        top1=top1,
+        top3=top3,
+        agree=agree,
+        disagree=disagree,
+        weights=weights,
+        sf_delta=sf_delta_pawns,
+    )
     return EvalMetrics(
         top1_overall=float(np.mean(top1)),
         top3_overall=float(np.mean(top3)),
@@ -388,12 +528,21 @@ def _metrics_from_hit_buffers(
         top3_sf_agree=_mean_or_none(top3, agree),
         top1_sf_disagree=_mean_or_none(top1, disagree),
         top3_sf_disagree=_mean_or_none(top3, disagree),
-        top1_overall_weighted=top1_weighted,
         n_eval=int(top1.size),
         n_dropped=int(n_input) - int(top1.size),
         n_sf_agree=int(np.sum(agree)),
         n_sf_disagree=int(np.sum(disagree)),
         sf_disagree_frac=float(np.mean(disagree)),
+        sf_delta_mean_pawns=float(np.mean(sf_delta_pawns)),
+        sf_delta_median_pawns=float(np.median(sf_delta_pawns)),
+        top1_overall_weighted=weighted.top1_overall,
+        top3_overall_weighted=weighted.top3_overall,
+        sf_delta_mean_pawns_weighted=weighted.sf_delta_mean_pawns,
+        sf_delta_median_pawns_weighted=weighted.sf_delta_median_pawns,
+        top1_sf_agree_weighted=weighted.top1_sf_agree,
+        top3_sf_agree_weighted=weighted.top3_sf_agree,
+        top1_sf_disagree_weighted=weighted.top1_sf_disagree,
+        top3_sf_disagree_weighted=weighted.top3_sf_disagree,
     )
 
 
@@ -419,6 +568,7 @@ def score_models_on_datums(
     keys = list(models.keys())
     top1_parts: dict[str, list[np.ndarray]] = {key: [] for key in keys}
     top3_parts: dict[str, list[np.ndarray]] = {key: [] for key in keys}
+    delta_parts: dict[str, list[np.ndarray]] = {key: [] for key in keys}
     disagree_parts: list[np.ndarray] = []
     weight_parts: list[np.ndarray] = []
 
@@ -437,13 +587,15 @@ def score_models_on_datums(
             continue
 
         disagree = user_not_sf_best_mask(packed.feats, packed.labels)
-        weights = candidate_style_sample_weights(
+        # Raw factors, then one normalize over the full eval set. Normalizing
+        # each chunk would make later plies weigh the same as early ones.
+        weight_factors = candidate_style_weight_factors(
             [d.ply for d in packed.kept_datums],
             packed.feats,
             packed.labels,
         )
         disagree_parts.append(np.asarray(disagree, dtype=bool))
-        weight_parts.append(np.asarray(weights, dtype=np.float64))
+        weight_parts.append(np.asarray(weight_factors, dtype=np.float64))
 
         for key in keys:
             logits = _predict_packed_logits(models[key], packed)
@@ -455,6 +607,7 @@ def score_models_on_datums(
             )
             top1_parts[key].append(np.asarray(top1, dtype=bool))
             top3_parts[key].append(np.asarray(top3, dtype=bool))
+            delta_parts[key].append(predicted_sf_delta_pawns(logits, packed.mask, packed.feats))
 
         logger.info(
             "Eval chunk %s/%s kept=%s / chunk_in=%s",
@@ -472,7 +625,10 @@ def score_models_on_datums(
         )
 
     disagree_all = np.concatenate(disagree_parts)
-    weights_all = np.concatenate(weight_parts)
+    weights_all = np.asarray(
+        normalize_sample_weights(np.concatenate(weight_parts)),
+        dtype=np.float64,
+    )
     out: dict[str, EvalMetrics] = {}
     for key in keys:
         out[key] = _metrics_from_hit_buffers(
@@ -480,6 +636,7 @@ def score_models_on_datums(
             top3=np.concatenate(top3_parts[key]),
             disagree=disagree_all,
             weights=weights_all,
+            sf_delta_pawns=np.concatenate(delta_parts[key]),
             n_input=n_input,
         )
     return out

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -34,6 +35,7 @@ from chess_teacher.utils.pipeline_utils.pipeline_helpers import (
     ProgressWindow,
     StepResult,
 )
+from chess_teacher.utils.pipeline_utils.step_process import StepProcess, StepProcessError
 from chess_teacher.utils.process_utils import snapshot_host_pressure
 
 # Sentinel value for finished_at column to signal an active (locked) run.
@@ -50,7 +52,35 @@ _DEFAULT_NO_RETRY_ON: tuple[type[Exception], ...] = (
     NotImplementedError,
     TransformationError,
     AdapterClientError,
+    StepProcessError,
 )
+
+
+# Stashed on PipelineContext.extras once the run lock exists, so later steps
+# can key one row per run without reading the pipeline object.
+PIPELINE_RUN_ID_EXTRA = "pipeline_run_id"
+PIPELINE_CLEANUPS_EXTRA = "pipeline_cleanups"
+
+
+def register_pipeline_cleanup(context: PipelineContext, callback: Callable[[], None]) -> None:
+    """Run ``callback`` when the pipeline finishes, including after a failed step."""
+    cleanups = context.extras.setdefault(PIPELINE_CLEANUPS_EXTRA, [])
+    if not isinstance(cleanups, list):
+        raise TypeError(f"{PIPELINE_CLEANUPS_EXTRA} must be a list")
+    cleanups.append(callback)
+
+
+def _process_still_needed(
+    process: StepProcess, upcoming: list[PipelineStep], *, skipping: bool
+) -> bool:
+    """True when a step that will still run holds this same child."""
+    for step in upcoming:
+        if step.process is not process:
+            continue
+        if skipping and not step.run_if_earlier_step_failed:
+            continue
+        return True
+    return False
 
 
 @dataclass(frozen=True)
@@ -110,6 +140,7 @@ class PipelineStep(ABC):
         run_if_earlier_step_failed: bool = False,
         no_retry_on: tuple[type[Exception], ...] = _DEFAULT_NO_RETRY_ON,
         logger: EnhancedLogger | None = None,
+        process: StepProcess | None = None,
     ) -> None:
         self.name = name
         self.max_retries = max_retries
@@ -118,6 +149,7 @@ class PipelineStep(ABC):
         self.run_if_earlier_step_failed = run_if_earlier_step_failed
         self.no_retry_on = no_retry_on
         self.logger = logger or get_logger()
+        self.process = process
 
     @abstractmethod
     def run(self, db_client: DatabaseClient, context: PipelineContext) -> None:
@@ -262,8 +294,11 @@ class Pipeline:
 
             skip_until_flagged = False
             for step_index, step in enumerate(self.steps, start=1):
+                upcoming = self.steps[step_index:]
                 if skip_until_flagged and not step.run_if_earlier_step_failed:
+                    self._release_finished_processes(upcoming, skipping=True)
                     continue
+                self._ensure_step_process(step)
                 self.context.progress_pop()  # pop the previous step result
                 self.context.progress_update(
                     f"Running step {step_index}/{total_steps}: {step.name}..."
@@ -301,6 +336,7 @@ class Pipeline:
                             f"Result = {step_result.result.value} for {step.name} (expected SUCCESS or FAILURE)"
                         )
                     )
+                self._release_finished_processes(upcoming, skipping=skip_until_flagged)
         except Exception as e:
             if not isinstance(e, PipelineLockError):
                 self.context.progress_error("Unknown pipeline error; aborting run.")
@@ -325,7 +361,10 @@ class Pipeline:
                     self.context.progress_update(f"Finishing {self.name}...")
                     self._post_run(run_result)
                 finally:
-                    self._release_lock()
+                    try:
+                        self._run_registered_cleanups()
+                    finally:
+                        self._release_lock()
 
         if run_error is not None:
             self.logger.log_and_raise(
@@ -362,6 +401,28 @@ class Pipeline:
     # ------------------------------------------------------------------
     # Pre / post hooks
     # ------------------------------------------------------------------
+
+    def _ensure_step_process(self, step: PipelineStep) -> None:
+        """Start this step's child on first use and exit it with the pipeline."""
+        process = step.process
+        if process is None or process.running:
+            return
+        process.start()
+        register_pipeline_cleanup(self.context, process.close)
+
+    def _release_finished_processes(self, upcoming: list[PipelineStep], *, skipping: bool) -> None:
+        """Exit a child once no step that will still run carries that same object."""
+        seen: list[StepProcess] = []
+        for step in self.steps:
+            process = step.process
+            if process is None or process in seen:
+                continue
+            seen.append(process)
+            if not process.running:
+                continue
+            if _process_still_needed(process, upcoming, skipping=skipping):
+                continue
+            process.close()
 
     def _pre_run(self, started_at: datetime) -> None:
         """Checks and setup before any step runs."""
@@ -439,9 +500,21 @@ class Pipeline:
         ).save_new_to_db(self.db_client)
 
         self._run_id = run_id
+        self.context.extras[PIPELINE_RUN_ID_EXTRA] = run_id
         self.logger.info(f"[Pipeline:{self.name}] Lock acquired (run_id={run_id}).")
         self.context.progress_pop()
         self.context.progress_success("Succesfully registered current pipeline run.")
+
+    def _run_registered_cleanups(self) -> None:
+        """Run callbacks registered during the run. One failure does not skip the rest."""
+        cleanups = self.context.extras.get(PIPELINE_CLEANUPS_EXTRA) or []
+        if not isinstance(cleanups, list):
+            return
+        for cleanup in cleanups:
+            try:
+                cleanup()
+            except Exception:
+                self.logger.exception("[Pipeline:%s] Cleanup failed.", self.name)
 
     def _release_lock(self) -> bool:
         """

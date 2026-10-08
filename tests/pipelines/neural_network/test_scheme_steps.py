@@ -23,6 +23,7 @@ from chess_teacher.pipelines.neural_network.scheme_steps import (
     PrepareEvaluationStep,
     PrepareTrainingStep,
     ScoreEvaluationStep,
+    ScoreParentBaselineStep,
     TrainModelStep,
     build_training_scheme_steps,
 )
@@ -137,6 +138,15 @@ class _Scheme:
         return candidate
 
 
+def test_prepare_does_not_load_when_the_round_was_already_skipped() -> None:
+    scheme = _Scheme()
+    context = PipelineContext()
+    context.extras[SKIP_KEY] = True
+    PrepareTrainingStep(scheme).run(MagicMock(), context)  # type: ignore[arg-type]
+    assert scheme.checked == 0
+    assert "train_datums" not in context.extras
+
+
 def test_prepare_skips_without_loading_when_pending_is_low() -> None:
     scheme = _Scheme()
     scheme.pending = 3
@@ -157,27 +167,41 @@ def test_prepare_loads_parent_and_batch() -> None:
     assert context.extras["train_game_ids"] == ["g1"]
 
 
+class _RecordingProcess:
+    """Stand-in for the child. Records one call and returns a fixed result."""
+
+    def __init__(self, result: object) -> None:
+        self.result = result
+        self.calls: list[tuple[str, dict[str, object]]] = []
+
+    def call(self, op: str, **payload: object) -> object:
+        self.calls.append((op, payload))
+        return self.result
+
+
 def test_train_step_fits_and_drops_the_batch() -> None:
-    scheme = _Scheme()
     context = PipelineContext()
     context.extras["train_datums"] = ["move"]
     context.extras[SKIP_KEY] = False
     context.extras["parent"] = ModelHandle(
         key="p", weights_uri=None, compatible=False, kind="chain"
     )
-    TrainModelStep(scheme).run(MagicMock(), context)  # type: ignore[arg-type]
-    assert scheme.fit_calls[0][0] == ["move"]
-    assert scheme.fit_calls[0][1] is None
+    process = _RecordingProcess({
+        "model_path": "/tmp/scheme_model_x/model.keras",
+        "metrics": {"n_samples": 1.0},
+    })
+    TrainModelStep(process=process).run(MagicMock(), context)  # type: ignore[arg-type]
+    assert process.calls[0][0] == "fit"
+    assert process.calls[0][1]["datums"] == ["move"]
+    assert process.calls[0][1]["weights_path"] is None
     assert "train_datums" not in context.extras
     assert context.extras["trained_model_path"].name == "model.keras"
 
 
 def test_train_step_skips_when_prepare_skipped() -> None:
-    scheme = _Scheme()
     context = PipelineContext()
     context.extras[SKIP_KEY] = True
-    TrainModelStep(scheme).run(MagicMock(), context)  # type: ignore[arg-type]
-    assert scheme.fit_calls == []
+    TrainModelStep().run(MagicMock(), context)  # type: ignore[arg-type]
 
 
 def test_prepare_evaluation_reuses_datums_already_in_context() -> None:
@@ -216,41 +240,16 @@ def _stub_mlflow_tracker(monkeypatch: Any) -> None:
     )
 
 
-def test_score_packs_eval_once_for_candidate_and_reference(monkeypatch: Any) -> None:
-    loads: list[Path] = []
-    scored_calls: list[tuple[tuple[str, ...], list[object]]] = []
-
-    def load_candidate_style_keras(path: Path, *, compile_model: bool = False) -> object:
-        del compile_model
-        loads.append(path)
-        return path
-
-    def score_models_on_datums(
-        models: dict[str, object],
-        datums: list[object],
-        **_kwargs: object,
-    ) -> dict[str, EvalMetrics]:
-        scored_calls.append((tuple(sorted(models.keys())), list(datums)))
-        out: dict[str, EvalMetrics] = {
-            "candidate": _metrics(top1=0.4, agree=0.5, disagree=0.2),
-        }
-        if "parent" in models:
-            out["parent"] = _metrics(top1=0.3, agree=0.5, disagree=0.2)
-        return out
-
-    monkeypatch.setattr(
-        "chess_teacher.pipelines.neural_network.eval_metrics.score_models_on_datums",
-        score_models_on_datums,
-    )
-    monkeypatch.setattr(
-        "chess_teacher.pipelines.neural_network.train.load_candidate_style_keras",
-        load_candidate_style_keras,
-    )
+def test_score_sends_candidate_and_parent_to_the_process(monkeypatch: Any) -> None:
     _stub_mlflow_tracker(monkeypatch)
     monkeypatch.setattr(
         "chess_teacher.pipelines.neural_network.mlflow_utils.MLflowTracker.require_keras_weights",
         lambda self, uri: Path("/tmp/served.keras"),
     )
+    process = _RecordingProcess({
+        "candidate_eval": _metrics(top1=0.4, agree=0.5, disagree=0.2),
+        "parent_eval": _metrics(top1=0.3, agree=0.5, disagree=0.2),
+    })
 
     context = PipelineContext()
     context.extras[SKIP_KEY] = False
@@ -262,9 +261,12 @@ def test_score_packs_eval_once_for_candidate_and_reference(monkeypatch: Any) -> 
         compatible=True,
         kind="chain",
     )
-    ScoreEvaluationStep().run(MagicMock(), context)  # type: ignore[arg-type]
-    assert scored_calls == [(("candidate", "parent"), ["val-move"])]
-    assert len(loads) == 2
+    ScoreEvaluationStep(process=process).run(MagicMock(), context)  # type: ignore[arg-type]
+    op, payload = process.calls[0]
+    assert op == "score"
+    assert payload["datums"] == ["val-move"]
+    assert payload["model_path"] == Path("/tmp/new.keras")
+    assert payload["parent_weights_path"] == Path("/tmp/served.keras")
     assert context.extras["candidate_eval"].top1_overall == 0.4
     assert context.extras["parent_eval"].top1_overall == 0.3
 
@@ -294,18 +296,33 @@ def test_apply_does_not_archive_a_different_chain() -> None:
 def test_both_scopes_build_the_same_step_classes() -> None:
     baseline = build_training_scheme_steps(ModelTraining(), promote=True)
     personal = build_training_scheme_steps(ModelTraining("user-1"), promote=True)
-    assert [type(step) for step in baseline] == [type(step) for step in personal]
-    assert [step.name for step in baseline] == [
+    shared = [
         "PrepareTraining",
+        "WaitForTrainingSlot",
         "TrainModel",
         "PrepareEvaluation",
         "ScoreEvaluation",
+        "ReleaseTrainingSlot",
         "RecordCandidate",
         "AdvanceTrainingCursor",
         "DecideFromScores",
         "ApplyPromotion",
         "AdoptParentBaseline",
     ]
+    assert [step.name for step in personal] == shared
+    assert [step.name for step in baseline] == [
+        *shared[:5],
+        "ScoreParentBaseline",
+        *shared[5:],
+    ]
+    assert baseline[2].process is baseline[4].process
+    assert baseline[2].process is baseline[5].process
+    assert baseline[2].process is not None
+    assert baseline[3].process is None
+    assert personal[2].process is personal[4].process
+    assert personal[5].name == "ReleaseTrainingSlot"
+    assert personal[5].process is None
+    assert personal[2].process is not baseline[2].process
 
 
 def test_promotion_blocks_a_disagree_drop() -> None:
@@ -774,6 +791,7 @@ def test_adopt_step_reuses_the_training_parent_score() -> None:
     context.extras["promoted"] = _promoted()
     context.extras["parent"] = pointer
     context.extras["parent_eval"] = held
+    context.extras["parent_baseline_eval"] = held
     context.extras["candidate_eval"] = held
     AdoptParentBaselineStep(scheme).run(MagicMock(), context)  # type: ignore[arg-type]
     assert scheme.seen_parent_eval is held
@@ -781,7 +799,7 @@ def test_adopt_step_reuses_the_training_parent_score() -> None:
     assert context.extras["parent_baseline"].key == "v2"
 
 
-def test_adopt_step_scores_a_different_parent_baseline(monkeypatch: Any) -> None:
+def test_score_parent_baseline_uses_the_child_for_a_different_model(monkeypatch: Any) -> None:
     scheme = _AdoptingScheme()
     scheme.pointer = ModelHandle(
         key="v1",
@@ -790,14 +808,7 @@ def test_adopt_step_scores_a_different_parent_baseline(monkeypatch: Any) -> None
         kind="baseline",
     )
     scored = _metrics(top1=0.3, agree=0.4, disagree=0.1)
-    monkeypatch.setattr(
-        "chess_teacher.pipelines.neural_network.eval_metrics.evaluate_datums",
-        lambda model, datums, **_kwargs: scored,
-    )
-    monkeypatch.setattr(
-        "chess_teacher.pipelines.neural_network.train.load_candidate_style_keras",
-        lambda path, compile_model=False: path,
-    )
+    process = _RecordingProcess(scored)
     _stub_mlflow_tracker(monkeypatch)
     monkeypatch.setattr(
         "chess_teacher.pipelines.neural_network.mlflow_utils.MLflowTracker.require_keras_weights",
@@ -805,7 +816,6 @@ def test_adopt_step_scores_a_different_parent_baseline(monkeypatch: Any) -> None
     )
     context = PipelineContext()
     context.extras[SKIP_KEY] = False
-    context.extras["promoted"] = _promoted("v3")
     context.extras["parent"] = ModelHandle(
         key="v2",
         weights_uri="s3://prod",
@@ -814,6 +824,43 @@ def test_adopt_step_scores_a_different_parent_baseline(monkeypatch: Any) -> None
     )
     context.extras["parent_eval"] = _metrics(top1=0.5, agree=0.5, disagree=0.5)
     context.extras["eval_datums"] = ["move"]
+    ScoreParentBaselineStep(scheme, process=process).run(MagicMock(), context)  # type: ignore[arg-type]
+    op, payload = process.calls[0]
+    assert op == "score_weights"
+    assert payload["weights_path"] == Path("/tmp/old.keras")
+    assert payload["datums"] == ["move"]
+    assert context.extras["parent_baseline_eval"] is scored
+
+
+def test_score_parent_baseline_reuses_the_training_parent() -> None:
+    scheme = _AdoptingScheme()
+    pointer = _parent_handle()
+    scheme.pointer = pointer
+    held = _metrics(top1=0.4, agree=0.5, disagree=0.2)
+    process = _RecordingProcess(held)
+    context = PipelineContext()
+    context.extras[SKIP_KEY] = False
+    context.extras["parent"] = pointer
+    context.extras["parent_eval"] = held
+    context.extras["eval_datums"] = ["move"]
+    ScoreParentBaselineStep(scheme, process=process).run(MagicMock(), context)  # type: ignore[arg-type]
+    assert process.calls == []
+    assert context.extras["parent_baseline_eval"] is held
+
+
+def test_adopt_step_uses_the_score_from_the_child() -> None:
+    scheme = _AdoptingScheme()
+    scheme.pointer = ModelHandle(
+        key="v1",
+        weights_uri="s3://old",
+        compatible=True,
+        kind="baseline",
+    )
+    scored = _metrics(top1=0.3, agree=0.4, disagree=0.1)
+    context = PipelineContext()
+    context.extras[SKIP_KEY] = False
+    context.extras["promoted"] = _promoted("v3")
+    context.extras["parent_baseline_eval"] = scored
     context.extras["candidate_eval"] = _metrics(top1=0.5, agree=0.5, disagree=0.5)
     AdoptParentBaselineStep(scheme).run(MagicMock(), context)  # type: ignore[arg-type]
     assert scheme.seen_parent_eval is scored
@@ -828,7 +875,7 @@ def test_adopt_step_leaves_the_pointer_when_the_gate_fails() -> None:
     context.extras[SKIP_KEY] = False
     context.extras["promoted"] = _promoted()
     context.extras["parent"] = scheme.pointer
-    context.extras["parent_eval"] = _metrics(top1=0.4, agree=0.5, disagree=0.2)
+    context.extras["parent_baseline_eval"] = _metrics(top1=0.4, agree=0.5, disagree=0.2)
     AdoptParentBaselineStep(scheme).run(MagicMock(), context)  # type: ignore[arg-type]
     assert scheme.adopted == []
     assert "parent_baseline" not in context.extras
