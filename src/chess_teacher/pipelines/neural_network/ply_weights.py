@@ -288,6 +288,31 @@ def candidate_style_sample_weights(
     (>0). Multiplies by ``exp((second-best)/scale)`` continuously. Default off so
     encoder A/B stays one change family.
     """
+    raw = candidate_style_weight_factors(
+        plies,
+        move_feats,
+        labels,
+        style_disagree_boost=style_disagree_boost,
+        style_disagree_scale=style_disagree_scale,
+        lam=lam,
+        candidate_mask=candidate_mask,
+        forced_scale_pawns=forced_scale_pawns,
+    )
+    return normalize_sample_weights(raw, clip=clip)
+
+
+def candidate_style_weight_factors(
+    plies: list[int] | np.ndarray,
+    move_feats: np.ndarray,
+    labels: np.ndarray,
+    *,
+    style_disagree_boost: float | None = None,
+    style_disagree_scale: float | None = None,
+    lam: float = DEFAULT_PLY_WEIGHT_LAMBDA,
+    candidate_mask: np.ndarray | None = None,
+    forced_scale_pawns: float | None = None,
+) -> np.ndarray:
+    """Unnormalized ply x style weights. Normalize once over the full set."""
     boost = (
         style_disagree_boost_from_env()
         if style_disagree_boost is None
@@ -310,7 +335,7 @@ def candidate_style_sample_weights(
             candidate_mask,
             scale_pawns=float(forced_scale_pawns),
         )
-    return normalize_sample_weights(raw, clip=clip)
+    return np.asarray(raw, dtype=np.float64)
 
 
 def recency_weight_raw(
