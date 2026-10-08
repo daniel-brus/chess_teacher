@@ -105,9 +105,9 @@ def plan_pipeline_dispatch(
 ) -> PipelineDispatchPlan:
     """Pick at most one user to start, and queue the rest for the next tick.
 
-    A user is eligible in the cron window, or later that local day when
-    ``pipeline_retry_at`` is set. While any pipeline job is still running, or
-    MemAvailable is under the minimum, nobody new starts.
+    A user is eligible in the cron window, or whenever
+    ``run_pipeline_immediately`` is set. While any pipeline job is still
+    running, or MemAvailable is under the minimum, nobody new starts.
     """
     skipped_not_due = 0
     skipped_cooldown = 0

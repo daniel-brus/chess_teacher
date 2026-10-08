@@ -172,10 +172,10 @@ def dispatch_pipeline_jobs(
 ) -> DispatchResult:
     """Start at most one user pipeline job, and queue the rest for the next tick.
 
-    A user is eligible in their cron window, or later the same local day when a
-    previous tick left ``pipeline_retry_at`` set. The next dispatcher run (30
-    minutes later) tries that user again. Nobody new starts while a pipeline
-    job is still running, or while MemAvailable is under the training minimum.
+    A user is eligible in their cron window, or when ``run_pipeline_immediately``
+    is set. The next dispatcher run (30 minutes later) tries that user again.
+    Nobody new starts while a pipeline job is still running, or while
+    MemAvailable is under the training minimum.
 
     Intended to run inside the ingestion-dispatcher CronJob pod.
     """
@@ -212,7 +212,7 @@ def dispatch_pipeline_jobs(
         memory_available=memory_available,
     )
     for user_id in plan.defer_user_ids:
-        users_by_id[user_id].defer_pipeline_retry(db, now)
+        users_by_id[user_id].set_run_pipeline_immediately(db, True)
     if plan.defer_reason == DEFER_MEMORY:
         logger.info(
             "Deferring users until the next dispatcher tick: MemAvailable is below the training minimum. users=%s",
@@ -232,7 +232,7 @@ def dispatch_pipeline_jobs(
     spawned: list[str] = []
     if plan.spawn_user_id is not None:
         user = users_by_id[plan.spawn_user_id]
-        queued = user.pipeline_retry_at is not None
+        queued = user.run_pipeline_immediately
         logger.info(
             "Dispatching pipeline job for user=%s cron_time=%s timezone=%s queued=%s",
             user.user_id,
@@ -240,13 +240,13 @@ def dispatch_pipeline_jobs(
             user.timezone,
             queued,
         )
-        # Keep the retry if job creation fails, so the next tick tries again.
-        user.defer_pipeline_retry(db, now)
+        # Keep the flag if job creation fails, so the next tick tries again.
+        user.set_run_pipeline_immediately(db, True)
         job_name = create_pipeline_job(
             namespace=k8s_namespace,
             user_id=user.user_id,
         )
-        user.clear_pipeline_retry(db)
+        user.set_run_pipeline_immediately(db, False)
         spawned.append(job_name)
 
     result = DispatchResult(

@@ -17,7 +17,6 @@ from chess_teacher.utils.cache_utils import (
 from chess_teacher.utils.db.client import DatabaseClient
 from chess_teacher.utils.exception_utils import DatabaseError
 from chess_teacher.utils.general_utils import (
-    as_utc,
     assert_valid_timezone,
     generate_ident_is_literal,
     get_current_datetime,
@@ -101,7 +100,7 @@ class User(TableDataClass):
     latest_pipeline_run: str | None = None
     cron_time: time = DEFAULT_CRON_TIME
     timezone: str = DEFAULT_TIMEZONE
-    pipeline_retry_at: datetime | None = None
+    run_pipeline_immediately: bool = False
     default_light_theme_id: str | None = None
     default_dark_theme_id: str | None = None
 
@@ -253,41 +252,21 @@ class User(TableDataClass):
         return local_now < scheduled + DISPATCH_INTERVAL
 
     def is_pipeline_dispatch_due(self, now: datetime | None = None) -> bool:
-        """True for the cron window, or for a queued retry later the same local day.
+        """True in the cron window, or when ``run_pipeline_immediately`` is set.
 
-        ``pipeline_retry_at`` is set when a run waited for memory or for another
-        pipeline job. The dispatcher then tries again on the next 30-minute tick,
-        after the cron window has closed. A retry does not start before today's
-        cron time, so a leftover timestamp cannot fire early the next morning.
+        The flag tells the next dispatcher tick to take this user even outside
+        ``cron_time``. The 24-hour cooldown still applies.
         """
-        current = now or get_current_datetime()
-        if self.is_cron_due(current):
+        if self.run_pipeline_immediately:
             return True
-        if self.pipeline_retry_at is None:
-            return False
-        if as_utc(current) < as_utc(self.pipeline_retry_at):
-            return False
-        local_now = current.astimezone(ZoneInfo(self.timezone))
-        scheduled = local_now.replace(
-            hour=self.cron_time.hour,
-            minute=self.cron_time.minute,
-            second=0,
-            microsecond=0,
-        )
-        return local_now >= scheduled
+        return self.is_cron_due(now)
 
-    def defer_pipeline_retry(self, db_client: DatabaseClient, now: datetime) -> Self:
-        """Remember that this user should be tried on the next dispatcher tick."""
-        self.upsert_field(db_client, "pipeline_retry_at", now)
-        self.pipeline_retry_at = now
-        return self
-
-    def clear_pipeline_retry(self, db_client: DatabaseClient) -> Self:
-        """Drop a queued retry after a job has been created."""
-        if self.pipeline_retry_at is None:
+    def set_run_pipeline_immediately(self, db_client: DatabaseClient, value: bool) -> Self:
+        """Set or clear the next-tick flag. A no-op when the stored value already matches."""
+        if self.run_pipeline_immediately == value:
             return self
-        self.upsert_field(db_client, "pipeline_retry_at", None)
-        self.pipeline_retry_at = None
+        self.upsert_field(db_client, "run_pipeline_immediately", value)
+        self.run_pipeline_immediately = value
         return self
 
     def pipeline_allowed_to_run(self, db_client: DatabaseClient) -> bool:
