@@ -1,6 +1,6 @@
 [project]
 name = "chess-teacher"
-version = "0.11.11"
+version = "0.12.0"
 
 [tool.setuptools.packages.find]
 where = ["src"]
