@@ -16,6 +16,7 @@ from chess_teacher.pipelines.neural_network.eval_metrics import EvalMetrics
 from chess_teacher.pipelines.neural_network.training_scheme import (
     ModelHandle,
     ParentBaselineDecision,
+    PromotionDecision,
     TrainingScheme,
 )
 from chess_teacher.pipelines.neural_network.training_slot import (
@@ -167,6 +168,7 @@ class PrepareTrainingStep(PipelineStep):
     def run(self, db_client: DatabaseClient, context: PipelineContext) -> None:
         if _skipped(context):
             return
+        self._scheme.align_personal_queue(db_client)
         self._scheme.note_checked(db_client)
         pending = self._scheme.count_pending(db_client)
         context.extras["pending_count"] = pending
@@ -423,7 +425,11 @@ class RecordCandidateStep(PipelineStep):
 
 
 class AdvanceTrainingCursorStep(PipelineStep):
-    """Mark the fitted games processed. Safe to retry after the candidate row exists."""
+    """Mark a promoted batch, or move a rejected batch down the queue.
+
+    Runs after the promotion decision when this pipeline promotes. A pipeline
+    that only fits still marks the games, so an ops catch-up keeps draining.
+    """
 
     def __init__(self, scheme: TrainingScheme) -> None:
         super().__init__(name="AdvanceTrainingCursor")
@@ -433,6 +439,11 @@ class AdvanceTrainingCursorStep(PipelineStep):
         if _skipped(context):
             return
         game_ids = list(context.extras.get("train_game_ids") or [])
+        decision = context.extras.get("promotion_decision")
+        if isinstance(decision, PromotionDecision) and not decision.should_promote:
+            self._scheme.note_rejected(db_client, game_ids)
+            logger.info("AdvanceTrainingCursor miss games=%s", len(game_ids))
+            return
         self._scheme.mark_trained(db_client, game_ids)
         logger.info("AdvanceTrainingCursor games=%s", len(game_ids))
 
@@ -604,12 +615,14 @@ def build_training_scheme_steps(
     steps.extend([
         ReleaseTrainingSlotStep(),
         RecordCandidateStep(scheme),
-        AdvanceTrainingCursorStep(scheme),
     ])
     if promote:
         steps.extend([
             DecideFromScoresStep(scheme),
             ApplyPromotionStep(scheme),
+            AdvanceTrainingCursorStep(scheme),
             AdoptParentBaselineStep(scheme),
         ])
+    else:
+        steps.append(AdvanceTrainingCursorStep(scheme))
     return steps

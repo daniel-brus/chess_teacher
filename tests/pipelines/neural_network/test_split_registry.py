@@ -325,3 +325,41 @@ def test_ensure_games_inserts_null_processed_flags() -> None:
     records = db.insert.call_args[0][0]
     assert records[0]["already_processed_baseline"] is None
     assert records[0]["already_processed_personal"] is None
+    assert records[0]["baseline_train_attempts"] == 0
+    assert records[0]["personal_train_attempts"] == 0
+
+
+def test_note_attempt_increments_unmarked_train_games() -> None:
+    db = MagicMock()
+    db.engine.execute_write.return_value = 1
+    registry = SplitRegistry(db, split_version="baseline-v1")
+    n = registry.note_attempt(["g1", "g1"])
+    assert n == 1
+    sql = db.engine.execute_write.call_args.args[0]
+    assert "baseline_train_attempts" in sql
+    assert "COALESCE" in sql
+    assert "+ 1" in sql
+    assert "g1" in sql
+    assert "IS NULL" in sql
+    assert "'train'" in sql
+
+
+def test_note_attempt_empty_is_noop() -> None:
+    db = MagicMock()
+    registry = SplitRegistry(db, split_version="baseline-v1")
+    assert registry.note_attempt([]) == 0
+    db.engine.execute_write.assert_not_called()
+
+
+def test_clear_personal_queue_drops_marks_and_attempts() -> None:
+    db = MagicMock()
+    db.update_where.return_value = 4
+    registry = SplitRegistry(db, split_version="baseline-v1")
+    n = registry.clear_personal_queue_for_accounts(["acct-b", "acct-a", "acct-a"])
+    assert n == 4
+    values, where = db.update_where.call_args.args[1], db.update_where.call_args.args[2]
+    assert values["already_processed_personal"] is None
+    assert values["personal_train_attempts"] == 0
+    assert "acct-a" in where
+    assert "acct-b" in where
+    assert where.index("acct-a") < where.index("acct-b")

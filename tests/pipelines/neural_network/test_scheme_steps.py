@@ -14,6 +14,7 @@ from chess_teacher.pipelines.neural_network.models import (
     BaselineModel,
     BaselineModelStatus,
     PersonalModel,
+    TrainingState,
 )
 from chess_teacher.pipelines.neural_network.scheme_steps import (
     SKIP_KEY,
@@ -28,6 +29,7 @@ from chess_teacher.pipelines.neural_network.scheme_steps import (
     build_training_scheme_steps,
 )
 from chess_teacher.pipelines.neural_network.schemes import ModelTraining, resolve_training_parent
+from chess_teacher.pipelines.neural_network.split_registry import SplitRegistry
 from chess_teacher.pipelines.neural_network.training_scheme import (
     ModelHandle,
     ParentBaselineDecision,
@@ -81,8 +83,14 @@ class _Scheme:
         self.fit_calls: list[Any] = []
         self.saved: list[Path] = []
         self.marked: list[list[str]] = []
+        self.rejected: list[list[str]] = []
+        self.aligned = 0
         self.applied_current: list[ModelHandle | None] = []
         self.decision = PromotionDecision(True, "ok")
+
+    def align_personal_queue(self, db_client: object) -> None:
+        del db_client
+        self.aligned += 1
 
     def note_checked(self, db_client: object) -> None:
         del db_client
@@ -121,6 +129,10 @@ class _Scheme:
         del db_client
         self.marked.append(game_ids)
 
+    def note_rejected(self, db_client: object, game_ids: list[str]) -> None:
+        del db_client
+        self.rejected.append(game_ids)
+
     def decide_promotion(self, **kwargs: object) -> PromotionDecision:
         del kwargs
         return self.decision
@@ -154,6 +166,7 @@ def test_prepare_skips_without_loading_when_pending_is_low() -> None:
     PrepareTrainingStep(scheme).run(MagicMock(), context)  # type: ignore[arg-type]
     assert context.extras[SKIP_KEY] is True
     assert scheme.checked == 1
+    assert scheme.aligned == 1
     assert "train_datums" not in context.extras
 
 
@@ -165,6 +178,7 @@ def test_prepare_loads_parent_and_batch() -> None:
     assert context.extras["parent"] is scheme.parent
     assert "reference" not in context.extras
     assert context.extras["train_game_ids"] == ["g1"]
+    assert scheme.aligned == 1
 
 
 class _RecordingProcess:
@@ -278,6 +292,29 @@ def test_advance_marks_prepared_games() -> None:
     context.extras["train_game_ids"] = ["g1", "g2"]
     AdvanceTrainingCursorStep(scheme).run(MagicMock(), context)  # type: ignore[arg-type]
     assert scheme.marked == [["g1", "g2"]]
+    assert scheme.rejected == []
+
+
+def test_advance_marks_a_promoted_batch() -> None:
+    scheme = _Scheme()
+    context = PipelineContext()
+    context.extras[SKIP_KEY] = False
+    context.extras["train_game_ids"] = ["g1", "g2"]
+    context.extras["promotion_decision"] = PromotionDecision(True, "promote")
+    AdvanceTrainingCursorStep(scheme).run(MagicMock(), context)  # type: ignore[arg-type]
+    assert scheme.marked == [["g1", "g2"]]
+    assert scheme.rejected == []
+
+
+def test_advance_moves_a_rejected_batch_down_the_queue() -> None:
+    scheme = _Scheme()
+    context = PipelineContext()
+    context.extras[SKIP_KEY] = False
+    context.extras["train_game_ids"] = ["g1", "g2"]
+    context.extras["promotion_decision"] = PromotionDecision(False, "miss")
+    AdvanceTrainingCursorStep(scheme).run(MagicMock(), context)  # type: ignore[arg-type]
+    assert scheme.marked == []
+    assert scheme.rejected == [["g1", "g2"]]
 
 
 def test_apply_does_not_archive_a_different_chain() -> None:
@@ -304,9 +341,9 @@ def test_both_scopes_build_the_same_step_classes() -> None:
         "ScoreEvaluation",
         "ReleaseTrainingSlot",
         "RecordCandidate",
-        "AdvanceTrainingCursor",
         "DecideFromScores",
         "ApplyPromotion",
+        "AdvanceTrainingCursor",
         "AdoptParentBaseline",
     ]
     assert [step.name for step in personal] == shared
@@ -444,8 +481,15 @@ def test_user_run_pools_every_linked_account(monkeypatch) -> None:
     )
     seen: dict[str, object] = {}
 
-    def count(self, *, split_version: str, flag_column: str, extra_where: str | None = None) -> int:
-        del self, split_version
+    def count(
+        self,
+        *,
+        split_version: str,
+        flag_column: str,
+        extra_where: str | None = None,
+        max_attempts: int | None = None,
+    ) -> int:
+        del self, split_version, max_attempts
         seen["flag"] = flag_column
         seen["where"] = extra_where
         return 4
@@ -463,8 +507,15 @@ def test_user_run_pools_every_linked_account(monkeypatch) -> None:
 def test_platform_run_uses_every_account(monkeypatch) -> None:
     seen: dict[str, object] = {}
 
-    def count(self, *, split_version: str, flag_column: str, extra_where: str | None = None) -> int:
-        del self, split_version
+    def count(
+        self,
+        *,
+        split_version: str,
+        flag_column: str,
+        extra_where: str | None = None,
+        max_attempts: int | None = None,
+    ) -> int:
+        del self, split_version, max_attempts
         seen["flag"] = flag_column
         seen["where"] = extra_where
         return 1
@@ -476,6 +527,208 @@ def test_platform_run_uses_every_account(monkeypatch) -> None:
     assert ModelTraining().count_pending(MagicMock()) == 1
     assert seen["flag"] == PROCESSED_FLAG_BASELINE
     assert seen["where"] is None
+
+
+def test_pending_stays_on_never_tried_games_while_that_front_is_large(monkeypatch) -> None:
+    calls: list[int | None] = []
+
+    def count(self, *, max_attempts: int | None = None, **kwargs: object) -> int:
+        del self, kwargs
+        calls.append(max_attempts)
+        return 5000
+
+    monkeypatch.setattr(
+        "chess_teacher.pipelines.neural_network.schemes.TrainingDataStore.count_unprocessed_train",
+        count,
+    )
+    assert ModelTraining().count_pending(MagicMock()) == 5000
+    assert calls == [0]
+
+
+def test_pending_includes_the_back_after_the_front_is_short(monkeypatch) -> None:
+    calls: list[int | None] = []
+
+    def count(self, *, max_attempts: int | None = None, **kwargs: object) -> int:
+        del self, kwargs
+        calls.append(max_attempts)
+        return 100 if max_attempts == 0 else 1400
+
+    monkeypatch.setattr(
+        "chess_teacher.pipelines.neural_network.schemes.TrainingDataStore.count_unprocessed_train",
+        count,
+    )
+    assert ModelTraining().count_pending(MagicMock()) == 1400
+    assert calls == [0, None]
+
+
+def test_batch_keeps_one_miss_behind_a_full_front(monkeypatch) -> None:
+    fetched: dict[str, object] = {}
+
+    def count(self, *, max_attempts: int | None = None, **kwargs: object) -> int:
+        del self, kwargs, max_attempts
+        return 5000
+
+    def fetch(self, **kwargs: object) -> tuple[list[object], list[str]]:
+        del self
+        fetched.update(kwargs)
+        return [object()], ["g-new"]
+
+    monkeypatch.setattr(
+        "chess_teacher.pipelines.neural_network.schemes.TrainingDataStore.count_unprocessed_train",
+        count,
+    )
+    monkeypatch.setattr(
+        "chess_teacher.pipelines.neural_network.schemes.TrainingDataStore.fetch_unprocessed_train_batch",
+        fetch,
+    )
+    datums, game_ids = ModelTraining().load_train_batch(MagicMock())
+    assert game_ids == ["g-new"]
+    assert len(datums) == 1
+    assert fetched["max_attempts"] == 0
+
+
+def test_batch_reaches_the_back_when_the_front_is_short(monkeypatch) -> None:
+    fetched: dict[str, object] = {}
+
+    def count(self, *, max_attempts: int | None = None, **kwargs: object) -> int:
+        del self, kwargs, max_attempts
+        return 10
+
+    def fetch(self, **kwargs: object) -> tuple[list[object], list[str]]:
+        del self
+        fetched.update(kwargs)
+        return [object()], ["g-miss"]
+
+    monkeypatch.setattr(
+        "chess_teacher.pipelines.neural_network.schemes.TrainingDataStore.count_unprocessed_train",
+        count,
+    )
+    monkeypatch.setattr(
+        "chess_teacher.pipelines.neural_network.schemes.TrainingDataStore.fetch_unprocessed_train_batch",
+        fetch,
+    )
+    ModelTraining().load_train_batch(MagicMock())
+    assert fetched["max_attempts"] is None
+
+
+def _parent_row(version: str) -> MagicMock:
+    row = MagicMock()
+    row.version = version
+    return row
+
+
+def _install_align_stubs(
+    monkeypatch: Any,
+    *,
+    parent_version: str | None,
+    stored: str | None,
+    served_parent: str | None = None,
+) -> dict[str, Any]:
+    """Patch the lookups align_personal_queue uses. No served model when ``served_parent`` is omitted."""
+    seen: dict[str, Any] = {"saved": [], "cleared": None}
+    if parent_version is None:
+        parent = None
+    else:
+        parent = _parent_row(parent_version)
+    monkeypatch.setattr(
+        "chess_teacher.pipelines.neural_network.schemes.BaselineModel.current_parent_baseline",
+        lambda db: parent,
+    )
+    if served_parent is None:
+        served = None
+    else:
+        served = MagicMock()
+        served.parent_baseline_version = served_parent
+    monkeypatch.setattr(
+        "chess_teacher.pipelines.neural_network.schemes.PersonalModel.latest_promotion_for_user",
+        lambda db, user_id: served,
+    )
+    state = TrainingState(scope="user:user-1", personal_queue_baseline=stored)
+
+    def for_scope(db: object, scope: str) -> TrainingState:
+        del db
+        assert scope == "user:user-1"
+        return state
+
+    def save(self: TrainingState, db: object) -> None:
+        del db
+        seen["saved"].append(self)
+
+    def clear(self: SplitRegistry, account_ids: list[str]) -> int:
+        del self
+        seen["cleared"] = list(account_ids)
+        return 3
+
+    monkeypatch.setattr(TrainingState, "for_scope", for_scope)
+    monkeypatch.setattr(TrainingState, "save_to_db", save)
+    monkeypatch.setattr(SplitRegistry, "clear_personal_queue_for_accounts", clear)
+    user = MagicMock()
+    user.get_linked_accounts.return_value = [
+        MagicMock(account_id="acct-b"),
+        MagicMock(account_id="acct-a"),
+    ]
+    monkeypatch.setattr(
+        "chess_teacher.pipelines.neural_network.schemes.User.fetch_from_db",
+        lambda db, id: user,
+    )
+    return seen
+
+
+def test_align_is_a_noop_for_the_platform_queue(monkeypatch: Any) -> None:
+    lookup = MagicMock()
+    monkeypatch.setattr(
+        "chess_teacher.pipelines.neural_network.schemes.BaselineModel.current_parent_baseline",
+        lookup,
+    )
+    ModelTraining().align_personal_queue(MagicMock())
+    lookup.assert_not_called()
+
+
+def test_align_waits_when_there_is_no_parent_baseline(monkeypatch: Any) -> None:
+    seen = _install_align_stubs(monkeypatch, parent_version=None, stored=None)
+    ModelTraining("user-1").align_personal_queue(MagicMock())
+    assert seen["saved"] == []
+    assert seen["cleared"] is None
+
+
+def test_align_leaves_a_queue_already_on_this_baseline(monkeypatch: Any) -> None:
+    seen = _install_align_stubs(monkeypatch, parent_version="v2", stored="v2")
+    ModelTraining("user-1").align_personal_queue(MagicMock())
+    assert seen["saved"] == []
+    assert seen["cleared"] is None
+
+
+def test_align_records_without_clearing_when_the_served_model_already_matches(
+    monkeypatch: Any,
+) -> None:
+    seen = _install_align_stubs(
+        monkeypatch,
+        parent_version="v1",
+        stored=None,
+        served_parent="v1",
+    )
+    ModelTraining("user-1").align_personal_queue(MagicMock())
+    assert seen["cleared"] is None
+    assert [row.personal_queue_baseline for row in seen["saved"]] == ["v1"]
+
+
+def test_align_replays_once_when_the_parent_baseline_moves(monkeypatch: Any) -> None:
+    seen = _install_align_stubs(
+        monkeypatch,
+        parent_version="v2",
+        stored="v1",
+        served_parent="v1",
+    )
+    ModelTraining("user-1").align_personal_queue(MagicMock())
+    assert seen["cleared"] == ["acct-b", "acct-a"]
+    assert [row.personal_queue_baseline for row in seen["saved"]] == ["v2"]
+
+
+def test_align_clears_a_queue_that_was_never_aligned(monkeypatch: Any) -> None:
+    seen = _install_align_stubs(monkeypatch, parent_version="v1", stored=None, served_parent=None)
+    ModelTraining("user-1").align_personal_queue(MagicMock())
+    assert seen["cleared"] == ["acct-b", "acct-a"]
+    assert [row.personal_queue_baseline for row in seen["saved"]] == ["v1"]
 
 
 def test_scheme_eval_loads_capped_registry_val(monkeypatch: Any) -> None:
