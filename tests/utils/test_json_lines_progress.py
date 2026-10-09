@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import io
 import json
 
@@ -38,6 +39,36 @@ class _RecordingProgressWindow:
 
     def clear(self) -> None:
         self.events.append(("clear", None))
+
+
+def test_json_lines_progress_window_ignores_broken_pipe_on_flush() -> None:
+    class _FlushBreaks(io.StringIO):
+        def flush(self) -> None:
+            raise BrokenPipeError()
+
+    window = JsonLinesProgressWindow(_FlushBreaks())
+    window.next("hello")
+    window.next("again")
+
+
+def test_json_lines_progress_window_ignores_a_closed_pipe() -> None:
+    class _ClosedPipe:
+        def __init__(self) -> None:
+            self.writes = 0
+
+        def write(self, text: str) -> int:
+            self.writes += 1
+            if self.writes > 1:
+                raise OSError(errno.EPIPE, "closed")
+            return len(text)
+
+        def flush(self) -> None:
+            return None
+
+    window = JsonLinesProgressWindow(_ClosedPipe())  # type: ignore[arg-type]
+    window.next("first")
+    window.update("second")
+    window.success("third")
 
 
 def test_json_lines_progress_window_writes_one_event_per_line() -> None:

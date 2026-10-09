@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import json
 from typing import IO, Any, Literal, TypedDict, cast
 
@@ -27,10 +28,23 @@ class JsonLinesProgressWindow:
 
     def __init__(self, out: IO[str]) -> None:
         self._out = out
+        self._closed = False
 
     def _emit(self, payload: dict[str, Any]) -> None:
-        self._out.write(json.dumps(payload, ensure_ascii=True) + "\n")
-        self._out.flush()
+        # A dropped reader must not abort the pipeline. The Streamlit page
+        # follows a log file; this still covers a host that left a pipe in place.
+        if self._closed:
+            return
+        try:
+            self._out.write(json.dumps(payload, ensure_ascii=True) + "\n")
+            self._out.flush()
+        except BrokenPipeError:
+            self._closed = True
+        except OSError as exc:
+            if exc.errno == errno.EPIPE:
+                self._closed = True
+                return
+            raise
 
     def next(self, message: str) -> None:
         self._emit({"op": "next", "message": message})
