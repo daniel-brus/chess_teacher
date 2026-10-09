@@ -545,7 +545,7 @@ def test_pending_stays_on_never_tried_games_while_that_front_is_large(monkeypatc
     assert calls == [0]
 
 
-def test_pending_includes_one_miss_after_the_front_is_short(monkeypatch) -> None:
+def test_pending_includes_the_back_after_the_front_is_short(monkeypatch) -> None:
     calls: list[int | None] = []
 
     def count(self, *, max_attempts: int | None = None, **kwargs: object) -> int:
@@ -558,7 +558,7 @@ def test_pending_includes_one_miss_after_the_front_is_short(monkeypatch) -> None
         count,
     )
     assert ModelTraining().count_pending(MagicMock()) == 1400
-    assert calls == [0, 1]
+    assert calls == [0, None]
 
 
 def test_batch_keeps_one_miss_behind_a_full_front(monkeypatch) -> None:
@@ -587,7 +587,7 @@ def test_batch_keeps_one_miss_behind_a_full_front(monkeypatch) -> None:
     assert fetched["max_attempts"] == 0
 
 
-def test_batch_reaches_one_miss_when_the_front_is_short(monkeypatch) -> None:
+def test_batch_reaches_the_back_when_the_front_is_short(monkeypatch) -> None:
     fetched: dict[str, object] = {}
 
     def count(self, *, max_attempts: int | None = None, **kwargs: object) -> int:
@@ -608,7 +608,7 @@ def test_batch_reaches_one_miss_when_the_front_is_short(monkeypatch) -> None:
         fetch,
     )
     ModelTraining().load_train_batch(MagicMock())
-    assert fetched["max_attempts"] == 1
+    assert fetched["max_attempts"] is None
 
 
 def _parent_row(version: str) -> MagicMock:

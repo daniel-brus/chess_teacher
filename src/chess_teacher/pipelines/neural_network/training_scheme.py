@@ -70,7 +70,7 @@ class TrainingScheme(Protocol):
         """Warm-start and comparison model. None means a cold start."""
 
     def load_train_batch(self, db_client: DatabaseClient) -> tuple[list[TrainingDatum], list[str]]:
-        """Next registry-train batch. Never-tried games come before one-miss games."""
+        """Next registry-train batch. Fewer misses come first."""
 
     def load_eval_datums(self, db_client: DatabaseClient) -> list[TrainingDatum]:
         """Frozen registry-val moves. Same list is reused for every score in the run."""
@@ -105,7 +105,7 @@ class TrainingScheme(Protocol):
         """Take promoted games out of the queue. They are in the served model."""
 
     def note_rejected(self, db_client: DatabaseClient, game_ids: list[str]) -> None:
-        """Move a batch that missed promotion behind never-tried games."""
+        """Move a missed batch behind games that have been tried fewer times."""
 
     def decide_promotion(
         self,

@@ -1054,7 +1054,8 @@ class TrainingDataStore:
         """Eligible moves on registry train rows whose processed flag is NULL.
 
         ``max_attempts`` keeps games that have missed promotion at most that
-        many times. ``None`` leaves every unmarked train game eligible.
+        many times. ``None`` leaves every unmarked train game eligible, including
+        games that have already missed more than once.
         """
         flag = require_processed_flag(flag_column)
         sql = f"""
@@ -1344,10 +1345,12 @@ class TrainingDataStore:
     ) -> tuple[list[TrainingDatum], list[str]]:
         """Next complete train games, up to ``limit`` moves.
 
-        Never-tried games come first when ``max_attempts`` is set. Never
-        selects val/test. Last game is expanded so a round never splits a
-        game. Returns ``(datums, game_ids)``. Caller marks ``game_ids`` when
-        the batch is promoted, or records a miss when it is not.
+        Games with fewer misses come first, so a repeat stays at the back.
+        ``max_attempts`` drops games past that count. ``None`` keeps every
+        unmarked train game. Never selects val/test. Last game is expanded
+        so a round never splits a game. Returns ``(datums, game_ids)``.
+        Caller marks ``game_ids`` when the batch is promoted, or records a
+        miss when it is not.
         """
         if limit <= 0:
             return [], []
@@ -1358,10 +1361,8 @@ class TrainingDataStore:
             extra_where=extra_where,
             max_attempts=max_attempts,
         )
-        order = "g.game_id ASC, m.move_nr ASC"
-        if max_attempts is not None:
-            attempt = attempt_column_for_flag(flag_column)
-            order = f"COALESCE(gs.{quote_ident(attempt)}, 0) ASC, {order}"
+        attempt = attempt_column_for_flag(flag_column)
+        order = f"COALESCE(gs.{quote_ident(attempt)}, 0) ASC, g.game_id ASC, m.move_nr ASC"
         sql = (
             f"SELECT m.move_id AS move_id, g.game_id AS game_id{from_sql} "
             f"ORDER BY {order} LIMIT :limit"

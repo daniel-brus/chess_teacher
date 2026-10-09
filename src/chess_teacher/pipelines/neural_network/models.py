@@ -33,9 +33,6 @@ ATTEMPT_COLUMNS = {
     PROCESSED_FLAG_BASELINE: ATTEMPT_COLUMN_BASELINE,
     PROCESSED_FLAG_PERSONAL: ATTEMPT_COLUMN_PERSONAL,
 }
-# 0 = never tried. 1 = one miss, still eligible after never-tried games run out.
-# A second miss waits for new games instead of refitting the same batch.
-MAX_QUEUE_ATTEMPTS = 1
 
 
 def eval_blob_is_candidate_style(eval_metrics: str | None) -> bool:

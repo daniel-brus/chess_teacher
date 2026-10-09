@@ -364,8 +364,8 @@ class SplitRegistry:
     ) -> int:
         """Count one missed promotion on train rows that are still unmarked.
 
-        Moves the games behind never-tried games. A second miss pushes them
-        past the one retry. Val and test rows are never updated.
+        Each miss sorts the games further back. They stay eligible until a
+        later round promotes them. Val and test rows are never updated.
         """
         unique = sorted({gid for gid in game_ids if gid})
         if not unique:

@@ -24,7 +24,6 @@ from chess_teacher.pipelines.neural_network.create_training_set import (
 from chess_teacher.pipelines.neural_network.eval_metrics import EvalMetrics
 from chess_teacher.pipelines.neural_network.models import (
     BASELINE_TRAINING_SCOPE,
-    MAX_QUEUE_ATTEMPTS,
     PROCESSED_FLAG_BASELINE,
     PROCESSED_FLAG_PERSONAL,
     BaselineModel,
@@ -287,15 +286,15 @@ class ModelTraining:
         """Moves this round may train.
 
         Never-tried games fill the count while there are enough of them.
-        One-miss games join only after that front of the queue is below the
-        training minimum. A second miss stays out until new games arrive.
+        Every older miss stays in the queue and joins once that front is
+        below the training minimum. More misses sort further back.
         """
         store = TrainingDataStore(db_client)
         kwargs = self._queue_kwargs(db_client)
         untried = store.count_unprocessed_train(**kwargs, max_attempts=0)
         if untried >= self.min_new_moves:
             return untried
-        return store.count_unprocessed_train(**kwargs, max_attempts=MAX_QUEUE_ATTEMPTS)
+        return store.count_unprocessed_train(**kwargs)
 
     def resolve_parent(self, db_client: DatabaseClient) -> ModelHandle | None:
         return resolve_training_parent(db_client, self.user_id)
@@ -304,7 +303,8 @@ class ModelTraining:
         store = TrainingDataStore(db_client)
         kwargs = self._queue_kwargs(db_client)
         untried = store.count_unprocessed_train(**kwargs, max_attempts=0)
-        ceiling = 0 if untried >= self.min_new_moves else MAX_QUEUE_ATTEMPTS
+        # None keeps every unmarked game. Attempt order puts repeats at the back.
+        ceiling = 0 if untried >= self.min_new_moves else None
         return store.fetch_unprocessed_train_batch(
             **kwargs,
             limit=MAX_MOVES_PER_BASELINE_BATCH,
@@ -439,7 +439,7 @@ class ModelTraining:
         _touch_scope(db_client, self._scope)
 
     def note_rejected(self, db_client: DatabaseClient, game_ids: list[str]) -> None:
-        """A finished fit that was not promoted. The games move down the queue."""
+        """A finished fit that was not promoted. The games move to the back."""
         SplitRegistry(db_client, split_version=self.split_version).note_attempt(
             game_ids,
             flag_column=self._flag,

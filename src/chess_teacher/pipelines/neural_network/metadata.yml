@@ -189,7 +189,7 @@ tables:
         data_type: integer
         nullable: false
         default: 0
-        comment: Baseline fits that missed promotion. 0 stays at the front. 1 waits behind never-tried games. 2+ waits for new games.
+        comment: Baseline fits that missed promotion. Lower counts stay ahead. Each miss moves the game back, and it stays eligible.
       - name: personal_train_attempts
         data_type: integer
         nullable: false
