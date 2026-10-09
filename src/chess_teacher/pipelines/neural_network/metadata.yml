@@ -139,6 +139,10 @@ tables:
         data_type: timestamptz
         nullable: true
         comment: Last time the min-data gate was evaluated
+      - name: personal_queue_baseline
+        data_type: text
+        nullable: true
+        comment: Parent baseline version this user's personal queue was last aligned to. NULL means not aligned yet.
 
   game_split_assignments:
     schema: ml
@@ -152,6 +156,10 @@ tables:
         columns: [split_version, bucket]
       - name: idx_game_split_assignments_baseline_queue
         columns: [split_version, bucket, already_processed_baseline]
+      - name: idx_game_split_assignments_baseline_attempts
+        columns: [split_version, bucket, already_processed_baseline, baseline_train_attempts]
+      - name: idx_game_split_assignments_personal_attempts
+        columns: [split_version, bucket, already_processed_personal, personal_train_attempts]
     columns:
       - name: split_version
         data_type: text
@@ -172,11 +180,21 @@ tables:
       - name: already_processed_baseline
         data_type: timestamptz
         nullable: true
-        comment: NULL = unprocessed for the platform baseline train queue; set to now() after a successful baseline fit
+        comment: NULL = not in the served baseline; set to now() when the batch that fit these games is promoted
       - name: already_processed_personal
         data_type: timestamptz
         nullable: true
-        comment: NULL = unprocessed for this user's current personal train chain; set to now() after a successful personal fit
+        comment: NULL = not in this user's served personal model; set to now() when that batch is promoted
+      - name: baseline_train_attempts
+        data_type: integer
+        nullable: false
+        default: 0
+        comment: Baseline fits that missed promotion. Lower counts stay ahead. Each miss moves the game back, and it stays eligible.
+      - name: personal_train_attempts
+        data_type: integer
+        nullable: false
+        default: 0
+        comment: Personal fits that missed promotion. Same ordering as baseline_train_attempts.
 
   training_scores:
     schema: ml

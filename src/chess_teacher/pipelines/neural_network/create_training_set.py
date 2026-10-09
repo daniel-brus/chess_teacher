@@ -14,6 +14,7 @@ import numpy as np
 from chess_teacher.pipelines.neural_network.models import (
     PROCESSED_FLAG_BASELINE,
     GameSplitAssignment,
+    attempt_column_for_flag,
     require_processed_flag,
 )
 from chess_teacher.pipelines.neural_network.move_encoding import (
@@ -1048,8 +1049,14 @@ class TrainingDataStore:
         split_version: str,
         flag_column: str,
         extra_where: str | None = None,
+        max_attempts: int | None = None,
     ) -> tuple[str, dict[str, Any]]:
-        """Eligible moves on registry train rows whose processed flag is NULL."""
+        """Eligible moves on registry train rows whose processed flag is NULL.
+
+        ``max_attempts`` keeps games that have missed promotion at most that
+        many times. ``None`` leaves every unmarked train game eligible, including
+        games that have already missed more than once.
+        """
         flag = require_processed_flag(flag_column)
         sql = f"""
             FROM games.moves m
@@ -1063,8 +1070,13 @@ class TrainingDataStore:
               AND gs.bucket = 'train'
               AND gs.{quote_ident(flag)} IS NULL
 """
+        params: dict[str, Any] = {"split_version": split_version}
+        if max_attempts is not None:
+            attempt = attempt_column_for_flag(flag)
+            sql += f" AND COALESCE(gs.{quote_ident(attempt)}, 0) <= :max_attempts"
+            params["max_attempts"] = int(max_attempts)
         sql = _with_extra_where(sql, extra_where)
-        return sql, {"split_version": split_version}
+        return sql, params
 
     def _registry_bucket_from_sql(
         self,
@@ -1210,6 +1222,7 @@ class TrainingDataStore:
         split_version: str,
         flag_column: str = PROCESSED_FLAG_BASELINE,
         extra_where: str | None = None,
+        max_attempts: int | None = None,
     ) -> int:
         """Count eligible unprocessed **train** moves (registry bucket + flag NULL)."""
         self._ensure_queue_tables()
@@ -1217,6 +1230,7 @@ class TrainingDataStore:
             split_version=split_version,
             flag_column=flag_column,
             extra_where=extra_where,
+            max_attempts=max_attempts,
         )
         sql = f"SELECT COUNT(*) AS n{from_sql}"
         rows = self._query_moves_sql(sql, params)
@@ -1327,12 +1341,16 @@ class TrainingDataStore:
         limit: int,
         flag_column: str = PROCESSED_FLAG_BASELINE,
         extra_where: str | None = None,
+        max_attempts: int | None = None,
     ) -> tuple[list[TrainingDatum], list[str]]:
-        """Next complete train games in ``game_id`` order, up to ``limit`` moves.
+        """Next complete train games, up to ``limit`` moves.
 
-        Never selects val/test. Last game is expanded so a round never splits
-        a game. Returns ``(datums, game_ids)``. Caller marks ``game_ids`` only
-        after a successful fit.
+        Games with fewer misses come first, so a repeat stays at the back.
+        ``max_attempts`` drops games past that count. ``None`` keeps every
+        unmarked train game. Never selects val/test. Last game is expanded
+        so a round never splits a game. Returns ``(datums, game_ids)``.
+        Caller marks ``game_ids`` when the batch is promoted, or records a
+        miss when it is not.
         """
         if limit <= 0:
             return [], []
@@ -1341,17 +1359,22 @@ class TrainingDataStore:
             split_version=split_version,
             flag_column=flag_column,
             extra_where=extra_where,
+            max_attempts=max_attempts,
         )
+        attempt = attempt_column_for_flag(flag_column)
+        order = f"COALESCE(gs.{quote_ident(attempt)}, 0) ASC, g.game_id ASC, m.move_nr ASC"
         sql = (
             f"SELECT m.move_id AS move_id, g.game_id AS game_id{from_sql} "
-            "ORDER BY g.game_id ASC, m.move_nr ASC LIMIT :limit"
+            f"ORDER BY {order} LIMIT :limit"
         )
         params = {**params, "limit": int(limit)}
         logger.info(
-            "Querying unprocessed train move ids (split_version=%s flag=%s limit=%s)...",
+            "Querying unprocessed train move ids "
+            "(split_version=%s flag=%s limit=%s max_attempts=%s)...",
             split_version,
             flag_column,
             limit,
+            "any" if max_attempts is None else max_attempts,
         )
         rows = self._query_moves_sql(sql, params)
         if not rows:

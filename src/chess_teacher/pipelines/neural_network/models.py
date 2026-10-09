@@ -27,6 +27,12 @@ BASELINE_TRAINING_SCOPE = "baseline"
 PROCESSED_FLAG_BASELINE = "already_processed_baseline"
 PROCESSED_FLAG_PERSONAL = "already_processed_personal"
 PROCESSED_FLAGS = frozenset({PROCESSED_FLAG_BASELINE, PROCESSED_FLAG_PERSONAL})
+ATTEMPT_COLUMN_BASELINE = "baseline_train_attempts"
+ATTEMPT_COLUMN_PERSONAL = "personal_train_attempts"
+ATTEMPT_COLUMNS = {
+    PROCESSED_FLAG_BASELINE: ATTEMPT_COLUMN_BASELINE,
+    PROCESSED_FLAG_PERSONAL: ATTEMPT_COLUMN_PERSONAL,
+}
 
 
 def eval_blob_is_candidate_style(eval_metrics: str | None) -> bool:
@@ -73,6 +79,11 @@ def require_processed_flag(flag_column: str) -> str:
             f"flag_column must be one of {sorted(PROCESSED_FLAGS)}, got {flag_column!r}"
         )
     return flag_column
+
+
+def attempt_column_for_flag(flag_column: str) -> str:
+    """Attempt counter that pairs with a processed flag. Ident-safe."""
+    return ATTEMPT_COLUMNS[require_processed_flag(flag_column)]
 
 
 @dataclass(frozen=True)
@@ -358,6 +369,7 @@ class TrainingState(TableDataClass):
     scope: str
     last_trained_data_cutoff: datetime | None = None
     last_min_data_check_at: datetime | None = None
+    personal_queue_baseline: str | None = None
 
     @classmethod
     def get_yaml_path(cls) -> Path:
@@ -388,18 +400,20 @@ class TrainingState(TableDataClass):
         return cls.for_scope(db_client, BASELINE_TRAINING_SCOPE)
 
     def with_check_at(self, checked_at: datetime | None = None) -> TrainingState:
-        return TrainingState(
-            scope=self.scope,
-            last_trained_data_cutoff=self.last_trained_data_cutoff,
+        return replace(
+            self,
             last_min_data_check_at=checked_at or get_current_datetime(),
         )
 
     def with_cutoff(self, cutoff: datetime, *, checked_at: datetime | None = None) -> TrainingState:
-        return TrainingState(
-            scope=self.scope,
+        return replace(
+            self,
             last_trained_data_cutoff=cutoff,
             last_min_data_check_at=checked_at or get_current_datetime(),
         )
+
+    def with_personal_queue_baseline(self, version: str) -> TrainingState:
+        return replace(self, personal_queue_baseline=version)
 
 
 @dataclass(frozen=True)
@@ -412,6 +426,8 @@ class GameSplitAssignment(TableDataClass):
     assigned_at: datetime
     already_processed_baseline: datetime | None = None
     already_processed_personal: datetime | None = None
+    baseline_train_attempts: int = 0
+    personal_train_attempts: int = 0
 
     @classmethod
     def get_yaml_path(cls) -> Path:

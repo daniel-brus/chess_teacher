@@ -60,14 +60,17 @@ class TrainingScheme(Protocol):
     def note_checked(self, db_client: DatabaseClient) -> None:
         """Record that the pending-data gate ran."""
 
+    def align_personal_queue(self, db_client: DatabaseClient) -> None:
+        """Replay a personal queue once when its parent baseline changes."""
+
     def count_pending(self, db_client: DatabaseClient) -> int:
-        """Unprocessed registry-train moves for this chain."""
+        """Registry-train moves this round may train."""
 
     def resolve_parent(self, db_client: DatabaseClient) -> ModelHandle | None:
         """Warm-start and comparison model. None means a cold start."""
 
     def load_train_batch(self, db_client: DatabaseClient) -> tuple[list[TrainingDatum], list[str]]:
-        """Next registry-train batch and the game ids to mark after a successful fit."""
+        """Next registry-train batch. Fewer misses come first."""
 
     def load_eval_datums(self, db_client: DatabaseClient) -> list[TrainingDatum]:
         """Frozen registry-val moves. Same list is reused for every score in the run."""
@@ -99,7 +102,10 @@ class TrainingScheme(Protocol):
         """Insert the new candidate row and return a handle to it."""
 
     def mark_trained(self, db_client: DatabaseClient, game_ids: list[str]) -> None:
-        """Advance the queue for games that were actually fit."""
+        """Take promoted games out of the queue. They are in the served model."""
+
+    def note_rejected(self, db_client: DatabaseClient, game_ids: list[str]) -> None:
+        """Move a missed batch behind games that have been tried fewer times."""
 
     def decide_promotion(
         self,
