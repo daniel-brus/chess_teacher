@@ -204,21 +204,26 @@ def test_min_memory_falls_back_when_the_env_value_is_invalid(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("PIPELINE_MIN_MEM_AVAILABLE_MB", "lots")
-    assert min_pipeline_mem_available_mb() == 1500.0
+    assert min_pipeline_mem_available_mb() == 1000.0
 
 
 def test_memory_check_uses_mem_available(monkeypatch: pytest.MonkeyPatch) -> None:
-    def _low() -> HostPressure:
+    available = {"mb": 900.0}
+
+    def _pressure() -> HostPressure:
         return HostPressure(
             rss_mb=100.0,
             cpu_count=2,
             affinity_count=2,
             load1=0.2,
-            mem_available_mb=1100.0,
+            mem_available_mb=available["mb"],
             mem_total_mb=4096.0,
         )
 
     monkeypatch.setattr(
-        "chess_teacher.pipelines.neural_network.training_slot.snapshot_host_pressure", _low
+        "chess_teacher.pipelines.neural_network.training_slot.snapshot_host_pressure",
+        _pressure,
     )
     assert pipeline_host_has_memory() is False
+    available["mb"] = 1100.0
+    assert pipeline_host_has_memory() is True

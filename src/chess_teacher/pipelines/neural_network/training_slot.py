@@ -28,10 +28,10 @@ TRAINING_SLOT_STALE_AFTER = timedelta(hours=3)
 TRAINING_SLOT_WAIT_LIMIT = timedelta(hours=4)
 TRAINING_SLOT_POLL_SECONDS = 30.0
 
-# One trainer on the 4 GB node still had about 1.1 GB free when it finished.
-# Overlap was already fatal around that level, so the next fit waits until
-# about 1.5 GB is free.
-DEFAULT_MIN_PIPELINE_MEM_AVAILABLE_MB = 1500.0
+# The wait runs after this pipeline is already resident, so MemAvailable is
+# the budget for the TensorFlow child. A solo fit on the 4 GB node finished
+# near 750 MB RSS. 1 GB covers that child and scoring in the same process.
+DEFAULT_MIN_PIPELINE_MEM_AVAILABLE_MB = 1000.0
 MIN_PIPELINE_MEM_AVAILABLE_MB_ENV = "PIPELINE_MIN_MEM_AVAILABLE_MB"
 
 

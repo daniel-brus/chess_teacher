@@ -9,6 +9,7 @@ from types import TracebackType
 
 import streamlit as st
 from streamlit.delta_generator import DeltaGenerator
+from streamlit.runtime.scriptrunner_utils.exceptions import ScriptControlException
 
 from chess_teacher.utils.pipeline_utils.pipeline_helpers import ProgressWindow
 from streamlit_utils.layout import ingest_css
@@ -111,6 +112,7 @@ class StreamlitProgressWindow(ProgressWindow):
         self._icon: str = _ICON_SPINNER
         self._placeholder: DeltaGenerator | None = None
         self._final_state: str | None = None
+        self._pace = True
 
     # ------------------------------------------------------------------
     # Context manager
@@ -128,8 +130,11 @@ class StreamlitProgressWindow(ProgressWindow):
         exc_val: BaseException | None,
         exc_tb: TracebackType | None,
     ) -> None:
-        if exc_type is not None and self._final_state is None:
-            self.error("Pipeline failed unexpectedly.")
+        if exc_type is None or self._final_state is not None:
+            return
+        if issubclass(exc_type, ScriptControlException):
+            return
+        self.error("Pipeline failed unexpectedly.")
 
     # ------------------------------------------------------------------
     # ProgressWindow protocol
@@ -141,7 +146,7 @@ class StreamlitProgressWindow(ProgressWindow):
         self._push("secondary", message)
         self._normalize_info_line_styles()
         self._render()
-        time.sleep(_PROGRESS_WINDOW_SLEEP_TIME)
+        self._pause()
 
     def update(self, message: str) -> None:
         """Overwrite the last message in place."""
@@ -153,7 +158,7 @@ class StreamlitProgressWindow(ProgressWindow):
             self._lines.append(("primary", message))
         self._normalize_info_line_styles()
         self._render()
-        time.sleep(_PROGRESS_WINDOW_SLEEP_TIME)
+        self._pause()
 
     def success(self, message: str) -> None:
         """Show a single success message (replaces earlier progress lines)."""
@@ -161,13 +166,13 @@ class StreamlitProgressWindow(ProgressWindow):
         self._icon = _ICON_SUCCESS
         self._lines = [("success", message)]
         self._render()
-        time.sleep(_PROGRESS_WINDOW_SLEEP_TIME)
+        self._pause()
 
     def warning(self, message: str) -> None:
         """Add a warning message without changing the icon."""
         self._push("warning", message)
         self._render()
-        time.sleep(_PROGRESS_WINDOW_SLEEP_TIME)
+        self._pause()
 
     def error(self, message: str) -> None:
         """Replace all lines with a single error message."""
@@ -175,7 +180,15 @@ class StreamlitProgressWindow(ProgressWindow):
         self._icon = _ICON_ERROR
         self._lines = [("error", message)]
         self._render()
-        time.sleep(_PROGRESS_WINDOW_SLEEP_TIME)
+        self._pause()
+
+    def set_pacing(self, enabled: bool) -> None:
+        """When off, events render immediately so a reattached page can catch up."""
+        self._pace = enabled
+
+    def checkpoint(self) -> None:
+        """Redraw so a refresh can stop this watcher without touching the run."""
+        self._render()
 
     def pop(self, amount: int = 1) -> None:
         """Remove the last message(s)."""
@@ -212,6 +225,10 @@ class StreamlitProgressWindow(ProgressWindow):
                 self._lines[idx] = ("primary", msg)
             else:
                 self._lines[idx] = ("secondary", msg)
+
+    def _pause(self) -> None:
+        if self._pace:
+            time.sleep(_PROGRESS_WINDOW_SLEEP_TIME)
 
     def _render(self) -> None:
         if self._placeholder is None:
