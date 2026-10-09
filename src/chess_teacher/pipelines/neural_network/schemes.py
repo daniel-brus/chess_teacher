@@ -24,6 +24,7 @@ from chess_teacher.pipelines.neural_network.create_training_set import (
 from chess_teacher.pipelines.neural_network.eval_metrics import EvalMetrics
 from chess_teacher.pipelines.neural_network.models import (
     BASELINE_TRAINING_SCOPE,
+    MAX_QUEUE_ATTEMPTS,
     PROCESSED_FLAG_BASELINE,
     PROCESSED_FLAG_PERSONAL,
     BaselineModel,
@@ -47,6 +48,9 @@ from chess_teacher.pipelines.neural_network.training_scheme import (
 from chess_teacher.platform.user import User
 from chess_teacher.utils.db.client import DatabaseClient
 from chess_teacher.utils.general_utils import get_current_datetime
+from chess_teacher.utils.logging import get_logger
+
+logger = get_logger()
 
 # Users have less new data than the platform pool.
 MIN_USER_TRAIN_MOVES = 300
@@ -272,23 +276,83 @@ class ModelTraining:
     def note_checked(self, db_client: DatabaseClient) -> None:
         _touch_scope(db_client, self._scope)
 
+    def _queue_kwargs(self, db_client: DatabaseClient) -> dict[str, Any]:
+        return {
+            "split_version": self.split_version,
+            "flag_column": self._flag,
+            "extra_where": self._account_filter(db_client),
+        }
+
     def count_pending(self, db_client: DatabaseClient) -> int:
-        return TrainingDataStore(db_client).count_unprocessed_train(
-            split_version=self.split_version,
-            flag_column=self._flag,
-            extra_where=self._account_filter(db_client),
-        )
+        """Moves this round may train.
+
+        Never-tried games fill the count while there are enough of them.
+        One-miss games join only after that front of the queue is below the
+        training minimum. A second miss stays out until new games arrive.
+        """
+        store = TrainingDataStore(db_client)
+        kwargs = self._queue_kwargs(db_client)
+        untried = store.count_unprocessed_train(**kwargs, max_attempts=0)
+        if untried >= self.min_new_moves:
+            return untried
+        return store.count_unprocessed_train(**kwargs, max_attempts=MAX_QUEUE_ATTEMPTS)
 
     def resolve_parent(self, db_client: DatabaseClient) -> ModelHandle | None:
         return resolve_training_parent(db_client, self.user_id)
 
     def load_train_batch(self, db_client: DatabaseClient) -> tuple[list[TrainingDatum], list[str]]:
-        return TrainingDataStore(db_client).fetch_unprocessed_train_batch(
-            split_version=self.split_version,
+        store = TrainingDataStore(db_client)
+        kwargs = self._queue_kwargs(db_client)
+        untried = store.count_unprocessed_train(**kwargs, max_attempts=0)
+        ceiling = 0 if untried >= self.min_new_moves else MAX_QUEUE_ATTEMPTS
+        return store.fetch_unprocessed_train_batch(
+            **kwargs,
             limit=MAX_MOVES_PER_BASELINE_BATCH,
-            flag_column=self._flag,
-            extra_where=self._account_filter(db_client),
+            max_attempts=ceiling,
         )
+
+    def align_personal_queue(self, db_client: DatabaseClient) -> None:
+        """Replay a personal queue once when the parent baseline moves.
+
+        The first time this runs for a user whose served model already sits on
+        the current parent baseline, the existing marks stay. Those games are
+        already in the model we continue from.
+        """
+        if self.user_id is None:
+            return
+        parent = BaselineModel.current_parent_baseline(db_client)
+        if parent is None:
+            return
+        version = parent.version
+        state = TrainingState.for_scope(db_client, self._scope)
+        if state.personal_queue_baseline == version:
+            return
+        served = PersonalModel.latest_promotion_for_user(db_client, self.user_id)
+        already_on_this_baseline = (
+            state.personal_queue_baseline is None
+            and served is not None
+            and served.parent_baseline_version == version
+        )
+        if already_on_this_baseline:
+            logger.info(
+                "Personal queue already matches parent baseline %s for user=%s",
+                version,
+                self.user_id,
+            )
+        else:
+            user = User.fetch_from_db(db_client, id=self.user_id)
+            account_ids = [account.account_id for account in user.get_linked_accounts(db_client)]
+            cleared = SplitRegistry(
+                db_client,
+                split_version=self.split_version,
+            ).clear_personal_queue_for_accounts(account_ids)
+            logger.info(
+                "Personal queue replay user=%s parent_baseline=%s cleared_rows=%s",
+                self.user_id,
+                version,
+                cleared,
+            )
+        state.with_personal_queue_baseline(version).save_to_db(db_client)
 
     def load_eval_datums(self, db_client: DatabaseClient) -> list[TrainingDatum]:
         return load_registry_val_datums(
@@ -369,6 +433,14 @@ class ModelTraining:
 
     def mark_trained(self, db_client: DatabaseClient, game_ids: list[str]) -> None:
         SplitRegistry(db_client, split_version=self.split_version).mark_processed(
+            game_ids,
+            flag_column=self._flag,
+        )
+        _touch_scope(db_client, self._scope)
+
+    def note_rejected(self, db_client: DatabaseClient, game_ids: list[str]) -> None:
+        """A finished fit that was not promoted. The games move down the queue."""
+        SplitRegistry(db_client, split_version=self.split_version).note_attempt(
             game_ids,
             flag_column=self._flag,
         )

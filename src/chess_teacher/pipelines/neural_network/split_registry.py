@@ -14,9 +14,11 @@ from datetime import datetime
 
 from chess_teacher.pipelines.neural_network.create_training_set import TrainingDatum
 from chess_teacher.pipelines.neural_network.models import (
+    ATTEMPT_COLUMN_PERSONAL,
     PROCESSED_FLAG_BASELINE,
     PROCESSED_FLAG_PERSONAL,
     GameSplitAssignment,
+    attempt_column_for_flag,
     require_processed_flag,
 )
 from chess_teacher.pipelines.neural_network.splits import (
@@ -349,6 +351,81 @@ class SplitRegistry:
             "SplitRegistry mark_processed split_version=%s flag=%s requested=%s updated=%s",
             self.split_version,
             flag,
+            len(unique),
+            updated,
+        )
+        return updated
+
+    def note_attempt(
+        self,
+        game_ids: Sequence[str],
+        *,
+        flag_column: str = PROCESSED_FLAG_BASELINE,
+    ) -> int:
+        """Count one missed promotion on train rows that are still unmarked.
+
+        Moves the games behind never-tried games. A second miss pushes them
+        past the one retry. Val and test rows are never updated.
+        """
+        unique = sorted({gid for gid in game_ids if gid})
+        if not unique:
+            return 0
+        flag = require_processed_flag(flag_column)
+        attempt = attempt_column_for_flag(flag)
+        self.ensure_table()
+        metadata = GameSplitAssignment.get_metadata()
+        updated = 0
+        batch_size = 500
+        for offset in range(0, len(unique), batch_size):
+            chunk = unique[offset : offset + batch_size]
+            game_id_list = ", ".join(quote_literal(gid) for gid in chunk)
+            where = (
+                f"{generate_ident_is_literal('split_version', self.split_version)} "
+                f"AND {generate_ident_is_literal('bucket', SplitBucket.TRAIN.value)} "
+                f"AND {quote_ident(flag)} IS NULL "
+                f'AND "game_id" IN ({game_id_list})'
+            )
+            sql = (
+                f"UPDATE {metadata.qualified_name_sql()} "
+                f"SET {quote_ident(attempt)} = COALESCE({quote_ident(attempt)}, 0) + 1 "
+                f"WHERE {where}"
+            )
+            updated += self.db_client.engine.execute_write(sql, {})
+        logger.info(
+            "SplitRegistry note_attempt split_version=%s flag=%s requested=%s updated=%s",
+            self.split_version,
+            flag,
+            len(unique),
+            updated,
+        )
+        return updated
+
+    def clear_personal_queue_for_accounts(self, account_ids: Sequence[str]) -> int:
+        """Drop personal marks and attempt counts for one user's games.
+
+        Used once when that user starts a new parent-baseline lineage.
+        """
+        unique = sorted({aid for aid in account_ids if aid})
+        if not unique:
+            return 0
+        self.ensure_table()
+        ids_sql = ", ".join(quote_literal(aid) for aid in unique)
+        where = (
+            f"{generate_ident_is_literal('split_version', self.split_version)} "
+            f'AND "game_id" IN (SELECT "game_id" FROM games.games '
+            f'WHERE "account_id" IN ({ids_sql}))'
+        )
+        updated = self.db_client.update_where(
+            GameSplitAssignment.get_metadata(),
+            {
+                PROCESSED_FLAG_PERSONAL: None,
+                ATTEMPT_COLUMN_PERSONAL: 0,
+            },
+            where,
+        )
+        logger.info(
+            "SplitRegistry clear_personal_queue split_version=%s accounts=%s updated=%s",
+            self.split_version,
             len(unique),
             updated,
         )
