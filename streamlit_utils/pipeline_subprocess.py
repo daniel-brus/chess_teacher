@@ -13,24 +13,35 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from chess_teacher.utils.env_utils import get_optional_env_variable
-from chess_teacher.utils.logging import get_logger
-from chess_teacher.utils.pipeline_utils.json_lines_progress import apply_progress_event
-from chess_teacher.utils.pipeline_utils.pipeline_helpers import ProgressWindow
+# ``python -m`` only puts the working directory on the path. CI installs
+# dependencies without an editable install, so the supervisor has to add
+# ``src`` itself before importing the package.
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+_SRC_ROOT = _REPO_ROOT / "src"
+for _import_root in (str(_REPO_ROOT), str(_SRC_ROOT)):
+    if _import_root not in sys.path:
+        sys.path.insert(0, _import_root)
+
+from chess_teacher.utils.env_utils import get_optional_env_variable  # noqa: E402
+from chess_teacher.utils.logging import get_logger  # noqa: E402
+from chess_teacher.utils.pipeline_utils.json_lines_progress import (  # noqa: E402
+    apply_progress_event,
+)
+from chess_teacher.utils.pipeline_utils.pipeline_helpers import ProgressWindow  # noqa: E402
 
 logger = get_logger()
 
 _RUN_DIR_ENV = "STREAMLIT_PIPELINE_RUN_DIR"
-_DEFAULT_RUN_DIR = "/tmp/chess-teacher-streamlit-pipelines"
+_DEFAULT_RUN_DIR = str(Path(tempfile.gettempdir()) / "chess-teacher-streamlit-pipelines")
 _POLL_SECONDS = 0.25
 _STARTUP_GRACE_SECONDS = 5.0
 _RUNNING_STATES = frozenset({"R", "S", "D", "T", "t"})
 
-_REPO_ROOT = Path(__file__).resolve().parent.parent
 _PIPELINE_SCRIPT = _REPO_ROOT / "scripts" / "entrypoints" / "pipeline.py"
 
 
@@ -111,6 +122,7 @@ def start_detached_pipeline(
     process = subprocess.Popen(
         argv,
         cwd=_REPO_ROOT,
+        env=_child_env(),
         start_new_session=True,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
@@ -202,6 +214,7 @@ def supervise(
         process = subprocess.Popen(
             command,
             cwd=_REPO_ROOT,
+            env=_child_env(),
             stdin=subprocess.DEVNULL,
             stdout=log,
             stderr=None,
@@ -227,6 +240,21 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         command = args[5:]
     return supervise(args[1], Path(args[2]), Path(args[3]), command)
+
+
+def _child_env() -> dict[str, str]:
+    """Import roots for a fresh interpreter that did not inherit pytest's path."""
+    env = os.environ.copy()
+    existing = env.get("PYTHONPATH", "")
+    parts = [str(_REPO_ROOT), str(_SRC_ROOT)]
+    if existing:
+        parts.extend(existing.split(os.pathsep))
+    unique: list[str] = []
+    for part in parts:
+        if part and part not in unique:
+            unique.append(part)
+    env["PYTHONPATH"] = os.pathsep.join(unique)
+    return env
 
 
 def _run_dir() -> Path:
