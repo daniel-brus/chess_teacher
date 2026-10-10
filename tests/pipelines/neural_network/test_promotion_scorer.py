@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
+from unittest.mock import MagicMock
 
 import numpy as np
 
@@ -47,7 +48,7 @@ def test_candidate_style_scorer_uses_model_aware_inputs(monkeypatch: Any) -> Non
         lambda *a, **k: np.ones((1,), dtype=np.float64),
     )
 
-    score = promotion.CandidateStyleTopKScorer().score(
+    score = promotion.CandidateStyleTopKScorer(tracker=MagicMock()).score(
         model_uri="model-uri",
         datums=[datum],  # type: ignore[list-item]
     )
