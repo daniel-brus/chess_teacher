@@ -1,4 +1,4 @@
-"""Child interpreter for the two training steps that need TensorFlow.
+"""Child interpreter for production hybrid-model training and evaluation.
 
 Stdout is the pickle protocol. Logging and ``print`` go to stderr, which the
 pipeline process already inherits.
@@ -21,12 +21,12 @@ def fit_model(
     datums: list[TrainingDatum],
     weights_path: Path | None,
 ) -> dict[str, Any]:
-    """Fit in this process and return the saved file plus the train metrics."""
-    from chess_teacher.pipelines.neural_network.train import BaselineTrainer
+    """Fit the active hybrid board-state model and return its file and metrics."""
+    from chess_teacher.pipelines.neural_network.board_encoder import HybridBoardTrainer
 
-    model, metrics = BaselineTrainer().fit(datums, weights_path=weights_path)
+    model, metrics = HybridBoardTrainer().fit(datums, weights_path=weights_path)
     out_path = Path(tempfile.mkdtemp(prefix="scheme_model_")) / "model.keras"
-    BaselineTrainer.save(model, out_path)
+    HybridBoardTrainer.save(model, out_path)
     return {"model_path": str(out_path), "metrics": metrics}
 
 

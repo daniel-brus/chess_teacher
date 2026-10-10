@@ -459,6 +459,50 @@ class SplitRegistry:
         )
         return updated
 
+    def reset_training_queue_markers(self, *, dry_run: bool = False) -> int:
+        """Reset baseline and personal queue state for train-bucket rows only.
+
+        Validation/test assignments, model rows, and training cutoffs are left
+        unchanged. Returns the number of rows that would be or were reset.
+        """
+        self.ensure_table()
+        metadata = GameSplitAssignment.get_metadata()
+        where = (
+            f"{generate_ident_is_literal('split_version', self.split_version)} "
+            f"AND {generate_ident_is_literal('bucket', SplitBucket.TRAIN.value)} "
+            'AND ("already_processed_baseline" IS NOT NULL '
+            'OR "already_processed_personal" IS NOT NULL '
+            'OR "baseline_train_attempts" <> 0 '
+            'OR "personal_train_attempts" <> 0)'
+        )
+        matched = self.db_client.get_row_count(metadata, where=where)
+        if dry_run or matched == 0:
+            logger.info(
+                "SplitRegistry reset_training_queue_markers split_version=%s dry_run=%s matched=%s",
+                self.split_version,
+                dry_run,
+                matched,
+            )
+            return matched
+
+        updated = self.db_client.update_where(
+            metadata,
+            {
+                PROCESSED_FLAG_BASELINE: None,
+                PROCESSED_FLAG_PERSONAL: None,
+                "baseline_train_attempts": 0,
+                ATTEMPT_COLUMN_PERSONAL: 0,
+            },
+            where,
+        )
+        logger.info(
+            "SplitRegistry reset_training_queue_markers split_version=%s matched=%s updated=%s",
+            self.split_version,
+            matched,
+            updated,
+        )
+        return updated
+
     def exclude_holdout_games_sql(self, *, game_id_column: str = "g.game_id") -> str:
         """SQL fragment: true when ``game_id`` is not registry val/test (Phase 4 train filter)."""
         version_lit = quote_literal(self.split_version)

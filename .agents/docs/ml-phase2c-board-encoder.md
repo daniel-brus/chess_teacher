@@ -1,8 +1,8 @@
 # Phase 2c — Board representation + training signal (E19–E23)
 
-**Status:** ✅ **closed** (research + offline hybrid path on `feature/ml-phase2c-board-encoder`).
-Production train/promote still untouched until Phase 4. **Next:** Phase 3 on a new branch.
-Sandbox A/B cleanup (end of this doc) remains a PR chore, not a blocker for starting Phase 3.
+**Status:** ✅ **adopted** — the hybrid board-state model is active for production
+platform/personal training and live scoring. The state-vector-only
+`BaselineTrainer` is deprecated and retained for offline comparisons and legacy artifacts.
 
 **Primary offline metrics:** stratified **top1 / top3** overall, SF-agree, SF-disagree. Style primary for ranking runs: `top1_sf_disagree` (report top3_disagree alongside).
 
@@ -10,11 +10,11 @@ Sandbox A/B cleanup (end of this doc) remains a PR chore, not a blocker for star
 
 | Topic | Decision |
 |-------|----------|
-| Encoder | **Hybrid** board conv + flat state (preferred offline path; MLP = A/B control / sunset candidate) |
+| Encoder | **Hybrid** board conv + flat state (active model; state-vector-only MLP is deprecated) |
 | Forced weights (E21) | Useful research lever; **not** default-on for personal style |
 | Loss (E22) | Default **`loss_kind=sf_mix`**, **`sf_mix_alpha=0`** ≡ pure user CE. Soft rejected. `α>0` reserved for platform / generic baselines only |
 | Soft labels | Research-only; do not use for style / personal bots |
-| Prod wiring | Still Phase 4 — defaults above are library defaults for offline + future wiring |
+| Prod wiring | `HybridBoardTrainer` trains platform and personal models; live scoring feeds board, state, and move features |
 
 **Loss note (why sf_mix @ α=0):** Personal bots recreate **user** moves → need user-only CE. Keeping the `sf_mix` implementation (not the thin `sparse` alias) means platform baselines can later raise `α` toward SF-best among candidates without a second loss family. E22 (`hybrid_loss_ab_r3_ep10`): soft killed disagree; `α=0.3` hurt disagree vs sparse; sparse/`α=0` wins for style.
 
@@ -25,10 +25,10 @@ Sandbox A/B cleanup (end of this doc) remains a PR chore, not a blocker for star
 | Reuse | Drop freely |
 |-------|-------------|
 | Move characteristics + candidate SF evals in DB | Parent-weight resume from v50/v51 / old feat dims |
-| Listwise masked CE over SF candidates | Flat `state` MLP as long-term trunk |
+| Listwise masked CE over SF candidates | Deprecated state-vector-only `BaselineTrainer` as production model |
 | Registry val + stratified metrics | Silent layout compat shims for production artifacts |
 
-**Package POC:** practically every class under `pipelines/neural_network` is disposable (trainers, promotion, offline CLIs, hybrid encoder, `BaselineModel` rows). Prefer delete/rewrite over API keep. `BaselineTrainer` = A/B control + **TO-BE-SUNSET** if hybrid (or later design) wins; `HybridBoardTrainer` = successor *candidate*, still POC / not production-wired.
+**Package POC:** practically every class under `pipelines/neural_network` is disposable (trainers, promotion, offline CLIs, hybrid encoder, `BaselineModel` rows). Prefer delete/rewrite over API keep. `BaselineTrainer` = deprecated state-vector-only A/B control; `HybridBoardTrainer` = active production trainer.
 
 Version ints (`BOARD_TENSOR_VERSION`, feat version) stay as **experiment bookkeeping** (log what you trained), not as a parent-resume gate. Feel free to reshape planes, move-feat packs, or the candidate head when A/B says so — still **one change family per A/B**.
 
@@ -265,12 +265,14 @@ Keep **generic** offline ops that prod/dev still use (`offline_baseline_catch_up
 
 | Keep if winner | Delete / do not wire if loser or unused |
 |----------------|----------------------------------------|
-| Hybrid board path if hybrid wins | `BaselineTrainer` as long-term trunk (sunset later) |
+| Hybrid board path | `HybridBoardTrainer` is active; `BaselineTrainer` is deprecated |
 | Default **`sf_mix` @ α=0** (user CE) | `loss_kind=soft`; non-zero α on personal / Phase 3 paths |
 | Style disagree boost/scale (if still used in prod catch-up) | `forced_scale_pawns` + forced helpers if E21 off for prod |
 | — | User-finetune sample-weight / recency / baseline-disagree paths if Phase 3 re-homes or drops them |
 
-**Hard rule:** no non-default `loss_kind` / `sf_mix_alpha>0` / forced-scale flags on `pipeline_steps` / scheduled personal train until an explicit Phase 4 wiring ticket. Defaults must match “what we promote” (`sf_mix`, `α=0`).
+**Hard rule:** scheduled production training uses trainer defaults; do not enable non-default
+`loss_kind`, `sf_mix_alpha>0`, or forced-scale behavior on personal training without an explicit
+decision. Defaults must match “what we promote” (`sf_mix`, `α=0`).
 
 #### C. Diagnostics + material slices
 

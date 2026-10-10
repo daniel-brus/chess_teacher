@@ -22,6 +22,7 @@ from scripts.utils.run_script_job import main as run_script_job_main
 
 def test_resolve_script_relpath_short_name() -> None:
     assert resolve_script_relpath("baseline_training") == "entrypoints/baseline_training.py"
+    assert resolve_script_relpath("training_queue_reset") == "ops/training_queue_reset.py"
     assert (
         resolve_script_relpath("ops/backfill_candidate_evals.py")
         == "ops/backfill_candidate_evals.py"

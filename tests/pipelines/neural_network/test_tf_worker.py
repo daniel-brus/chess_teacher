@@ -9,7 +9,7 @@ from chess_teacher.pipelines.neural_network.eval_metrics import EvalMetrics
 from chess_teacher.pipelines.neural_network.tf_worker import fit_model, score_model, score_weights
 
 
-def test_fit_model_saves_a_file_and_returns_metrics(monkeypatch: Any) -> None:
+def test_fit_model_uses_hybrid_trainer_and_saves_metrics(monkeypatch: Any) -> None:
     class _Trainer:
         def fit(
             self,
@@ -27,7 +27,7 @@ def test_fit_model_saves_a_file_and_returns_metrics(monkeypatch: Any) -> None:
             path.write_bytes(b"weights")
 
     monkeypatch.setattr(
-        "chess_teacher.pipelines.neural_network.train.BaselineTrainer",
+        "chess_teacher.pipelines.neural_network.board_encoder.HybridBoardTrainer",
         _Trainer,
     )
     result = fit_model(datums=["row"], weights_path=None)  # type: ignore[arg-type]

@@ -1,8 +1,10 @@
-"""Keras baseline trainer — candidate-aware style scorer (SF eval features per move).
+"""Deprecated state-vector-only candidate-style trainer and shared utilities.
 
-Replaces the fixed-vocab policy head. Parent weights load only when compatible with
-``head=candidate_style`` (state tower + per-candidate scorer). See
-``candidate_eval.py`` for delta convention.
+``BaselineTrainer`` is retained for offline A/B comparisons and older model
+artifacts. The active production chessboard state model is
+``HybridBoardTrainer`` from ``board_encoder``: board convolutions plus the
+state-vector tower and per-candidate scorer. See ``candidate_eval.py`` for
+the feature delta convention.
 """
 
 from __future__ import annotations
@@ -630,7 +632,11 @@ def load_candidate_style_from_uri(
 
 
 class BaselineTrainer:
-    """Shared state tower + per-candidate MLP scorer; listwise masked CE.
+    """Deprecated state-vector-only tower + per-candidate scorer.
+
+    The active production model is ``HybridBoardTrainer``, which also encodes
+    the spatial board state with convolutions. This trainer remains available
+    for offline comparisons and legacy state-vector model artifacts.
 
     Inputs: ``state`` (D,), ``move_feats`` (MAX, F). Output: logits (MAX,).
     Sample weights: ply * SF-style, optional recency and baseline-disagree
