@@ -1,12 +1,9 @@
-"""Hybrid board-encoder + flat state + candidate scorer (Phase 2c offline).
+"""Active hybrid board-state encoder + candidate scorer.
 
-Board conv trunk is an **addition** to the baseline flat ``state`` tower (not a
-replacement). Both embeddings fuse before the shared candidate head.
-Does **not** wire production entrypoints.
-
-POC: intended *successor candidate* for ``BaselineTrainer`` if registry-val
-A/B wins — still disposable with the rest of ``neural_network`` until Phase 4
-promotes a greenfield design. Not production-wired yet.
+The production model combines a board convolution trunk with the flat state
+tower; both embeddings fuse before the shared candidate head. It replaces the
+deprecated state-vector-only ``BaselineTrainer`` for platform and personal
+training and live chessboard scoring.
 """
 
 from __future__ import annotations
@@ -140,13 +137,14 @@ def model_is_hybrid_board_compatible(
 
 
 class HybridBoardTrainer:
-    """Board conv + flat state tower fused, then candidate scorer (offline Phase 2c).
+    """Active board-convolution + flat-state candidate scorer.
 
     State tower matches ``BaselineTrainer`` widths; conv trunk is additive.
     ``DEFAULT_CONV_FILTERS`` bumped vs first A/B (32 → 64).
 
-    POC / intended successor for flat-state-only ``BaselineTrainer`` if A/B wins.
-    Still offline-only; package remains deletable until Phase 4 greenfield.
+    Used to train production platform and personal models. The flat-state-only
+    ``BaselineTrainer`` is deprecated and remains only for offline comparisons
+    and legacy artifacts.
     """
 
     DEFAULT_EPOCHS = BaselineTrainer.DEFAULT_EPOCHS

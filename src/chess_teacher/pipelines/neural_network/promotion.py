@@ -153,6 +153,9 @@ class CandidateStyleTopKScorer(ModelScorer):
         if not datums:
             raise ValueError("CandidateStyleTopKScorer.score requires a non-empty eval set")
 
+        from chess_teacher.pipelines.neural_network.eval_metrics import (
+            predict_candidate_logits,
+        )
         from chess_teacher.pipelines.neural_network.train import (
             load_candidate_style_from_uri,
         )
@@ -170,9 +173,8 @@ class CandidateStyleTopKScorer(ModelScorer):
                 "CandidateStyleTopKScorer: no eval datums with usable candidate_evaluations"
             )
         kept_datums = [datums[i] for i in kept]
-        x_state = TrainingBatch(kept_datums).state_matrix()
         logits = np.asarray(
-            model.predict({"state": x_state, "move_feats": feats}, verbose=0),
+            predict_candidate_logits(model, kept_datums, feats),
             dtype=np.float64,
         )
         if logits.ndim != 2 or logits.shape[1] != self.max_candidates:

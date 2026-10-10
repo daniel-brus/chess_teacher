@@ -1,4 +1,4 @@
-"""Board spatial tensors for Phase 2c hybrid encoder (offline).
+"""Board spatial tensors used by the active hybrid chessboard-state model.
 
 Builds fixed-shape ``(8, 8, C)`` float32 planes from ``fen_before``, oriented so
 side-to-move ("us") sits on the bottom ranks. See

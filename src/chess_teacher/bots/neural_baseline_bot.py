@@ -71,7 +71,11 @@ def model_expects_board_input(model: object) -> bool:
 
 
 class NeuralBaselineBot(ChessBot):
-    """Load candidate_style Keras weights; score live legal moves with SF feats."""
+    """Score live legal moves with the active hybrid board-state model.
+
+    Legacy state-vector-only candidate-style artifacts are still accepted; the
+    board tensor is supplied automatically when the loaded model requires it.
+    """
 
     name = "NeuralBaseline"
 

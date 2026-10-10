@@ -1,4 +1,4 @@
-"""Pipeline steps for baseline candidate training."""
+"""Legacy pipeline steps for hybrid board-state candidate training."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 
+from chess_teacher.pipelines.neural_network.board_encoder import HybridBoardTrainer
 from chess_teacher.pipelines.neural_network.candidate_eval import HEAD_TYPE_CANDIDATE_STYLE
 from chess_teacher.pipelines.neural_network.create_training_set import (
     TrainingDataStore,
@@ -18,7 +19,6 @@ from chess_teacher.pipelines.neural_network.models import (
     BaselineModelStatus,
     TrainingState,
 )
-from chess_teacher.pipelines.neural_network.train import BaselineTrainer
 from chess_teacher.pipelines.preprocessing.games import Game
 from chess_teacher.pipelines.preprocessing.moves import Move, MoveCharacteristics
 from chess_teacher.utils.db.client import DatabaseClient
@@ -159,12 +159,12 @@ class LoadNewDataStep(PipelineStep):
 
 
 class TrainIncrementalStep(PipelineStep):
-    """Finetune (or cold-start) Keras baseline on the new batch."""
+    """Finetune (or cold-start) the hybrid board-state model on the new batch."""
 
     def __init__(self) -> None:
         super().__init__(name="TrainIncremental")
         self._tracker = MLflowTracker()
-        self._trainer = BaselineTrainer()
+        self._trainer = HybridBoardTrainer()
 
     def run(self, db_client: DatabaseClient, context: PipelineContext) -> None:
         if _should_skip(context):
@@ -185,7 +185,7 @@ class TrainIncrementalStep(PipelineStep):
         model, metrics = self._trainer.fit(datums, weights_path=weights_path)
         out_path = Path(tempfile.mkdtemp(prefix="baseline_model_")) / "model.keras"
         logger.info("Saving trained Keras model to %s…", out_path)
-        BaselineTrainer.save(model, out_path)
+        HybridBoardTrainer.save(model, out_path)
         context.extras["trained_model_path"] = out_path
         context.extras["train_metrics"] = metrics
         logger.info("Train metrics=%s path=%s", metrics, out_path)

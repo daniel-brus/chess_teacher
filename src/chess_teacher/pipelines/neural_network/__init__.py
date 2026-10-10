@@ -1,11 +1,14 @@
-"""Neural-network pipelines (baseline and personal train/promote).
+"""Neural-network pipelines (hybrid board-state baseline and personal train/promote).
 
 POC package — disposable until Phase 4 greenfield lands
 =======================================================
 Almost every class/module under ``chess_teacher.pipelines.neural_network`` is
 **proof-of-concept**. Keras artifacts in ``ml.baseline_models``, flat-state
-``BaselineTrainer``, promotion/random-eval paths, and the new hybrid encoder
-are all replaceable. Prefer deleting / rewriting over preserving APIs.
+``BaselineTrainer`` (deprecated), promotion/random-eval paths, and the active
+hybrid board-state encoder are all replaceable. Production baseline and
+personal models are currently trained with ``HybridBoardTrainer``; the
+state-vector-only trainer remains for offline comparisons and older artifacts.
+Prefer deleting / rewriting over preserving APIs.
 
 Keep (data, not NN code): preprocessing move characteristics + candidate SF
 evals in Postgres. Those feed whatever greenfield trainer wins Phase 2c+.
