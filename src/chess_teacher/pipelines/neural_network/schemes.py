@@ -368,14 +368,14 @@ class ModelTraining:
         *,
         weights_path: Path | None,
     ) -> tuple[Any, dict[str, float]]:
-        from chess_teacher.pipelines.neural_network.train import BaselineTrainer
+        from chess_teacher.pipelines.neural_network.board_encoder import HybridBoardTrainer
 
-        return BaselineTrainer().fit(datums, weights_path=weights_path)
+        return HybridBoardTrainer().fit(datums, weights_path=weights_path)
 
     def save(self, model: Any, path: Path) -> None:
-        from chess_teacher.pipelines.neural_network.train import BaselineTrainer
+        from chess_teacher.pipelines.neural_network.board_encoder import HybridBoardTrainer
 
-        BaselineTrainer.save(model, path)
+        HybridBoardTrainer.save(model, path)
 
     def next_version(self, db_client: DatabaseClient) -> str:
         if self.user_id is None:

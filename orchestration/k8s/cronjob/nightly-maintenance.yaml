@@ -4,8 +4,9 @@ metadata:
   name: nightly-maintenance
   namespace: chess-teacher
 spec:
-  # 06:00 keeps baseline training off the default 03:00 user cron.
-  schedule: "0 6 * * *"
+  # Four baseline trains, in the gaps between user crons
+  # (00:30, 03:00, 04:00, 13:30 Europe/Amsterdam).
+  schedule: "0 5,11,17,23 * * *"
   timeZone: Europe/Amsterdam
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 3

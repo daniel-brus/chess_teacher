@@ -166,7 +166,7 @@ Whitelisted entrypoints only (`scripts/utils/run_script_job.py`). Template: `orc
 | Task | Command |
 |------|---------|
 | Backfill candidate evals | `run_script_job.py backfill_candidate_evals -- --workers 4` |
-| Reset baseline training | `run_script_job.py baseline_reset_training -- --yes` |
+| Reset baseline and personal queue markers | `run_script_job.py training_queue_reset -- --yes` |
 | Train until caught up | `run_script_job.py baseline_train_until_caught_up` |
 | Upgrade MLflow tracking schema | `run_script_job.py mlflow_db_upgrade` |
 
