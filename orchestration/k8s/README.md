@@ -27,7 +27,7 @@ make streamlit_k3d      # infra + k3d + apply + port-forward → http://localhos
 |----------|-----------------|
 | `deployment/streamlit` | UI (image `:develop`) |
 | `cronjob/ingestion-dispatcher` | Every 30 min → spawns pipeline Jobs |
-| `cronjob/nightly-maintenance` | Daily 06:00 Europe/Amsterdam |
+| `cronjob/nightly-maintenance` | 05:00, 11:00, 17:00, 23:00 Europe/Amsterdam |
 
 Pipeline Jobs are created at runtime by the dispatcher (same as prod).
 
