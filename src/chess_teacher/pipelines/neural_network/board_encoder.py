@@ -8,19 +8,19 @@ training and live chessboard scoring.
 
 from __future__ import annotations
 
+import gc
+import shutil
+import tempfile
 import time
 from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-import numpy as np
-
 from chess_teacher.pipelines.neural_network.board_tensor import (
     BOARD_TENSOR_CHANNELS,
     BOARD_TENSOR_SHAPE,
     BOARD_TENSOR_VERSION,
-    pack_board_tensors,
 )
 from chess_teacher.pipelines.neural_network.candidate_eval import (
     CANDIDATE_MOVE_FEAT_VERSION,
@@ -33,28 +33,24 @@ from chess_teacher.pipelines.neural_network.candidate_losses import (
     DEFAULT_SOFT_TEMPERATURE_PAWNS,
     LossKind,
     masked_candidate_top_k,
-    pack_candidate_targets_for_loss,
     resolve_candidate_loss,
 )
 from chess_teacher.pipelines.neural_network.create_training_set import (
-    TrainingBatch,
     TrainingDatum,
 )
 from chess_teacher.pipelines.neural_network.ply_weights import (
     DEFAULT_RECENCY_BOOST,
-    baseline_disagree_strength,
-    candidate_style_sample_weights,
     style_disagree_boost_from_env,
     style_disagree_scale_from_env,
-    user_finetune_sample_weights,
-    user_not_sf_best_mask,
-    user_sf_disagree_strength,
 )
 from chess_teacher.pipelines.neural_network.tf_runtime import ensure_tensorflow_logging
 from chess_teacher.pipelines.neural_network.train import (
     BaselineTrainer,
+    baseline_disagree_from_batches,
+    candidate_batch_dataset,
     candidate_style_custom_objects,
-    numpy_batches_to_tf_dataset,
+    global_sample_weights,
+    scan_candidate_stream,
 )
 from chess_teacher.utils.general_utils import get_current_datetime
 from chess_teacher.utils.logging import get_logger
@@ -141,6 +137,8 @@ class HybridBoardTrainer:
 
     State tower matches ``BaselineTrainer`` widths; conv trunk is additive.
     ``DEFAULT_CONV_FILTERS`` bumped vs first A/B (32 → 64).
+    Training features are spilled to bounded-size disk batches and streamed into
+    TensorFlow instead of materializing the full move tensor in RAM.
 
     Used to train production platform and personal models. The flat-state-only
     ``BaselineTrainer`` is deprecated and remains only for offline comparisons
@@ -366,7 +364,7 @@ class HybridBoardTrainer:
             raise ValueError("HybridBoardTrainer.fit requires a non-empty batch")
 
         logger.info(
-            "Hybrid board+state encoder: packing candidates for %s datums "
+            "Hybrid board+state encoder: scanning candidates for %s datums "
             "(board_tensor_version=%s C=%s conv_filters=%s). %s",
             len(datums),
             BOARD_TENSOR_VERSION,
@@ -374,157 +372,172 @@ class HybridBoardTrainer:
             self.conv_filters,
             snapshot_host_pressure().format_fields(),
         )
-        batch = TrainingBatch(datums)
-        feats, mask, labels, kept = batch.candidate_style_targets()
-        if not kept:
-            raise ValueError("HybridBoardTrainer.fit: no datums with usable candidate_evaluations")
-        kept_datums = [datums[i] for i in kept]
-        x_board = pack_board_tensors(kept_datums)
-        x_state = TrainingBatch(kept_datums).state_matrix()
-        y = pack_candidate_targets_for_loss(
-            loss_kind=self.loss_kind,
-            labels=labels,
-            mask=mask,
-            move_feats=feats,
-            soft_temperature_pawns=self.soft_temperature_pawns,
-        )
-        disagree_mask = user_not_sf_best_mask(feats, labels)
-        strength = user_sf_disagree_strength(feats, labels, scale_pawns=self.style_disagree_scale)
-        plies = [d.ply for d in kept_datums]
-        mapping = end_time_by_game_id or {}
-        aligned: list[datetime | None] = []
-        missing = 0
-        for d in kept_datums:
-            end = mapping.get(d.game_id)
-            if end is None:
-                missing += 1
-                aligned.append(None)
-            else:
-                aligned.append(end)
-
         use_baseline = self.baseline_disagree_boost != 1.0
         use_recency = recency_lambda is not None
-        model = None
-        baseline_strength = None
-        if use_baseline:
-            if baseline_weights_path is None:
-                raise ValueError("baseline_disagree_boost != 1.0 requires baseline_weights_path")
-            baseline_model = self.load_or_build(
-                state_dim=int(x_state.shape[1]),
-                weights_path=baseline_weights_path,
-                require_compatible_parent=True,
-            )
-            logits = np.asarray(
-                baseline_model.predict(
-                    {"board": x_board, "state": x_state, "move_feats": feats},
-                    verbose=0,
-                ),
-                dtype=np.float64,
-            )
-            baseline_strength = baseline_disagree_strength(logits, mask, labels)
-            if weights_path is not None and weights_path == baseline_weights_path:
-                model = baseline_model
+        if use_baseline and baseline_weights_path is None:
+            raise ValueError("baseline_disagree_boost != 1.0 requires baseline_weights_path")
 
-        if use_recency or use_baseline:
+        dataset: Any = None
+        batch_dir = tempfile.mkdtemp(prefix="ct-hybrid-fit-")
+        try:
+            scan = scan_candidate_stream(
+                datums,
+                style_disagree_boost=self.style_disagree_boost,
+                style_disagree_scale=self.style_disagree_scale,
+                forced_scale_pawns=None
+                if (use_recency or use_baseline)
+                else self.forced_scale_pawns,
+                end_time_by_game_id=end_time_by_game_id,
+                batch_dir=batch_dir,
+                batch_size=self.batch_size,
+                include_board=True,
+            )
+            n_kept = len(scan.datums)
+            n_dropped = scan.n_dropped
+            if n_kept < 1:
+                raise ValueError(
+                    "HybridBoardTrainer.fit: no datums with usable candidate_evaluations"
+                )
+            if (
+                scan.max_candidates != self.max_candidates
+                or scan.move_feat_dim != self.move_feat_dim
+            ):
+                raise ValueError(
+                    "packed candidate shape "
+                    f"(max_candidates={scan.max_candidates}, feat_dim={scan.move_feat_dim}) "
+                    f"!= trainer (max_candidates={self.max_candidates}, "
+                    f"feat_dim={self.move_feat_dim})"
+                )
+
+            batch_paths = list(scan.batch_paths)
+            state_dim = scan.state_dim
+            raw_weights = scan.raw_weights
+            end_times = scan.end_times
+            missing = scan.n_missing_end
+            disagree_frac = scan.disagree_frac
+            mean_strength = scan.mean_strength
+            del scan, datums
+            gc.collect()
+            logger.info(
+                "Hybrid candidate scan kept=%s dropped=%s batch_files=%s "
+                "(board + move tensors spilled to disk) %s",
+                n_kept,
+                n_dropped,
+                len(batch_paths),
+                snapshot_host_pressure().format_fields(),
+            )
+
+            model = None
+            baseline_strength = None
+            if use_baseline:
+                baseline_model = self.load_or_build(
+                    state_dim=state_dim,
+                    weights_path=baseline_weights_path,
+                    require_compatible_parent=True,
+                )
+                baseline_strength = baseline_disagree_from_batches(
+                    baseline_model,
+                    batch_paths,
+                    include_board=True,
+                )
+                if weights_path is not None and weights_path == baseline_weights_path:
+                    model = baseline_model
+                gc.collect()
+
             if use_recency and missing:
                 logger.warning(
                     "recency: %s/%s kept datums missing end_time; strength=0",
                     missing,
-                    len(kept_datums),
+                    n_kept,
                 )
-            recency_now = now if now is not None else get_current_datetime()
-            sample_w = user_finetune_sample_weights(
-                plies,
-                feats,
-                labels,
-                aligned,
+            sample_w = global_sample_weights(
+                raw_weights,
+                finetune=use_recency or use_baseline,
+                end_times=end_times,
                 recency_lambda=float(recency_lambda) if recency_lambda is not None else 0.0,
                 recency_boost=self.recency_boost if use_recency else 1.0,
-                style_disagree_boost=self.style_disagree_boost,
-                style_disagree_scale=self.style_disagree_scale,
-                baseline_disagree_strength=baseline_strength,
+                baseline_strength=baseline_strength,
                 baseline_disagree_boost=self.baseline_disagree_boost,
-                now=recency_now,
+                now=now if now is not None else get_current_datetime(),
             )
-        else:
-            sample_w = candidate_style_sample_weights(
-                plies,
-                feats,
-                labels,
-                style_disagree_boost=self.style_disagree_boost,
-                style_disagree_scale=self.style_disagree_scale,
-                candidate_mask=mask,
-                forced_scale_pawns=self.forced_scale_pawns,
-            )
-        disagree_frac = float(np.mean(disagree_mask))
-        mean_strength = float(np.mean(strength))
+            del raw_weights, end_times, baseline_strength
+            gc.collect()
 
-        if model is None:
-            model = self.load_or_build(
-                state_dim=int(x_state.shape[1]),
-                weights_path=weights_path,
-                require_compatible_parent=require_parent_weights,
-            )
-        fit_started = snapshot_host_pressure()
-        logger.info(
-            "Starting hybrid Keras fit samples=%s epochs=%s batch_size=%s "
-            "conv_filters=%s style_disagree_boost=%s scale_pawns=%s "
-            "forced_scale_pawns=%s disagree_frac=%.3f mean_strength=%.3f "
-            "parent=%s %s",
-            len(kept_datums),
-            self.epochs,
-            min(self.batch_size, len(kept_datums)),
-            self.conv_filters,
-            self.style_disagree_boost,
-            self.style_disagree_scale,
-            self.forced_scale_pawns,
-            disagree_frac,
-            mean_strength,
-            weights_path,
-            fit_started.format_fields(),
-        )
-        total_epochs = self.epochs
-        from tensorflow.keras.callbacks import Callback  # type: ignore[import-untyped]
-
-        class _EpochInfoCallback(Callback):
-            def on_epoch_end(self, epoch: int, logs: dict[str, Any] | None = None) -> None:
-                logger.info(
-                    "Hybrid Keras epoch %s/%s metrics=%s",
-                    epoch + 1,
-                    total_epochs,
-                    {k: round(float(v), 6) for k, v in (logs or {}).items()},
+            if model is None:
+                model = self.load_or_build(
+                    state_dim=state_dim,
+                    weights_path=weights_path,
+                    require_compatible_parent=require_parent_weights,
                 )
+            fit_started = snapshot_host_pressure()
+            logger.info(
+                "Starting hybrid Keras fit samples=%s epochs=%s batch_size=%s "
+                "conv_filters=%s style_disagree_boost=%s scale_pawns=%s "
+                "forced_scale_pawns=%s disagree_frac=%.3f mean_strength=%.3f "
+                "parent=%s %s",
+                n_kept,
+                self.epochs,
+                min(self.batch_size, n_kept),
+                self.conv_filters,
+                self.style_disagree_boost,
+                self.style_disagree_scale,
+                self.forced_scale_pawns,
+                disagree_frac,
+                mean_strength,
+                weights_path,
+                fit_started.format_fields(),
+            )
+            total_epochs = self.epochs
+            from tensorflow.keras.callbacks import Callback  # type: ignore[import-untyped]
 
-        fit_t0 = time.monotonic()
-        n_kept = len(kept_datums)
-        n_dropped = len(datums) - n_kept
-        state_dim = int(x_state.shape[1])
-        x_inputs = {"board": x_board, "state": x_state, "move_feats": feats}
-        dataset, n_ds, bs_used = numpy_batches_to_tf_dataset(
-            x_inputs=x_inputs,
-            y=y,
-            sample_weight=sample_w,
-            batch_size=self.batch_size,
-        )
-        del x_board, x_state, feats, y, sample_w, x_inputs, mask, labels, kept_datums
-        import gc
+            class _EpochInfoCallback(Callback):
+                def on_epoch_end(self, epoch: int, logs: dict[str, Any] | None = None) -> None:
+                    logger.info(
+                        "Hybrid Keras epoch %s/%s metrics=%s",
+                        epoch + 1,
+                        total_epochs,
+                        {k: round(float(v), 6) for k, v in (logs or {}).items()},
+                    )
 
-        gc.collect()
-        logger.info(
-            "Streaming hybrid Keras fit via tf.data n_samples=%s batch_size=%s epochs=%s %s",
-            n_ds,
-            bs_used,
-            self.epochs,
-            snapshot_host_pressure().format_fields(),
-        )
-        history = model.fit(
-            dataset,
-            epochs=self.epochs,
-            verbose=0,
-            callbacks=[_EpochInfoCallback()],
-        )
-        del dataset
-        gc.collect()
+            fit_t0 = time.monotonic()
+            dataset, n_ds, bs_used = candidate_batch_dataset(
+                batch_paths,
+                sample_weight=sample_w,
+                batch_size=self.batch_size,
+                loss_kind=self.loss_kind,
+                soft_temperature_pawns=self.soft_temperature_pawns,
+                state_dim=state_dim,
+                max_candidates=self.max_candidates,
+                move_feat_dim=self.move_feat_dim,
+                include_board=True,
+            )
+            del sample_w
+            gc.collect()
+            n_batches = len(batch_paths)
+            if self.epochs > 1:
+                dataset = dataset.repeat()
+            dataset = dataset.prefetch(1)
+            logger.info(
+                "Streaming hybrid Keras fit via generated batches n_samples=%s "
+                "batch_size=%s epochs=%s steps_per_epoch=%s batch_files=%s %s",
+                n_ds,
+                bs_used,
+                self.epochs,
+                n_batches,
+                n_batches,
+                snapshot_host_pressure().format_fields(),
+            )
+            history = model.fit(
+                dataset,
+                epochs=self.epochs,
+                steps_per_epoch=n_batches,
+                verbose=0,
+                callbacks=[_EpochInfoCallback()],
+            )
+        finally:
+            del dataset
+            gc.collect()
+            shutil.rmtree(batch_dir, ignore_errors=True)
         metrics: dict[str, float] = {}
         for key, values in history.history.items():
             if values:
