@@ -16,6 +16,7 @@ RUN pip install .
 
 # Copy scripts and app-files (including k8s/job/ for dispatcher)
 COPY scripts/ ./scripts/
+COPY orchestration/__init__.py orchestration/pipeline_jobs.py ./orchestration/
 COPY orchestration/k8s/job/ ./orchestration/k8s/job/
 COPY streamlit_app.py .
 COPY streamlit_utils/ ./streamlit_utils/

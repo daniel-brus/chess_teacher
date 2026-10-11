@@ -1,6 +1,6 @@
 # Pipeline worker Job template (single source of truth).
 #
-# scripts/entrypoints/dispatcher.py loads this file and substitutes REPLACE_* placeholders.
+# orchestration/pipeline_jobs.py renders this template for UI and scheduled Jobs.
 # Manual smoke test: replace placeholders, then kubectl apply -f this file.
 #
 #   kubectl delete job pipeline-manual-example -n chess-teacher --ignore-not-found
@@ -8,7 +8,7 @@
 #   kubectl logs -n chess-teacher job/pipeline-manual-example -f
 #
 # Placeholders:
-#   REPLACE_JOB_NAME            — unique Job name (dispatcher generates per run)
+#   REPLACE_JOB_NAME            — unique Job name
 #   REPLACE_USER_ID             — user_id from the users table
 #   REPLACE_WORK_ITEM           — dedup label hash (dispatcher generates per user)
 #   REPLACE_PIPELINE_JOB_IMAGE  — container image (from configmap PIPELINE_JOB_IMAGE)
@@ -41,6 +41,7 @@ spec:
           args:
             - --user-id
             - REPLACE_USER_ID
+            - --progress-stdout
           envFrom:
             - secretRef:
                 name: chess-teacher-env
