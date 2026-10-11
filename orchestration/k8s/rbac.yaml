@@ -27,3 +27,39 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
   name: chess-teacher-dispatcher
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: chess-teacher-streamlit
+  namespace: chess-teacher
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: chess-teacher-streamlit
+  namespace: chess-teacher
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: chess-teacher-streamlit
+  namespace: chess-teacher
+subjects:
+  - kind: ServiceAccount
+    name: chess-teacher-streamlit
+    namespace: chess-teacher
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: chess-teacher-streamlit
