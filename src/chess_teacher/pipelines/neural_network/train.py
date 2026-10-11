@@ -282,14 +282,23 @@ def scan_candidate_stream(
         ):
             raise RuntimeError("candidate batch buffer was not allocated")
         path = Path(batch_dir) / f"batch-{len(batch_paths):05d}.npz"
-        np.savez(
-            path,
-            state=np.ascontiguousarray(state_buf[:buf_n]),
-            feats=np.ascontiguousarray(feats_buf[:buf_n]),
-            mask=np.ascontiguousarray(mask_buf[:buf_n]),
-            labels=np.ascontiguousarray(labels_buf[:buf_n]),
-            **({"board": np.ascontiguousarray(board_buf[:buf_n])} if board_buf is not None else {}),
-        )
+        if board_buf is not None:
+            np.savez(
+                path,
+                state=np.ascontiguousarray(state_buf[:buf_n]),
+                feats=np.ascontiguousarray(feats_buf[:buf_n]),
+                mask=np.ascontiguousarray(mask_buf[:buf_n]),
+                labels=np.ascontiguousarray(labels_buf[:buf_n]),
+                board=np.ascontiguousarray(board_buf[:buf_n]),
+            )
+        else:
+            np.savez(
+                path,
+                state=np.ascontiguousarray(state_buf[:buf_n]),
+                feats=np.ascontiguousarray(feats_buf[:buf_n]),
+                mask=np.ascontiguousarray(mask_buf[:buf_n]),
+                labels=np.ascontiguousarray(labels_buf[:buf_n]),
+            )
         batch_paths.append(str(path))
         buf_n = 0
 
