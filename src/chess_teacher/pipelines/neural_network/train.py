@@ -21,6 +21,10 @@ from typing import Any
 
 import numpy as np
 
+from chess_teacher.pipelines.neural_network.board_tensor import (
+    BOARD_TENSOR_SHAPE,
+    pack_board_tensors,
+)
 from chess_teacher.pipelines.neural_network.candidate_eval import (
     CANDIDATE_MOVE_FEAT_VERSION,
     MAX_CANDIDATES,
@@ -105,8 +109,8 @@ def numpy_batches_to_tf_dataset(
     """Build a batched ``tf.data`` dataset from already-materialized NumPy tensors.
 
     Returns ``(dataset, n_samples, batch_size_used)``. ``from_tensor_slices`` copies
-    the full arrays into TensorFlow while the NumPy inputs are still alive.
-    ``BaselineTrainer.fit`` does not use this. ``HybridBoardTrainer`` still does.
+    the full arrays into TensorFlow while the NumPy inputs are still alive. Kept
+    for small offline callers; production trainers use ``candidate_batch_dataset``.
     """
     tf = _import_tensorflow()
     n = int(y.shape[0])
@@ -136,8 +140,8 @@ def candidate_target_width(loss_kind: str, max_candidates: int) -> int:
 class CandidateStreamScan:
     """Kept rows and per-row raw sample weights. Feature tensors are not kept.
 
-    When ``batch_paths`` is set, each file is one training batch
-    (``state``, ``feats``, ``mask``, ``labels``) written during the scan.
+    When ``batch_paths`` is set, each file is one training batch written during
+    the scan. Hybrid batches also contain the ``board`` input tensor.
     """
 
     datums: list[TrainingDatum]
@@ -221,13 +225,15 @@ def scan_candidate_stream(
     lam: float = DEFAULT_PLY_WEIGHT_LAMBDA,
     batch_dir: str | None = None,
     batch_size: int = 64,
+    include_board: bool = False,
 ) -> CandidateStreamScan:
     """Walk datums once. Keep the row objects and one raw weight each.
 
     ``candidate_style_target`` runs per row. With ``batch_dir``, each full batch
     is written to disk and the feature arrays are dropped before the next batch.
-    Global mean-normalization happens later, on the scalar vector only, so it
-    matches a full-tensor ``normalize_sample_weights`` call.
+    Hybrid callers also spill board tensors. Global mean-normalization happens
+    later, on the scalar vector only, so it matches a full-tensor
+    ``normalize_sample_weights`` call.
     """
     n_input = len(datums)
     mapping = end_time_by_game_id or {}
@@ -241,6 +247,8 @@ def scan_candidate_stream(
     max_candidates = 0
     move_feat_dim = 0
     spill = batch_dir is not None
+    if include_board and not spill:
+        raise ValueError("include_board requires batch_dir so board tensors can be spilled")
     spill_bs = max(1, int(batch_size))
     batch_paths: list[str] = []
     buf_n = 0
@@ -248,6 +256,7 @@ def scan_candidate_stream(
     feats_buf: np.ndarray | None = None
     mask_buf: np.ndarray | None = None
     labels_buf: np.ndarray | None = None
+    board_buf: np.ndarray | None = None
     progress_every = max(1, n_input // 5) if n_input else 1
     logger.info(
         "Scanning candidate move features for %s datums "
@@ -268,17 +277,28 @@ def scan_candidate_stream(
             or feats_buf is None
             or mask_buf is None
             or labels_buf is None
+            or (include_board and board_buf is None)
             or batch_dir is None
         ):
             raise RuntimeError("candidate batch buffer was not allocated")
         path = Path(batch_dir) / f"batch-{len(batch_paths):05d}.npz"
-        np.savez(
-            path,
-            state=np.ascontiguousarray(state_buf[:buf_n]),
-            feats=np.ascontiguousarray(feats_buf[:buf_n]),
-            mask=np.ascontiguousarray(mask_buf[:buf_n]),
-            labels=np.ascontiguousarray(labels_buf[:buf_n]),
-        )
+        if board_buf is not None:
+            np.savez(
+                path,
+                state=np.ascontiguousarray(state_buf[:buf_n]),
+                feats=np.ascontiguousarray(feats_buf[:buf_n]),
+                mask=np.ascontiguousarray(mask_buf[:buf_n]),
+                labels=np.ascontiguousarray(labels_buf[:buf_n]),
+                board=np.ascontiguousarray(board_buf[:buf_n]),
+            )
+        else:
+            np.savez(
+                path,
+                state=np.ascontiguousarray(state_buf[:buf_n]),
+                feats=np.ascontiguousarray(feats_buf[:buf_n]),
+                mask=np.ascontiguousarray(mask_buf[:buf_n]),
+                labels=np.ascontiguousarray(labels_buf[:buf_n]),
+            )
         batch_paths.append(str(path))
         buf_n = 0
 
@@ -315,6 +335,11 @@ def scan_candidate_stream(
                 feats_buf = np.empty((spill_bs, max_candidates, move_feat_dim), dtype=np.float32)
                 mask_buf = np.empty((spill_bs, max_candidates), dtype=np.float32)
                 labels_buf = np.empty((spill_bs,), dtype=np.int32)
+                if include_board:
+                    board_buf = np.empty(
+                        (spill_bs, *BOARD_TENSOR_SHAPE),
+                        dtype=np.float32,
+                    )
         if spill:
             if state_buf is None or feats_buf is None or mask_buf is None or labels_buf is None:
                 raise RuntimeError("candidate batch buffer was not allocated")
@@ -322,6 +347,10 @@ def scan_candidate_stream(
             feats_buf[buf_n] = feats
             mask_buf[buf_n] = mask
             labels_buf[buf_n] = int(label)
+            if include_board:
+                if board_buf is None:
+                    raise RuntimeError("board batch buffer was not allocated")
+                board_buf[buf_n] = pack_board_tensors([datum])[0]
             buf_n += 1
             if buf_n == spill_bs:
                 _flush_batch()
@@ -418,26 +447,48 @@ def _load_candidate_batch_file(
     return state, feats, mask, labels
 
 
+def _load_hybrid_candidate_batch_file(
+    path: str,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    with np.load(path) as data:
+        board = np.asarray(data["board"])
+        state = np.asarray(data["state"])
+        feats = np.asarray(data["feats"])
+        mask = np.asarray(data["mask"])
+        labels = np.asarray(data["labels"])
+    return board, state, feats, mask, labels
+
+
 def baseline_disagree_from_batches(
     model: Any,
     batch_paths: Sequence[str],
+    *,
+    include_board: bool = False,
 ) -> np.ndarray:
-    """Predict baseline argmax disagreement from spilled batch files.
+    """Predict baseline argmax disagreement from spilled candidate batches.
 
     One file is loaded at a time. Logits are reduced to one strength float per
-    row and discarded.
+    row and discarded. ``include_board`` supplies the board input for hybrid
+    models; state-vector-only models use the default two-input mapping.
     """
     if not batch_paths:
         return np.zeros((0,), dtype=np.float64)
     parts: list[np.ndarray] = []
     for path in batch_paths:
-        state, feats, mask, labels = _load_candidate_batch_file(path)
+        if include_board:
+            board, state, feats, mask, labels = _load_hybrid_candidate_batch_file(path)
+            model_inputs = {"board": board, "state": state, "move_feats": feats}
+        else:
+            state, feats, mask, labels = _load_candidate_batch_file(path)
+            model_inputs = {"state": state, "move_feats": feats}
         logits = np.asarray(
-            model.predict({"state": state, "move_feats": feats}, verbose=0),
+            model.predict(model_inputs, verbose=0),
             dtype=np.float64,
         )
         parts.append(baseline_disagree_strength(logits, mask, labels))
-        del state, feats, mask, labels, logits
+        del model_inputs, state, feats, mask, labels, logits
+        if include_board:
+            del board
     if len(parts) == 1:
         return parts[0]
     return np.concatenate(parts, axis=0)
@@ -453,6 +504,7 @@ def candidate_batch_dataset(
     state_dim: int,
     max_candidates: int,
     move_feat_dim: int,
+    include_board: bool = False,
 ) -> tuple[Any, int, int]:
     """``tf.data`` dataset that yields spilled batches when training pulls them.
 
@@ -475,7 +527,15 @@ def candidate_batch_dataset(
     def generate() -> Any:
         offset = 0
         for path in paths:
-            state, feats, mask, labels = _load_candidate_batch_file(path)
+            if include_board:
+                board, state, feats, mask, labels = _load_hybrid_candidate_batch_file(path)
+                if tuple(board.shape[1:]) != BOARD_TENSOR_SHAPE:
+                    raise RuntimeError(
+                        f"board batch shape={tuple(board.shape)} "
+                        f"!= expected (N, {BOARD_TENSOR_SHAPE})"
+                    )
+            else:
+                state, feats, mask, labels = _load_candidate_batch_file(path)
             if (
                 int(state.shape[1]) != int(state_dim)
                 or int(feats.shape[1]) != int(max_candidates)
@@ -499,8 +559,11 @@ def candidate_batch_dataset(
                 move_feats=feats,
                 soft_temperature_pawns=soft_temperature_pawns,
             )
+            inputs = {"state": state, "move_feats": feats}
+            if include_board:
+                inputs["board"] = board
             yield (
-                {"state": state, "move_feats": feats},
+                inputs,
                 y,
                 weights[offset : offset + rows],
             )
@@ -508,14 +571,20 @@ def candidate_batch_dataset(
         if offset != n:
             raise RuntimeError(f"batch files covered {offset} rows, sample weights have {n}")
 
+    input_signature = {
+        "state": tf.TensorSpec(shape=(None, int(state_dim)), dtype=tf.float32),
+        "move_feats": tf.TensorSpec(
+            shape=(None, int(max_candidates), int(move_feat_dim)),
+            dtype=tf.float32,
+        ),
+    }
+    if include_board:
+        input_signature["board"] = tf.TensorSpec(
+            shape=(None, *BOARD_TENSOR_SHAPE),
+            dtype=tf.float32,
+        )
     signature = (
-        {
-            "state": tf.TensorSpec(shape=(None, int(state_dim)), dtype=tf.float32),
-            "move_feats": tf.TensorSpec(
-                shape=(None, int(max_candidates), int(move_feat_dim)),
-                dtype=tf.float32,
-            ),
-        },
+        input_signature,
         tf.TensorSpec(shape=(None, y_width), dtype=tf.float32),
         tf.TensorSpec(shape=(None,), dtype=tf.float32),
     )
