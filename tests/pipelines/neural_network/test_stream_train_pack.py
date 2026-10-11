@@ -30,6 +30,7 @@ from chess_teacher.pipelines.neural_network.train import (
     numpy_batches_to_tf_dataset,
     scan_candidate_stream,
 )
+from chess_teacher.utils.chess_utils import Color
 
 
 class _Datum:
@@ -318,6 +319,53 @@ def test_generated_batches_match_packed_targets(tmp_path: Path) -> None:
     np.testing.assert_allclose(state, expect_state)
     np.testing.assert_allclose(y, expect_y)
     np.testing.assert_allclose(got_w, weights)
+
+
+def test_hybrid_generated_batches_stream_board_tensors(tmp_path: Path) -> None:
+    tf = pytest.importorskip("tensorflow")
+
+    class _BoardDatum(_WeightedDatum):
+        fen_before = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+        color = Color.WHITE
+
+    datums = [
+        _BoardDatum(
+            ply=4,
+            label=i % _SMALL_MAX,
+            delta_pawns=0.0,
+            evals=[0.0, -0.2, None, None],
+            game_id=str(i),
+        )
+        for i in range(3)
+    ]
+    scan = scan_candidate_stream(
+        datums,  # type: ignore[arg-type]
+        style_disagree_boost=1.0,
+        style_disagree_scale=2.0,
+        batch_dir=str(tmp_path),
+        batch_size=2,
+        include_board=True,
+    )
+    dataset, n_out, bs = candidate_batch_dataset(
+        scan.batch_paths,
+        sample_weight=np.ones(3, dtype=np.float32),
+        batch_size=2,
+        loss_kind="sf_mix",
+        soft_temperature_pawns=DEFAULT_SOFT_TEMPERATURE_PAWNS,
+        state_dim=scan.state_dim,
+        max_candidates=scan.max_candidates,
+        move_feat_dim=scan.move_feat_dim,
+        include_board=True,
+    )
+    assert isinstance(dataset, tf.data.Dataset)
+    assert n_out == 3
+    assert bs == 2
+    batches = list(dataset.as_numpy_iterator())
+    inputs = [batch[0] for batch in batches]
+    assert all(set(batch) == {"board", "state", "move_feats"} for batch in inputs)
+    board = np.concatenate([batch["board"] for batch in inputs], axis=0)
+    assert board.shape == (3, 8, 8, 17)
+    np.testing.assert_array_equal(board[0], board[1])
 
 
 def test_second_epoch_does_not_repack(monkeypatch: pytest.MonkeyPatch) -> None:
