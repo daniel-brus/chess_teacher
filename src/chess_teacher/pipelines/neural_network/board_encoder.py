@@ -143,9 +143,14 @@ class HybridBoardTrainer:
     Used to train production platform and personal models. The flat-state-only
     ``BaselineTrainer`` is deprecated and remains only for offline comparisons
     and legacy artifacts.
+
+    A cold start trains for ``DEFAULT_EPOCHS``. A warm start, where parent
+    weights actually load, trains for ``WARM_START_EPOCHS``. Pass ``epochs``
+    to use that count for either path.
     """
 
     DEFAULT_EPOCHS = BaselineTrainer.DEFAULT_EPOCHS
+    WARM_START_EPOCHS = 10
     DEFAULT_BATCH_SIZE = BaselineTrainer.DEFAULT_BATCH_SIZE
     DEFAULT_HIDDEN = BaselineTrainer.DEFAULT_HIDDEN
     DEFAULT_SCORE_HIDDEN = BaselineTrainer.DEFAULT_SCORE_HIDDEN
@@ -154,7 +159,7 @@ class HybridBoardTrainer:
     def __init__(
         self,
         *,
-        epochs: int = DEFAULT_EPOCHS,
+        epochs: int | None = None,
         batch_size: int = DEFAULT_BATCH_SIZE,
         hidden: int = DEFAULT_HIDDEN,
         score_hidden: int = DEFAULT_SCORE_HIDDEN,
@@ -263,13 +268,31 @@ class HybridBoardTrainer:
         )
         return model
 
+    def resolve_epochs(self, *, cold_start: bool) -> int:
+        """Epochs for this fit. An explicit ``epochs`` value wins either way."""
+        if self.epochs is not None:
+            return self.epochs
+        if cold_start:
+            return self.DEFAULT_EPOCHS
+        return self.WARM_START_EPOCHS
+
+    def describe_epochs(self) -> str:
+        """Log label. The real count is chosen once fit knows if weights loaded."""
+        if self.epochs is not None:
+            return str(self.epochs)
+        return f"{self.WARM_START_EPOCHS} warm-start / {self.DEFAULT_EPOCHS} cold-start"
+
     def load_or_build(
         self,
         *,
         state_dim: int,
         weights_path: Path | None = None,
         require_compatible_parent: bool = False,
-    ) -> Any:
+    ) -> tuple[Any, bool]:
+        """Return ``(model, cold_started)``.
+
+        ``cold_started`` is false only when compatible hybrid weights were loaded.
+        """
         if require_compatible_parent:
             if weights_path is None or not weights_path.is_file():
                 raise FileNotFoundError(
@@ -306,7 +329,7 @@ class HybridBoardTrainer:
                     masked_candidate_top_k(3, self.max_candidates),
                 ],
             )
-            return model
+            return model, False
         if weights_path is not None and weights_path.is_file():
             logger.info("Loading hybrid board weights from %s", weights_path)
             try:
@@ -319,14 +342,14 @@ class HybridBoardTrainer:
                 logger.exception(
                     "Failed to load hybrid weights; cold-starting hybrid board+state model"
                 )
-                return self.build(state_dim)
+                return self.build(state_dim), True
             if not model_is_hybrid_board_compatible(
                 model,
                 max_candidates=self.max_candidates,
                 move_feat_dim=self.move_feat_dim,
             ):
                 logger.warning("Parent weights not hybrid board+state compatible; cold-starting")
-                return self.build(state_dim)
+                return self.build(state_dim), True
             from tensorflow import keras  # type: ignore[import-untyped]
 
             ensure_tensorflow_logging()
@@ -338,7 +361,7 @@ class HybridBoardTrainer:
                     masked_candidate_top_k(3, self.max_candidates),
                 ],
             )
-            return model
+            return model, False
         logger.info(
             "Cold-start hybrid board+state model state_dim=%s conv_filters=%s "
             "max_candidates=%s feat_dim=%s",
@@ -347,7 +370,7 @@ class HybridBoardTrainer:
             self.max_candidates,
             self.move_feat_dim,
         )
-        return self.build(state_dim)
+        return self.build(state_dim), True
 
     def fit(
         self,
@@ -428,9 +451,10 @@ class HybridBoardTrainer:
             )
 
             model = None
+            cold_started = True
             baseline_strength = None
             if use_baseline:
-                baseline_model = self.load_or_build(
+                baseline_model, _baseline_cold = self.load_or_build(
                     state_dim=state_dim,
                     weights_path=baseline_weights_path,
                     require_compatible_parent=True,
@@ -442,6 +466,7 @@ class HybridBoardTrainer:
                 )
                 if weights_path is not None and weights_path == baseline_weights_path:
                     model = baseline_model
+                    cold_started = False
                 gc.collect()
 
             if use_recency and missing:
@@ -464,19 +489,21 @@ class HybridBoardTrainer:
             gc.collect()
 
             if model is None:
-                model = self.load_or_build(
+                model, cold_started = self.load_or_build(
                     state_dim=state_dim,
                     weights_path=weights_path,
                     require_compatible_parent=require_parent_weights,
                 )
+            epochs = self.resolve_epochs(cold_start=cold_started)
             fit_started = snapshot_host_pressure()
             logger.info(
-                "Starting hybrid Keras fit samples=%s epochs=%s batch_size=%s "
+                "Starting hybrid Keras fit samples=%s epochs=%s cold_start=%s batch_size=%s "
                 "conv_filters=%s style_disagree_boost=%s scale_pawns=%s "
                 "forced_scale_pawns=%s disagree_frac=%.3f mean_strength=%.3f "
                 "parent=%s %s",
                 n_kept,
-                self.epochs,
+                epochs,
+                cold_started,
                 min(self.batch_size, n_kept),
                 self.conv_filters,
                 self.style_disagree_boost,
@@ -487,7 +514,7 @@ class HybridBoardTrainer:
                 weights_path,
                 fit_started.format_fields(),
             )
-            total_epochs = self.epochs
+            total_epochs = epochs
             from tensorflow.keras.callbacks import Callback  # type: ignore[import-untyped]
 
             class _EpochInfoCallback(Callback):
@@ -514,7 +541,7 @@ class HybridBoardTrainer:
             del sample_w
             gc.collect()
             n_batches = len(batch_paths)
-            if self.epochs > 1:
+            if epochs > 1:
                 dataset = dataset.repeat()
             dataset = dataset.prefetch(1)
             logger.info(
@@ -522,14 +549,14 @@ class HybridBoardTrainer:
                 "batch_size=%s epochs=%s steps_per_epoch=%s batch_files=%s %s",
                 n_ds,
                 bs_used,
-                self.epochs,
+                epochs,
                 n_batches,
                 n_batches,
                 snapshot_host_pressure().format_fields(),
             )
             history = model.fit(
                 dataset,
-                epochs=self.epochs,
+                epochs=epochs,
                 steps_per_epoch=n_batches,
                 verbose=0,
                 callbacks=[_EpochInfoCallback()],
@@ -559,7 +586,7 @@ class HybridBoardTrainer:
         metrics["baseline_disagree_boost"] = float(self.baseline_disagree_boost)
         metrics["sf_disagree_frac"] = disagree_frac
         metrics["sf_disagree_mean_strength"] = mean_strength
-        metrics["epochs"] = float(self.epochs)
+        metrics["epochs"] = float(epochs)
         metrics["sf_mix_alpha"] = float(self.sf_mix_alpha)
         if self.forced_scale_pawns is not None:
             metrics["forced_scale_pawns"] = float(self.forced_scale_pawns)
