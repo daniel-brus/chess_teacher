@@ -47,9 +47,11 @@ def eval_metrics_are_hybrid_board(eval_metrics: str | None) -> bool:
     if not isinstance(blob, dict):
         return False
     flag = blob.get(_HYBRID_METRIC)
+    if not isinstance(flag, (int, float, str)):
+        return False
     try:
         return float(flag) == 1.0
-    except (TypeError, ValueError):
+    except ValueError:
         return False
 
 
@@ -120,19 +122,19 @@ def start_new_model_tree(
     """
     changes: list[ModelTreeRowChange] = []
 
-    for row in BaselineModel.fetch_all_ordered(db_client):
-        if eval_metrics_are_hybrid_board(row.eval_metrics):
+    for baseline in BaselineModel.fetch_all_ordered(db_client):
+        if eval_metrics_are_hybrid_board(baseline.eval_metrics):
             continue
-        needs_archive = row.status != BaselineModelStatus.ARCHIVED
-        needs_clear = row.is_parent_baseline
+        needs_archive = baseline.status != BaselineModelStatus.ARCHIVED
+        needs_clear = baseline.is_parent_baseline
         if not needs_archive and not needs_clear:
             continue
         changes.append(
             ModelTreeRowChange(
                 kind="baseline",
-                version=row.version,
+                version=baseline.version,
                 user_id=None,
-                previous_status=row.status.value,
+                previous_status=baseline.status.value,
                 archived=needs_archive,
                 cleared_parent_baseline=needs_clear,
             )
@@ -140,40 +142,40 @@ def start_new_model_tree(
         if dry_run:
             continue
         replace(
-            row,
+            baseline,
             status=BaselineModelStatus.ARCHIVED,
             is_parent_baseline=False,
         ).save_to_db(db_client)
         logger.info(
             "Model tree archived baseline version=%s previous_status=%s cleared_parent=%s",
-            row.version,
-            row.status.value,
+            baseline.version,
+            baseline.status.value,
             needs_clear,
         )
 
-    for row in PersonalModel.fetch_all_from_db(db_client, order_by='"trained_at" DESC'):
-        if eval_metrics_are_hybrid_board(row.eval_metrics):
+    for personal in PersonalModel.fetch_all_from_db(db_client, order_by='"trained_at" DESC'):
+        if eval_metrics_are_hybrid_board(personal.eval_metrics):
             continue
-        if row.status == BaselineModelStatus.ARCHIVED:
+        if personal.status == BaselineModelStatus.ARCHIVED:
             continue
         changes.append(
             ModelTreeRowChange(
                 kind="personal",
-                version=row.version,
-                user_id=row.user_id,
-                previous_status=row.status.value,
+                version=personal.version,
+                user_id=personal.user_id,
+                previous_status=personal.status.value,
                 archived=True,
                 cleared_parent_baseline=False,
             )
         )
         if dry_run:
             continue
-        replace(row, status=BaselineModelStatus.ARCHIVED).save_to_db(db_client)
+        replace(personal, status=BaselineModelStatus.ARCHIVED).save_to_db(db_client)
         logger.info(
             "Model tree archived personal user=%s version=%s previous_status=%s",
-            row.user_id,
-            row.version,
-            row.status.value,
+            personal.user_id,
+            personal.version,
+            personal.status.value,
         )
 
     queue_rows = reset_training_queues(db_client, dry_run=dry_run)
