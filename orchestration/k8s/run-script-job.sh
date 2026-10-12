@@ -28,6 +28,7 @@ ALLOWED_SCRIPTS=(
   ops/backfill_training_scores.py
   ops/baseline_train_until_caught_up.py
   ops/mlflow_db_upgrade.py
+  ops/start_model_tree.py
   ops/training_queue_reset.py
 )
 

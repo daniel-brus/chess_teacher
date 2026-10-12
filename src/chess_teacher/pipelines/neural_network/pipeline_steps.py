@@ -180,7 +180,7 @@ class TrainIncrementalStep(PipelineStep):
             "Preparing candidate-style tensors + training (n_datums=%s, epochs=%s) — "
             "on-the-fly move features can take a while…",
             len(datums),
-            self._trainer.epochs,
+            self._trainer.describe_epochs(),
         )
         model, metrics = self._trainer.fit(datums, weights_path=weights_path)
         out_path = Path(tempfile.mkdtemp(prefix="baseline_model_")) / "model.keras"

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from unittest.mock import MagicMock
+
 import numpy as np
 
 from chess_teacher.pipelines.neural_network.board_encoder import (
@@ -14,6 +16,7 @@ from chess_teacher.pipelines.neural_network.board_tensor import (
 )
 from chess_teacher.pipelines.neural_network.candidate_eval import MAX_CANDIDATES, MOVE_FEAT_DIM
 from chess_teacher.pipelines.neural_network.tf_runtime import ensure_tensorflow_logging
+from chess_teacher.pipelines.neural_network.train import CandidateStreamScan
 from chess_teacher.utils.chess_utils import Color
 
 
@@ -85,4 +88,95 @@ def test_hybrid_fit_streams_spilled_board_batches() -> None:
 
     model, metrics = trainer.fit([_Datum(), _Datum(), _Datum()])  # type: ignore[arg-type]
     assert metrics["n_samples"] == 3.0
+    assert metrics["epochs"] == 1.0
     assert model.input_shape[0][1:] == BOARD_TENSOR_SHAPE
+
+
+def test_default_epochs_are_20_cold_and_10_warm() -> None:
+    trainer = HybridBoardTrainer()
+    assert trainer.epochs is None
+    assert trainer.resolve_epochs(cold_start=True) == 20
+    assert trainer.resolve_epochs(cold_start=False) == 10
+    assert trainer.describe_epochs() == "10 warm-start / 20 cold-start"
+
+    explicit = HybridBoardTrainer(epochs=7)
+    assert explicit.resolve_epochs(cold_start=True) == 7
+    assert explicit.resolve_epochs(cold_start=False) == 7
+    assert explicit.describe_epochs() == "7"
+
+
+def test_fit_uses_warm_start_epochs_when_parent_weights_load(monkeypatch) -> None:
+    trainer = HybridBoardTrainer(style_disagree_boost=1.0, batch_size=2)
+    model = MagicMock()
+    model.fit.return_value = MagicMock(history={"loss": [0.2]})
+    dataset = MagicMock()
+    dataset.repeat.return_value = dataset
+    dataset.prefetch.return_value = dataset
+    scan = CandidateStreamScan(
+        datums=[object(), object()],  # type: ignore[list-item]
+        raw_weights=np.ones((2,), dtype=np.float64),
+        end_times=[None, None],
+        n_input=2,
+        n_dropped=0,
+        n_missing_end=0,
+        disagree_frac=0.0,
+        mean_strength=0.0,
+        state_dim=4,
+        max_candidates=trainer.max_candidates,
+        move_feat_dim=trainer.move_feat_dim,
+        batch_paths=["batch-0.npz"],
+    )
+
+    monkeypatch.setattr(
+        "chess_teacher.pipelines.neural_network.board_encoder.scan_candidate_stream",
+        lambda *args, **kwargs: scan,
+    )
+    monkeypatch.setattr(
+        "chess_teacher.pipelines.neural_network.board_encoder.candidate_batch_dataset",
+        lambda *args, **kwargs: (dataset, 2, 2),
+    )
+    monkeypatch.setattr(trainer, "load_or_build", lambda **kwargs: (model, False))
+
+    _fitted, metrics = trainer.fit([object(), object()])  # type: ignore[list-item]
+
+    assert metrics["epochs"] == 10.0
+    assert model.fit.call_args.kwargs["epochs"] == 10
+    dataset.repeat.assert_called_once()
+
+
+def test_fit_keeps_20_epochs_on_cold_start(monkeypatch) -> None:
+    trainer = HybridBoardTrainer(style_disagree_boost=1.0, batch_size=2)
+    model = MagicMock()
+    model.fit.return_value = MagicMock(history={"loss": [0.2]})
+    dataset = MagicMock()
+    dataset.repeat.return_value = dataset
+    dataset.prefetch.return_value = dataset
+    scan = CandidateStreamScan(
+        datums=[object()],  # type: ignore[list-item]
+        raw_weights=np.ones((1,), dtype=np.float64),
+        end_times=[None],
+        n_input=1,
+        n_dropped=0,
+        n_missing_end=0,
+        disagree_frac=0.0,
+        mean_strength=0.0,
+        state_dim=4,
+        max_candidates=trainer.max_candidates,
+        move_feat_dim=trainer.move_feat_dim,
+        batch_paths=["batch-0.npz"],
+    )
+
+    monkeypatch.setattr(
+        "chess_teacher.pipelines.neural_network.board_encoder.scan_candidate_stream",
+        lambda *args, **kwargs: scan,
+    )
+    monkeypatch.setattr(
+        "chess_teacher.pipelines.neural_network.board_encoder.candidate_batch_dataset",
+        lambda *args, **kwargs: (dataset, 1, 1),
+    )
+    monkeypatch.setattr(trainer, "load_or_build", lambda **kwargs: (model, True))
+
+    _fitted, metrics = trainer.fit([object()])  # type: ignore[list-item]
+
+    assert metrics["epochs"] == 20.0
+    assert model.fit.call_args.kwargs["epochs"] == 20
