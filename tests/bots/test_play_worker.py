@@ -8,7 +8,7 @@ import chess
 import pytest
 
 from chess_teacher.bots.move_analysis import empty_bot_move_analysis
-from chess_teacher.bots.play_worker import PlayWorker, _arm_parent_death
+from chess_teacher.bots.play_worker import PlayWorker, _watch_parent_process
 
 
 class _FakeNeural:
@@ -59,45 +59,38 @@ def test_choose_move_before_load_raises() -> None:
         worker.choose_move(board=chess.Board())
 
 
-def _install_prctl(monkeypatch: pytest.MonkeyPatch, prctl) -> None:
-    monkeypatch.setattr(
-        "chess_teacher.bots.play_worker.ctypes.CDLL",
-        lambda *_args, **_kwargs: type("_Lib", (), {"prctl": staticmethod(prctl)})(),
-    )
-
-
-def test_parent_death_uses_sigkill_and_pid_1_stays_alive(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls: list[tuple[int, int]] = []
+def test_parent_watch_stays_alive_when_pid_1_is_the_parent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     killed: list[int] = []
+    sleeps = {"n": 0}
 
-    def prctl(option: int, sig: int) -> int:
-        calls.append((option, sig))
-        return 0
+    def sleep(_seconds: float) -> None:
+        sleeps["n"] += 1
+        if sleeps["n"] >= 2:
+            raise StopIteration
 
     monkeypatch.setattr("chess_teacher.bots.play_worker.os.getppid", lambda: 1)
     monkeypatch.setattr(
         "chess_teacher.bots.play_worker.os.kill",
         lambda _pid, sig: killed.append(sig),
     )
-    _install_prctl(monkeypatch, prctl)
-    _arm_parent_death()
-    assert calls == [(1, int(signal.SIGKILL))]
+    with pytest.raises(StopIteration):
+        _watch_parent_process(1, sleep=sleep)
     assert killed == []
 
 
-def test_parent_death_kills_if_reparented_during_prctl(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_parent_watch_sigkills_when_reparented(monkeypatch: pytest.MonkeyPatch) -> None:
     ppid = {"value": 40}
     killed: list[int] = []
 
-    def prctl(_option: int, _sig: int) -> int:
+    def sleep(_seconds: float) -> None:
         ppid["value"] = 1
-        return 0
 
     monkeypatch.setattr("chess_teacher.bots.play_worker.os.getppid", lambda: ppid["value"])
     monkeypatch.setattr(
         "chess_teacher.bots.play_worker.os.kill",
         lambda _pid, sig: killed.append(sig),
     )
-    _install_prctl(monkeypatch, prctl)
-    _arm_parent_death()
+    _watch_parent_process(40, sleep=sleep)
     assert killed == [int(signal.SIGKILL)]
