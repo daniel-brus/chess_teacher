@@ -3,13 +3,17 @@ import streamlit as st
 from chess_teacher.platform.user import User
 from chess_teacher.utils.exception_utils import AuthError
 from chess_teacher.utils.logging import get_logger
+from streamlit_utils.play_game import close_stored_play_bot
 
 logger = get_logger()
 
 
 def force_logout() -> None:
-    st.session_state.clear()
-    st.logout()
+    try:
+        close_stored_play_bot(st.session_state)
+    finally:
+        st.session_state.clear()
+        st.logout()
 
 
 def st_user_is_logged_in() -> bool:
