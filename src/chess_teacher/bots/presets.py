@@ -111,14 +111,16 @@ def _neural_factory(
         temperature: float = 0.0,
         on_progress: Callable[[str], None] | None = None,
     ) -> ChessBot:
-        from chess_teacher.bots.neural_baseline_bot import NeuralBaselineBot
+        # The callback is for the in-process bot. It is not pickleable, and the
+        # child loads the model itself. The Play page waits on this call.
+        del on_progress
+        from chess_teacher.bots.process_bot import ProcessNeuralBot
 
-        return NeuralBaselineBot(
+        return ProcessNeuralBot(
             model_uri=model_uri,
             version=version,
             display_name=display_name,
             temperature=temperature,
-            on_progress=on_progress,
         )
 
     return factory

@@ -1,6 +1,6 @@
 # Play model in a child process
 
-**Status:** plan. Do not implement until this is accepted.
+**Status:** implementing. Review changed three rules: send the real board, use SIGKILL for parent death, and do not spawn a child to draw a finished game.
 
 **Last updated:** 2026-10-17
 
@@ -34,7 +34,7 @@ An always-on inference server is the usual split at a bigger size. On this one 4
 
 The parent already resolves `model_uri` from Postgres before it builds a bot. It passes that string, plus version, display name, and temperature, into `load`. It does not import `neural_baseline_bot` or TensorFlow.
 
-`choose_move` returns the UCI and the existing `BotMoveAnalysis` dataclass. That dataclass is strings and floats. The parent sets `last_move_analysis` from the reply, which is what the candidates panel reads today.
+`choose_move` receives the parent `chess.Board`, not a FEN. `NeuralBaselineBot` reads `board.move_stack` for capture and recapture flags. A board built from a FEN has an empty stack, so the child would play a different move. The reply is the UCI plus that bot’s `last_move_analysis`. The parent stores the dataclass and returns `chess.Move.from_uci`.
 
 Progress lines from inside the child ("Starting Stockfish…", "Loading weights…") stay in the child log. The Play page already shows one status until `create_bot` returns, then "Opponent ready". No second channel.
 
@@ -42,11 +42,11 @@ Progress lines from inside the child ("Starting Stockfish…", "Loading weights�
 
 The Play page already calls `close_bot` when the opponent changes and when the user resets. `close` on the handle kills the child.
 
-Add one call the page does not make today: close the child when the game is over (checkmate, resign, or draw). The next game starts a new child from `_ensure_bot`. Leaving the child up after the last move is how the memory stays gone from the host.
+`_render_active_game` calls `_ensure_bot` on every run, including a finished game. Close and drop the handle when `game_needs_live_bot` is false, and do not start another child to draw that board. Analysis is already copied into session state before the rerun. A dead child during a live game does not match `_bot_matches_state`, so the next run starts a new one.
 
-Logout goes through `force_logout`, which clears session state and does not call `close`. Close the bot before that clear.
+Logout goes through `force_logout`, which clears session state and does not call `close`. `close_stored_play_bot` runs first, in a `finally`, so a close error still logs the user out. That helper does not import the Play page.
 
-The child sets parent-death signal `SIGTERM` at start (`prctl` `PR_SET_PDEATHSIG`). A dead Streamlit process must not leave Keras running. `StepProcess` does not do this; play adds it because the parent is a long-lived pod, not a Job that exits with the child.
+The child calls `prctl(PR_SET_PDEATHSIG, SIGKILL)` at the start of `main`, before it imports `NeuralBaselineBot`. SIGTERM is the wrong signal: importing the package installs a handler that only flushes logs. SIGKILL cannot be caught. Do not use `Popen` `preexec_fn`. Streamlit is PID 1 in the pod, so a parent pid of 1 is still alive. Kill only when that pid changes across `prctl` (the parent died and the child was reparented before the signal was armed). A crash can leave the Stockfish grandchild; the normal `finally: bot.close()` path is what quits Stockfish.
 
 An in-progress game whose child is gone (server restart, crashed worker) is the same as a missing bot today: `_ensure_bot` starts one. Model load is paid once per game per server process.
 
