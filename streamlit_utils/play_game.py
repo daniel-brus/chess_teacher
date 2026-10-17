@@ -100,9 +100,24 @@ def create_bot(
     return preset.factory()
 
 
+PLAY_BOT_SESSION_KEY = "play_game_bot"
+
+
 def close_bot(bot: ChessBot | None) -> None:
     if bot is not None:
         bot.close()
+
+
+def close_stored_play_bot(store: Any) -> None:
+    """Close the play bot stored on a Streamlit session, if there is one."""
+    bot = store.get(PLAY_BOT_SESSION_KEY)
+    if isinstance(bot, ChessBot):
+        close_bot(bot)
+
+
+def game_needs_live_bot(state: PlayGameState) -> bool:
+    """A finished game must not start a child just to draw the board."""
+    return not is_game_finished(state)
 
 
 def start_new_game(

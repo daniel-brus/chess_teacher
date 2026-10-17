@@ -28,10 +28,12 @@ from streamlit_utils.page_config import configure_page
 from streamlit_utils.page_logging import log_page_view, log_user_action
 from streamlit_utils.play_candidates import render_bot_candidates_panel
 from streamlit_utils.play_game import (
+    PLAY_BOT_SESSION_KEY,
     PlayGameState,
     apply_bot_move,
     apply_user_board_event,
     close_bot,
+    game_needs_live_bot,
     game_status_message,
     is_bot_thinking,
     is_game_finished,
@@ -60,7 +62,7 @@ db_client = get_db_client()
 st.title("Play a game of chess")
 
 _PLAY_STATE_KEY = "play_game_state"
-_PLAY_BOT_KEY = "play_game_bot"
+_PLAY_BOT_KEY = PLAY_BOT_SESSION_KEY
 _PLAY_WIN_CELEBRATED_KEY = "play_win_celebrated_instance"
 _PLAY_SETUP_COLOR_KEY = "play_setup_color"
 _PLAY_SETUP_CATEGORY_KEY = "play_setup_category"
@@ -212,6 +214,8 @@ def _maybe_celebrate_win(state: PlayGameState) -> None:
 
 
 def _bot_matches_state(bot: ChessBot, state: PlayGameState) -> bool:
+    if getattr(bot, "running", True) is False:
+        return False
     if st.session_state.get("play_game_bot_preset") != state.preset_key:
         return False
     if category_for_preset_key(state.preset_key) in {
@@ -551,7 +555,12 @@ def _render_active_game(state: PlayGameState) -> None:
     label = preset.label if preset else state.preset_key
     description = preset.description if preset else ""
 
-    bot = _ensure_bot(state)
+    if game_needs_live_bot(state):
+        bot: ChessBot | None = _ensure_bot(state)
+    else:
+        close_bot(_get_bot())
+        _set_bot(None)
+        bot = None
 
     thinking = is_bot_thinking(state)
     if thinking:
@@ -597,6 +606,8 @@ def _render_active_game(state: PlayGameState) -> None:
     )
 
     if thinking:
+        if bot is None:
+            raise RuntimeError("Bot move requested without a live opponent")
         state = _run_bot_turn(state, bot)
         _set_state(state)
         st.rerun()
