@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
+from pathlib import Path
 
 import chess
 import pytest
@@ -101,5 +103,19 @@ def test_process_bot_and_presets_do_not_import_tensorflow() -> None:
         "import chess_teacher.bots.play_worker\n"
         "raise SystemExit(1 if 'tensorflow' in sys.modules else 0)\n"
     )
-    completed = subprocess.run([sys.executable, "-c", code], check=False)
-    assert completed.returncode == 0, completed.stderr
+    # CI does not install the package. Pytest adds src/ for the test process only,
+    # so the child needs the same path or the import fails before it can check TensorFlow.
+    repo_root = Path(__file__).resolve().parents[2]
+    env = os.environ.copy()
+    existing = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = os.pathsep.join(p for p in (str(repo_root / "src"), existing) if p)
+    completed = subprocess.run(
+        [sys.executable, "-c", code],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert completed.returncode == 0, (
+        f"rc={completed.returncode}\nstdout={completed.stdout}\nstderr={completed.stderr}"
+    )
