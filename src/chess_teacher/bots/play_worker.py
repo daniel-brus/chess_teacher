@@ -6,36 +6,55 @@ is what returns the Keras allocation to the host.
 
 from __future__ import annotations
 
-import ctypes
 import os
 import signal
 import sys
+import threading
+import time
+from collections.abc import Callable
 from typing import Any
 
 import chess
 
-# Linux prctl operation. Set in this process, not via Popen preexec_fn:
-# Streamlit is multithreaded and preexec_fn can deadlock.
-_PR_SET_PDEATHSIG = 1
+_PARENT_POLL_SEC = 1.0
 
 
-def _arm_parent_death() -> None:
-    """SIGKILL this process if its parent dies after the signal is armed.
+def _parent_process_gone(parent_pid: int) -> bool:
+    """True when this process has been reparented.
 
-    Streamlit is PID 1 in the pod, so a parent pid of 1 is a live parent.
-    Kill only when the pid changes across ``prctl`` (the parent died and this
-    process was reparented before the signal was armed).
+    A parent pid of 1 is a live parent when Streamlit is PID 1 in the pod.
+    """
+    return os.getppid() != parent_pid
+
+
+def _watch_parent_process(
+    parent_pid: int,
+    *,
+    sleep: Callable[[float], None] = time.sleep,
+) -> None:
+    """SIGKILL this process after the parent process exits.
+
+    ``prctl(PR_SET_PDEATHSIG)`` fires when the creating thread exits, not when
+    the parent process exits. Streamlit runs the script on a thread that ends
+    after each rerun, so that signal killed the worker between moves.
 
     SIGTERM is not enough. Importing the package installs a SIGTERM handler
     that only flushes logs. SIGKILL cannot be caught.
     """
+    while not _parent_process_gone(parent_pid):
+        sleep(_PARENT_POLL_SEC)
+    os.kill(os.getpid(), signal.SIGKILL)
+
+
+def _arm_parent_death() -> None:
+    """Start the parent-process watch from this process."""
     parent = os.getppid()
-    libc = ctypes.CDLL(None, use_errno=True)
-    if libc.prctl(_PR_SET_PDEATHSIG, int(signal.SIGKILL)) != 0:
-        error = ctypes.get_errno()
-        raise OSError(error, "prctl PR_SET_PDEATHSIG failed")
-    if os.getppid() != parent:
-        os.kill(os.getpid(), signal.SIGKILL)
+    threading.Thread(
+        target=_watch_parent_process,
+        args=(parent,),
+        name="play-worker-parent",
+        daemon=True,
+    ).start()
 
 
 class PlayWorker:

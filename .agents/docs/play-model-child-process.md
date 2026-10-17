@@ -46,7 +46,7 @@ The Play page already calls `close_bot` when the opponent changes and when the u
 
 Logout goes through `force_logout`, which clears session state and does not call `close`. `close_stored_play_bot` runs first, in a `finally`, so a close error still logs the user out. That helper does not import the Play page.
 
-The child calls `prctl(PR_SET_PDEATHSIG, SIGKILL)` at the start of `main`, before it imports `NeuralBaselineBot`. SIGTERM is the wrong signal: importing the package installs a handler that only flushes logs. SIGKILL cannot be caught. Do not use `Popen` `preexec_fn`. Streamlit is PID 1 in the pod, so a parent pid of 1 is still alive. Kill only when that pid changes across `prctl` (the parent died and the child was reparented before the signal was armed). A crash can leave the Stockfish grandchild; the normal `finally: bot.close()` path is what quits Stockfish.
+The child watches its parent process pid and SIGKILLs itself if that pid changes. `prctl(PR_SET_PDEATHSIG)` is the wrong tool here: Linux delivers it when the creating thread exits, and Streamlit's script thread exits after every rerun, so the worker was killed between moves. SIGTERM is also wrong: importing the package installs a handler that only flushes logs. Do not use `Popen` `preexec_fn`. Streamlit is PID 1 in the pod, so a parent pid of 1 is still alive. A crash can leave the Stockfish grandchild; the normal `finally: bot.close()` path is what quits Stockfish.
 
 An in-progress game whose child is gone (server restart, crashed worker) is the same as a missing bot today: `_ensure_bot` starts one. Model load is paid once per game per server process.
 
