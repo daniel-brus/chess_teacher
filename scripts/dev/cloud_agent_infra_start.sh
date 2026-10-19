@@ -83,3 +83,11 @@ except ClientError as exc:
 PY
 
 echo "postgres redis minio ready"
+
+# Play needs a candidate-style file. Production weights are not in this environment.
+sudo install -d -o ubuntu -g ubuntu /var/lib/chess-teacher /var/lib/chess-teacher/log-buffer
+if [[ -f /etc/profile.d/chess-teacher-infra.sh ]]; then
+  # shellcheck disable=SC1091
+  source /etc/profile.d/chess-teacher-infra.sh
+fi
+/workspace/.venv/bin/python /workspace/scripts/dev/seed_mock_baseline.py
