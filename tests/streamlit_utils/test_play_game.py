@@ -7,9 +7,12 @@ from chess_teacher.bots import RandomBot
 from chess_teacher.bots.base import ChessBot
 from chess_teacher.bots.presets import BotPreset
 from streamlit_utils.play_game import (
+    PLAY_BOT_SESSION_KEY,
     apply_bot_move,
     apply_uci_move,
+    close_stored_play_bot,
     create_bot,
+    game_needs_live_bot,
     resign_game,
     start_new_game,
 )
@@ -97,3 +100,28 @@ def test_create_bot_passes_temperature_and_progress_to_baseline_factory(
         assert progress[0] == "Loading opponent settings…"
     finally:
         bot.close()
+
+
+def test_finished_game_does_not_need_a_live_bot() -> None:
+    state = start_new_game("White", "baseline:v1")
+    assert game_needs_live_bot(state) is True
+    assert game_needs_live_bot(resign_game(state)) is False
+
+
+def test_close_stored_play_bot_closes_only_a_chess_bot() -> None:
+    closed = {"value": False}
+
+    class _Closer(ChessBot):
+        name = "Closer"
+
+        def choose_move(self, board: chess.Board) -> chess.Move:
+            return next(iter(board.legal_moves))
+
+        def close(self) -> None:
+            closed["value"] = True
+
+    bot = _Closer()
+    close_stored_play_bot({PLAY_BOT_SESSION_KEY: bot})
+    assert closed["value"] is True
+    close_stored_play_bot({PLAY_BOT_SESSION_KEY: object()})
+    close_stored_play_bot({})

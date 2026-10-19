@@ -139,7 +139,7 @@ def test_personal_factory_names_the_bot(monkeypatch: pytest.MonkeyPatch) -> None
             captured.update(kwargs)
 
     monkeypatch.setattr(
-        "chess_teacher.bots.neural_baseline_bot.NeuralBaselineBot",
+        "chess_teacher.bots.process_bot.ProcessNeuralBot",
         _FakeBot,
     )
     row = _personal(version="v3", status=BaselineModelStatus.PRODUCTION)
