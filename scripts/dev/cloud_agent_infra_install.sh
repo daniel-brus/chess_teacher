@@ -106,3 +106,7 @@ if [[ -f "$pg_hba" ]] && ! sudo grep -q "chess-teacher-local" "$pg_hba"; then
 fi
 
 echo "chess-teacher infra packages ready"
+
+# Bake the Play stand-in into the snapshot. Start only has to insert the DB row.
+sudo install -d -o ubuntu -g ubuntu /var/lib/chess-teacher
+/workspace/.venv/bin/python /workspace/scripts/dev/seed_mock_baseline.py --weights-only
