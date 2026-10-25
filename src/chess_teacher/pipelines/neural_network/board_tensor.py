@@ -51,6 +51,11 @@ def _square_to_rc(square: int, *, flip: bool) -> tuple[int, int]:
     return rank, file
 
 
+def oriented_rc(square: int, *, flip: bool) -> tuple[int, int]:
+    """Public ``(row, col)`` in the same frame as ``fen_to_board_tensor``."""
+    return _square_to_rc(square, flip=flip)
+
+
 def fen_to_board_tensor(
     fen: str,
     *,
