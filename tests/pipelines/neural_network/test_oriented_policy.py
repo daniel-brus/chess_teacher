@@ -129,7 +129,7 @@ def test_spatial_fit_one_step_on_stub_datums() -> None:
             )
 
     trainer = SpatialPolicyTrainer(
-        epochs=1,
+        epochs=2,
         batch_size=2,
         filters=4,
         blocks=1,
@@ -137,7 +137,8 @@ def test_spatial_fit_one_step_on_stub_datums() -> None:
     )
     model, metrics = trainer.fit([_Datum(), _Datum(), _Datum()])  # type: ignore[list-item]
     assert metrics["n_samples"] == 3.0
-    assert metrics["epochs"] == 1.0
+    assert metrics["epochs"] == 2.0
     assert metrics["param_count"] > 0
-    assert len(metrics["epoch_losses"]) == 1
+    assert len(metrics["epoch_losses"]) == 2
+    assert all(loss == loss for loss in metrics["epoch_losses"])
     assert model.output_shape[-1] == MoveEncoder.vocab_size

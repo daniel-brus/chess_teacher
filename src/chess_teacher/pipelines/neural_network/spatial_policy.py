@@ -8,6 +8,7 @@ slots the hybrid scorer uses, so top-1, agree, disagree, and pawn gap match.
 
 from __future__ import annotations
 
+import math
 import time
 from collections.abc import Iterator
 from typing import Any
@@ -249,20 +250,29 @@ class SpatialPolicyTrainer:
         sample_w = global_sample_weights(scan.raw_weights, finetune=False).astype(np.float32)
         model = self.build()
         batch_size = max(1, min(self.batch_size, len(kept)))
-        dataset = self._dataset(kept, sample_w, batch_size=batch_size)
+        steps_per_epoch = math.ceil(len(kept) / batch_size)
+        # Keras does not restart a finite generator for epoch 2 unless it is repeated
+        # and steps_per_epoch is set. One pass would end the fit early.
+        dataset = self._dataset(kept, sample_w, batch_size=batch_size).repeat().prefetch(1)
         logger.info(
             "Starting spatial policy fit samples=%s epochs=%s filters=%s blocks=%s "
-            "batch_size=%s lr=%s style_disagree_boost=%s",
+            "batch_size=%s steps_per_epoch=%s lr=%s style_disagree_boost=%s",
             len(kept),
             self.epochs,
             self.filters,
             self.blocks,
             batch_size,
+            steps_per_epoch,
             self.learning_rate,
             self.style_disagree_boost,
         )
         started = time.monotonic()
-        history = model.fit(dataset, epochs=self.epochs, verbose=0)
+        history = model.fit(
+            dataset,
+            epochs=self.epochs,
+            steps_per_epoch=steps_per_epoch,
+            verbose=0,
+        )
         elapsed = time.monotonic() - started
         epoch_losses = [float(v) for v in history.history.get("loss", [])]
         metrics: dict[str, Any] = {
