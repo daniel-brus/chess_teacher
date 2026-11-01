@@ -15,6 +15,8 @@ from chess_teacher.pipelines.neural_network.scheme_steps import (
 from chess_teacher.pipelines.neural_network.training_slot import (
     DbTrainingSlot,
     TrainingSlotRecord,
+    fit_host_has_memory,
+    min_fit_mem_available_mb,
     min_pipeline_mem_available_mb,
     pipeline_host_has_memory,
 )
@@ -204,7 +206,7 @@ def test_min_memory_falls_back_when_the_env_value_is_invalid(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("PIPELINE_MIN_MEM_AVAILABLE_MB", "lots")
-    assert min_pipeline_mem_available_mb() == 1000.0
+    assert min_pipeline_mem_available_mb() == 1400.0
 
 
 def test_memory_check_uses_mem_available(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -225,5 +227,16 @@ def test_memory_check_uses_mem_available(monkeypatch: pytest.MonkeyPatch) -> Non
         _pressure,
     )
     assert pipeline_host_has_memory() is False
-    available["mb"] = 1100.0
+    available["mb"] = 1400.0
     assert pipeline_host_has_memory() is True
+    available["mb"] = 999.0
+    assert fit_host_has_memory() is False
+    available["mb"] = 1000.0
+    assert fit_host_has_memory() is True
+
+
+def test_fit_memory_floor_reads_its_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PIPELINE_MIN_FIT_MEM_AVAILABLE_MB", "800")
+    assert min_fit_mem_available_mb() == 800.0
+    monkeypatch.setenv("PIPELINE_MIN_FIT_MEM_AVAILABLE_MB", "nope")
+    assert min_fit_mem_available_mb() == 1000.0

@@ -51,12 +51,22 @@ class StepProcess:
 
     def call(self, op: str, **payload: Any) -> Any:
         """Run ``op`` in the child. The child must already be running."""
-        proc = self._proc
-        if proc is None or proc.poll() is not None or proc.stdin is None or proc.stdout is None:
-            raise StepProcessError(f"step process is not running for {op}")
+        self.submit(op, **payload)
+        return self.receive(op)
+
+    def submit(self, op: str, **payload: Any) -> None:
+        """Send ``op`` and drop ``payload`` so the caller can free it while the child runs."""
+        proc = self._require_pipes(op)
         try:
             pickle.dump({"op": op, "payload": payload}, proc.stdin, protocol=4)
             proc.stdin.flush()
+        except OSError as exc:
+            raise StepProcessError(f"step process exited during {op}: {exc}") from exc
+
+    def receive(self, op: str) -> Any:
+        """Read the reply for a ``submit`` that already flushed."""
+        proc = self._require_pipes(op)
+        try:
             # The child is one we spawned. Its stdout is not an untrusted stream.
             response = pickle.load(proc.stdout)  # nosec B301
         except (EOFError, pickle.UnpicklingError, OSError) as exc:
@@ -67,6 +77,12 @@ class StepProcess:
             detail = str(response.get("traceback") or response.get("error") or op)
             raise StepProcessError(detail)
         return response.get("result")
+
+    def _require_pipes(self, op: str) -> subprocess.Popen[bytes]:
+        proc = self._proc
+        if proc is None or proc.poll() is not None or proc.stdin is None or proc.stdout is None:
+            raise StepProcessError(f"step process is not running for {op}")
+        return proc
 
     def close(self) -> None:
         """Ask the child to exit. Kill it only if it ignores that request."""
