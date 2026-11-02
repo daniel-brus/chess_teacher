@@ -7,6 +7,7 @@ reused for the candidate and the served model.
 
 from __future__ import annotations
 
+import gc
 import json
 import time
 from collections.abc import Callable
@@ -205,7 +206,10 @@ class TrainModelStep(PipelineStep):
     """Download parent weights if needed, then fit inside this step's child process."""
 
     def __init__(self, *, process: StepProcess | None = None) -> None:
-        super().__init__(name="TrainModel", process=process)
+        # A fit that fails for memory is not retried in this process: the datums
+        # are released while the child runs, and a second attempt would reload
+        # TensorFlow into the same tight host. The next cron loads them again.
+        super().__init__(name="TrainModel", process=process, max_retries=0)
 
     def run(self, db_client: DatabaseClient, context: PipelineContext) -> None:
         del db_client
@@ -216,7 +220,8 @@ class TrainModelStep(PipelineStep):
         if not datums:
             context.extras[SKIP_KEY] = True
             return
-        if self.process is None:
+        process = self.process
+        if process is None:
             raise ValueError("TrainModel requires a step process")
 
         parent: ModelHandle | None = context.extras.get("parent")
@@ -227,13 +232,15 @@ class TrainModelStep(PipelineStep):
             logger.info("Downloading parent weights uri=%s", parent.weights_uri)
             weights_path = MLflowTracker().download_keras_weights(parent.weights_uri)
 
-        fitted = self.process.call("fit", datums=datums, weights_path=weights_path)
+        # The child unpickles its own copy. Drop the parent's datums before
+        # blocking on the fit so that RSS is free for the Keras step.
+        process.submit("fit", datums=datums, weights_path=weights_path)
+        context.extras.pop("train_datums", None)
+        del datums
+        gc.collect()
+        fitted = process.receive("fit")
         context.extras["trained_model_path"] = Path(fitted["model_path"])
         context.extras["train_metrics"] = fitted["metrics"]
-        # The child keeps the batch until it finishes the fit. Drop the parent's copy
-        # before the eval load. A retry of this step already finished only after this
-        # assignment, so a later score retry still has the file.
-        context.extras.pop("train_datums", None)
         logger.info(
             "TrainModel saved path=%s n_samples=%s",
             context.extras["trained_model_path"],

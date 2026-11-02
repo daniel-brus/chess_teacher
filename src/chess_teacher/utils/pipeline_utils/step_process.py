@@ -11,7 +11,7 @@ import subprocess
 import sys
 import traceback
 from collections.abc import Callable, Mapping
-from typing import Any, BinaryIO
+from typing import IO, Any, BinaryIO
 
 from chess_teacher.utils.logging import get_logger
 from chess_teacher.utils.process_utils import snapshot_host_pressure
@@ -51,14 +51,24 @@ class StepProcess:
 
     def call(self, op: str, **payload: Any) -> Any:
         """Run ``op`` in the child. The child must already be running."""
-        proc = self._proc
-        if proc is None or proc.poll() is not None or proc.stdin is None or proc.stdout is None:
-            raise StepProcessError(f"step process is not running for {op}")
+        self.submit(op, **payload)
+        return self.receive(op)
+
+    def submit(self, op: str, **payload: Any) -> None:
+        """Send ``op`` and drop ``payload`` so the caller can free it while the child runs."""
+        stdin, _stdout = self._open_pipes(op)
         try:
-            pickle.dump({"op": op, "payload": payload}, proc.stdin, protocol=4)
-            proc.stdin.flush()
+            pickle.dump({"op": op, "payload": payload}, stdin, protocol=4)
+            stdin.flush()
+        except OSError as exc:
+            raise StepProcessError(f"step process exited during {op}: {exc}") from exc
+
+    def receive(self, op: str) -> Any:
+        """Read the reply for a ``submit`` that already flushed."""
+        _stdin, stdout = self._open_pipes(op)
+        try:
             # The child is one we spawned. Its stdout is not an untrusted stream.
-            response = pickle.load(proc.stdout)  # nosec B301
+            response = pickle.load(stdout)  # nosec B301
         except (EOFError, pickle.UnpicklingError, OSError) as exc:
             raise StepProcessError(f"step process exited during {op}: {exc}") from exc
         if not isinstance(response, dict) or "ok" not in response:
@@ -67,6 +77,14 @@ class StepProcess:
             detail = str(response.get("traceback") or response.get("error") or op)
             raise StepProcessError(detail)
         return response.get("result")
+
+    def _open_pipes(self, op: str) -> tuple[IO[bytes], IO[bytes]]:
+        proc = self._proc
+        stdin = None if proc is None else proc.stdin
+        stdout = None if proc is None else proc.stdout
+        if proc is None or proc.poll() is not None or stdin is None or stdout is None:
+            raise StepProcessError(f"step process is not running for {op}")
+        return stdin, stdout
 
     def close(self) -> None:
         """Ask the child to exit. Kill it only if it ignores that request."""

@@ -52,6 +52,11 @@ from chess_teacher.pipelines.neural_network.train import (
     global_sample_weights,
     scan_candidate_stream,
 )
+from chess_teacher.pipelines.neural_network.training_slot import (
+    FitMemoryError,
+    fit_host_has_memory,
+    min_fit_mem_available_mb,
+)
 from chess_teacher.utils.general_utils import get_current_datetime
 from chess_teacher.utils.logging import get_logger
 from chess_teacher.utils.process_utils import snapshot_host_pressure
@@ -514,57 +519,76 @@ class HybridBoardTrainer:
                 weights_path,
                 fit_started.format_fields(),
             )
-            total_epochs = epochs
-            from tensorflow.keras.callbacks import Callback  # type: ignore[import-untyped]
-
-            class _EpochInfoCallback(Callback):
-                def on_epoch_end(self, epoch: int, logs: dict[str, Any] | None = None) -> None:
-                    logger.info(
-                        "Hybrid Keras epoch %s/%s metrics=%s",
-                        epoch + 1,
-                        total_epochs,
-                        {k: round(float(v), 6) for k, v in (logs or {}).items()},
-                    )
-
             fit_t0 = time.monotonic()
-            dataset, n_ds, bs_used = candidate_batch_dataset(
-                batch_paths,
-                sample_weight=sample_w,
-                batch_size=self.batch_size,
-                loss_kind=self.loss_kind,
-                soft_temperature_pawns=self.soft_temperature_pawns,
-                state_dim=state_dim,
-                max_candidates=self.max_candidates,
-                move_feat_dim=self.move_feat_dim,
-                include_board=True,
-            )
-            del sample_w
-            gc.collect()
             n_batches = len(batch_paths)
-            if epochs > 1:
-                dataset = dataset.repeat()
-            dataset = dataset.prefetch(1)
             logger.info(
                 "Streaming hybrid Keras fit via generated batches n_samples=%s "
                 "batch_size=%s epochs=%s steps_per_epoch=%s batch_files=%s %s",
-                n_ds,
-                bs_used,
+                n_kept,
+                min(self.batch_size, n_kept),
                 epochs,
                 n_batches,
                 n_batches,
                 snapshot_host_pressure().format_fields(),
             )
-            history = model.fit(
-                dataset,
-                epochs=epochs,
-                steps_per_epoch=n_batches,
-                verbose=0,
-                callbacks=[_EpochInfoCallback()],
-            )
+            # One epoch at a time so a growing allocator can be collected, and so
+            # a tight host stops before the kernel OOM-kills the pod.
+            completed = 0
+            history = None
+            for _epoch_index in range(epochs):
+                if not fit_host_has_memory():
+                    if completed == 0:
+                        raise FitMemoryError(
+                            "Refusing hybrid fit: MemAvailable is below "
+                            f"{min_fit_mem_available_mb():.0f} MB after the model loaded."
+                        )
+                    logger.warning(
+                        "Stopping hybrid fit after %s/%s epochs to avoid an OOM kill.",
+                        completed,
+                        epochs,
+                    )
+                    break
+                dataset, _n_ds, _bs_used = candidate_batch_dataset(
+                    batch_paths,
+                    sample_weight=sample_w,
+                    batch_size=self.batch_size,
+                    loss_kind=self.loss_kind,
+                    soft_temperature_pawns=self.soft_temperature_pawns,
+                    state_dim=state_dim,
+                    max_candidates=self.max_candidates,
+                    move_feat_dim=self.move_feat_dim,
+                    include_board=True,
+                )
+                dataset = dataset.prefetch(1)
+                history = model.fit(
+                    dataset,
+                    epochs=1,
+                    steps_per_epoch=n_batches,
+                    verbose=0,
+                )
+                completed += 1
+                epoch_logs = {
+                    key: round(float(value[-1]), 6)
+                    for key, value in history.history.items()
+                    if value
+                }
+                logger.info(
+                    "Hybrid Keras epoch %s/%s metrics=%s",
+                    completed,
+                    epochs,
+                    epoch_logs,
+                )
+                del dataset
+                dataset = None
+                gc.collect()
+            del sample_w
+            gc.collect()
         finally:
             del dataset
             gc.collect()
             shutil.rmtree(batch_dir, ignore_errors=True)
+        if history is None:
+            raise RuntimeError("hybrid fit finished without a Keras history")
         metrics: dict[str, float] = {}
         for key, values in history.history.items():
             if values:
@@ -586,7 +610,7 @@ class HybridBoardTrainer:
         metrics["baseline_disagree_boost"] = float(self.baseline_disagree_boost)
         metrics["sf_disagree_frac"] = disagree_frac
         metrics["sf_disagree_mean_strength"] = mean_strength
-        metrics["epochs"] = float(epochs)
+        metrics["epochs"] = float(completed)
         metrics["sf_mix_alpha"] = float(self.sf_mix_alpha)
         if self.forced_scale_pawns is not None:
             metrics["forced_scale_pawns"] = float(self.forced_scale_pawns)
