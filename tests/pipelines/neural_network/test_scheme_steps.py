@@ -189,7 +189,14 @@ class _RecordingProcess:
         self.calls: list[tuple[str, dict[str, object]]] = []
 
     def call(self, op: str, **payload: object) -> object:
+        self.submit(op, **payload)
+        return self.receive(op)
+
+    def submit(self, op: str, **payload: object) -> None:
         self.calls.append((op, payload))
+
+    def receive(self, op: str) -> object:
+        del op
         return self.result
 
 
