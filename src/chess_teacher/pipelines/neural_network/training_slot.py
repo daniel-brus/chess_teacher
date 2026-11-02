@@ -29,10 +29,16 @@ TRAINING_SLOT_WAIT_LIMIT = timedelta(hours=4)
 TRAINING_SLOT_POLL_SECONDS = 30.0
 
 # The wait runs after this pipeline is already resident, so MemAvailable is
-# the budget for the TensorFlow child. A solo fit on the 4 GB node finished
-# near 750 MB RSS. 1 GB covers that child and scoring in the same process.
-DEFAULT_MIN_PIPELINE_MEM_AVAILABLE_MB = 1000.0
+# the budget for the TensorFlow child. Loading the hybrid model drops that
+# budget by a few hundred MB. Prod fits that started with about 950 MB still
+# free were OOM-killed on the 4 GB node (Nov 2026). 1.4 GB before the child
+# starts leaves about 1 GB after the weights load.
+DEFAULT_MIN_PIPELINE_MEM_AVAILABLE_MB = 1400.0
 MIN_PIPELINE_MEM_AVAILABLE_MB_ENV = "PIPELINE_MIN_MEM_AVAILABLE_MB"
+# Checked again after the weights are in memory, before Keras allocates the
+# training step. The killed runs were under 1000 MB at that point.
+DEFAULT_MIN_FIT_MEM_AVAILABLE_MB = 1000.0
+MIN_FIT_MEM_AVAILABLE_MB_ENV = "PIPELINE_MIN_FIT_MEM_AVAILABLE_MB"
 
 
 @dataclass(frozen=True)
@@ -56,30 +62,36 @@ class TrainingSlotRecord(TableDataClass):
         return ()
 
 
-def min_pipeline_mem_available_mb() -> float:
-    """Minimum host MemAvailable before a training fit may start."""
-    raw = get_optional_env_variable(MIN_PIPELINE_MEM_AVAILABLE_MB_ENV)
+class FitMemoryError(RuntimeError):
+    """Starting or continuing a Keras fit would OOM-kill the host."""
+
+
+def _positive_mb(env_name: str, default: float) -> float:
+    raw = get_optional_env_variable(env_name)
     if not raw:
-        return DEFAULT_MIN_PIPELINE_MEM_AVAILABLE_MB
+        return default
     try:
         value = float(raw)
     except ValueError:
-        logger.warning(
-            "%s=%r is not a number; using %.0f.",
-            MIN_PIPELINE_MEM_AVAILABLE_MB_ENV,
-            raw,
-            DEFAULT_MIN_PIPELINE_MEM_AVAILABLE_MB,
-        )
-        return DEFAULT_MIN_PIPELINE_MEM_AVAILABLE_MB
+        logger.warning("%s=%r is not a number; using %.0f.", env_name, raw, default)
+        return default
     if value <= 0:
-        logger.warning(
-            "%s=%s is below 1; using %.0f.",
-            MIN_PIPELINE_MEM_AVAILABLE_MB_ENV,
-            value,
-            DEFAULT_MIN_PIPELINE_MEM_AVAILABLE_MB,
-        )
-        return DEFAULT_MIN_PIPELINE_MEM_AVAILABLE_MB
+        logger.warning("%s=%s is below 1; using %.0f.", env_name, value, default)
+        return default
     return value
+
+
+def min_pipeline_mem_available_mb() -> float:
+    """Minimum host MemAvailable before the TensorFlow child may start."""
+    return _positive_mb(
+        MIN_PIPELINE_MEM_AVAILABLE_MB_ENV,
+        DEFAULT_MIN_PIPELINE_MEM_AVAILABLE_MB,
+    )
+
+
+def min_fit_mem_available_mb() -> float:
+    """Minimum host MemAvailable after the model is loaded, before a fit step."""
+    return _positive_mb(MIN_FIT_MEM_AVAILABLE_MB_ENV, DEFAULT_MIN_FIT_MEM_AVAILABLE_MB)
 
 
 def pipeline_host_has_memory() -> bool:
@@ -95,6 +107,26 @@ def pipeline_host_has_memory() -> bool:
     ok = available >= minimum
     logger.info(
         "Training memory check mem_available_mb=%.0f minimum_mb=%.0f ok=%s",
+        available,
+        minimum,
+        ok,
+    )
+    return ok
+
+
+def fit_host_has_memory() -> bool:
+    """True when MemAvailable can take another hybrid fit step.
+
+    An unreadable MemAvailable does not block the fit.
+    """
+    available = snapshot_host_pressure().mem_available_mb
+    minimum = min_fit_mem_available_mb()
+    if available is None:
+        logger.warning("MemAvailable unreadable; allowing Keras fit.")
+        return True
+    ok = available >= minimum
+    logger.info(
+        "Fit memory check mem_available_mb=%.0f minimum_mb=%.0f ok=%s",
         available,
         minimum,
         ok,

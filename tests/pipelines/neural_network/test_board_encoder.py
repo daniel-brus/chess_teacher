@@ -5,6 +5,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 import numpy as np
+import pytest
 
 from chess_teacher.pipelines.neural_network.board_encoder import (
     HybridBoardTrainer,
@@ -17,7 +18,20 @@ from chess_teacher.pipelines.neural_network.board_tensor import (
 from chess_teacher.pipelines.neural_network.candidate_eval import MAX_CANDIDATES, MOVE_FEAT_DIM
 from chess_teacher.pipelines.neural_network.tf_runtime import ensure_tensorflow_logging
 from chess_teacher.pipelines.neural_network.train import CandidateStreamScan
+from chess_teacher.pipelines.neural_network.training_slot import FitMemoryError
 from chess_teacher.utils.chess_utils import Color
+
+
+def test_tensorflow_thread_caps_are_set_before_import(monkeypatch) -> None:
+    import chess_teacher.pipelines.neural_network.tf_runtime as tf_runtime
+
+    monkeypatch.setattr(tf_runtime, "_env_configured", False)
+    for name in ("TF_NUM_INTRAOP_THREADS", "TF_NUM_INTEROP_THREADS", "TF_ENABLE_ONEDNN_OPTS"):
+        monkeypatch.delenv(name, raising=False)
+    tf_runtime.ensure_tensorflow_logging()
+    assert tf_runtime.os.environ["TF_NUM_INTRAOP_THREADS"] == "1"
+    assert tf_runtime.os.environ["TF_NUM_INTEROP_THREADS"] == "1"
+    assert tf_runtime.os.environ["TF_ENABLE_ONEDNN_OPTS"] == "0"
 
 
 def test_hybrid_build_shapes_and_compat() -> None:
@@ -136,12 +150,17 @@ def test_fit_uses_warm_start_epochs_when_parent_weights_load(monkeypatch) -> Non
         lambda *args, **kwargs: (dataset, 2, 2),
     )
     monkeypatch.setattr(trainer, "load_or_build", lambda **kwargs: (model, False))
+    monkeypatch.setattr(
+        "chess_teacher.pipelines.neural_network.board_encoder.fit_host_has_memory",
+        lambda: True,
+    )
 
     _fitted, metrics = trainer.fit([object(), object()])  # type: ignore[list-item]
 
     assert metrics["epochs"] == 10.0
-    assert model.fit.call_args.kwargs["epochs"] == 10
-    dataset.repeat.assert_called_once()
+    assert model.fit.call_count == 10
+    assert model.fit.call_args.kwargs["epochs"] == 1
+    dataset.repeat.assert_not_called()
 
 
 def test_fit_keeps_20_epochs_on_cold_start(monkeypatch) -> None:
@@ -175,8 +194,69 @@ def test_fit_keeps_20_epochs_on_cold_start(monkeypatch) -> None:
         lambda *args, **kwargs: (dataset, 1, 1),
     )
     monkeypatch.setattr(trainer, "load_or_build", lambda **kwargs: (model, True))
+    monkeypatch.setattr(
+        "chess_teacher.pipelines.neural_network.board_encoder.fit_host_has_memory",
+        lambda: True,
+    )
 
     _fitted, metrics = trainer.fit([object()])  # type: ignore[list-item]
 
     assert metrics["epochs"] == 20.0
-    assert model.fit.call_args.kwargs["epochs"] == 20
+    assert model.fit.call_count == 20
+    assert model.fit.call_args.kwargs["epochs"] == 1
+
+
+def _patched_fit(monkeypatch, trainer: HybridBoardTrainer, *, memory: list[bool]):
+    model = MagicMock()
+    model.fit.return_value = MagicMock(history={"loss": [0.2]})
+    dataset = MagicMock()
+    dataset.prefetch.return_value = dataset
+    scan = CandidateStreamScan(
+        datums=[object()],  # type: ignore[list-item]
+        raw_weights=np.ones((1,), dtype=np.float64),
+        end_times=[None],
+        n_input=1,
+        n_dropped=0,
+        n_missing_end=0,
+        disagree_frac=0.0,
+        mean_strength=0.0,
+        state_dim=4,
+        max_candidates=trainer.max_candidates,
+        move_feat_dim=trainer.move_feat_dim,
+        batch_paths=["batch-0.npz"],
+    )
+    monkeypatch.setattr(
+        "chess_teacher.pipelines.neural_network.board_encoder.scan_candidate_stream",
+        lambda *args, **kwargs: scan,
+    )
+    monkeypatch.setattr(
+        "chess_teacher.pipelines.neural_network.board_encoder.candidate_batch_dataset",
+        lambda *args, **kwargs: (dataset, 1, 1),
+    )
+    monkeypatch.setattr(trainer, "load_or_build", lambda **kwargs: (model, True))
+    answers = iter(memory)
+
+    def _memory() -> bool:
+        return next(answers)
+
+    monkeypatch.setattr(
+        "chess_teacher.pipelines.neural_network.board_encoder.fit_host_has_memory",
+        _memory,
+    )
+    return model
+
+
+def test_fit_refuses_before_keras_when_memory_is_tight(monkeypatch) -> None:
+    trainer = HybridBoardTrainer(epochs=3, style_disagree_boost=1.0, batch_size=2)
+    model = _patched_fit(monkeypatch, trainer, memory=[False])
+    with pytest.raises(FitMemoryError):
+        trainer.fit([object()])  # type: ignore[list-item]
+    model.fit.assert_not_called()
+
+
+def test_fit_stops_before_a_later_epoch_when_memory_drops(monkeypatch) -> None:
+    trainer = HybridBoardTrainer(epochs=4, style_disagree_boost=1.0, batch_size=2)
+    model = _patched_fit(monkeypatch, trainer, memory=[True, True, False])
+    _fitted, metrics = trainer.fit([object()])  # type: ignore[list-item]
+    assert model.fit.call_count == 2
+    assert metrics["epochs"] == 2.0

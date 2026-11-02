@@ -23,6 +23,12 @@ def ensure_tensorflow_logging() -> None:
     if not _env_configured:
         # 0=all, 1=no INFO, 2=no WARNING, 3=no ERROR — C++ only.
         os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
+        # The 4 GB prod node OOM-kills a hybrid fit when TensorFlow's default
+        # thread pools and oneDNN workspaces sit on top of the loaded model.
+        # These must be set before the first tensorflow import.
+        os.environ.setdefault("TF_NUM_INTRAOP_THREADS", "1")
+        os.environ.setdefault("TF_NUM_INTEROP_THREADS", "1")
+        os.environ.setdefault("TF_ENABLE_ONEDNN_OPTS", "0")
         _env_configured = True
 
     # Root handlers (console formatter + segment files).
