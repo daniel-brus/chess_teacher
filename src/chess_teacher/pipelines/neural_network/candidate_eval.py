@@ -487,6 +487,38 @@ def candidate_move_feature_vector(
     return out
 
 
+def capped_candidate_rows(
+    evals_white_pov: dict[str, float],
+    *,
+    color_is_white: bool,
+    user_move_uci: str,
+    legal_ucis: tuple[str, ...] | list[str] | None = None,
+    max_candidates: int = MAX_CANDIDATES,
+) -> list[tuple[str, float, float]] | None:
+    """Candidate rows in the slot order ``pack_candidate_tensors`` writes.
+
+    ``None`` when there are no rows or the played move is missing. Illegal UCIs
+    stay in the list; the packer leaves those slots masked rather than compacting.
+    """
+    rows = candidate_move_rows(
+        evals_white_pov,
+        color_is_white=color_is_white,
+        legal_ucis=legal_ucis,
+    )
+    if not rows:
+        return None
+    by_uci = {u: (ev, d) for u, ev, d in rows}
+    if user_move_uci not in by_uci:
+        return None
+    if len(rows) > max_candidates:
+        user_row = (user_move_uci, *by_uci[user_move_uci])
+        others = [r for r in rows if r[0] != user_move_uci]
+        others.sort(key=lambda r: r[1], reverse=True)
+        rows = [user_row, *others[: max_candidates - 1]]
+        rows.sort(key=lambda r: r[0])
+    return rows
+
+
 def pack_candidate_tensors(
     evals_white_pov: dict[str, float],
     *,
@@ -503,15 +535,14 @@ def pack_candidate_tensors(
     SF evals from backfill; non-SF feats computed here from ``fen_before``.
     Returns None if user move missing from evals or board/move unusable.
     """
-    rows = candidate_move_rows(
+    rows = capped_candidate_rows(
         evals_white_pov,
         color_is_white=color_is_white,
+        user_move_uci=user_move_uci,
         legal_ucis=legal_ucis,
+        max_candidates=max_candidates,
     )
-    if not rows:
-        return None
-    by_uci = {u: (ev, d) for u, ev, d in rows}
-    if user_move_uci not in by_uci:
+    if rows is None:
         return None
 
     try:
@@ -519,13 +550,6 @@ def pack_candidate_tensors(
     except ValueError:
         logger.warning("Invalid fen_before for candidate feats: %s", fen_before)
         return None
-
-    if len(rows) > max_candidates:
-        user_row = (user_move_uci, *by_uci[user_move_uci])
-        others = [r for r in rows if r[0] != user_move_uci]
-        others.sort(key=lambda r: r[1], reverse=True)
-        rows = [user_row, *others[: max_candidates - 1]]
-        rows.sort(key=lambda r: r[0])
 
     before = _position_metric_snapshot(board, fen_before)
     evaluation_before_user = (
