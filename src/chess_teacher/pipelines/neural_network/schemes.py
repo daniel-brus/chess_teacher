@@ -37,6 +37,13 @@ from chess_teacher.pipelines.neural_network.pipeline_steps import (
     MAX_MOVES_PER_REGISTRY_VAL_EVAL,
     MIN_NEW_MOVES_BASELINE,
 )
+from chess_teacher.pipelines.neural_network.ply_weights import (
+    DEFAULT_USER_STYLE_DISAGREE_BOOST,
+)
+from chess_teacher.pipelines.neural_network.serve_gate import (
+    evaluate_serve_gate_metrics,
+    serve_gate_reason,
+)
 from chess_teacher.pipelines.neural_network.split_registry import SplitRegistry
 from chess_teacher.pipelines.neural_network.splits import DEFAULT_SPLIT_SALT
 from chess_teacher.pipelines.neural_network.training_scheme import (
@@ -126,7 +133,7 @@ def _promotion_decision(
     parent: ModelHandle | None,
     parent_eval: EvalMetrics | None,
 ) -> PromotionDecision:
-    """Same gate for platform and user runs."""
+    """Platform baseline promote gate (overall held; disagree not down)."""
     if parent is None:
         return PromotionDecision(True, "Cold start: no promoted model to replace.")
     if not parent.compatible:
@@ -149,6 +156,26 @@ def _promotion_decision(
             f"disagree top1 {drop:.4f} < parent {served:.4f}",
         )
     return PromotionDecision(True, "overall top1 held and disagree top1 did not drop.")
+
+
+def _personal_serve_gate_decision(
+    *,
+    candidate_eval: EvalMetrics | None,
+    parent: ModelHandle | None,
+    parent_eval: EvalMetrics | None,
+) -> PromotionDecision:
+    """Phase 5 Option B: promote personal child only if serve gate passes."""
+    if parent is None:
+        return PromotionDecision(True, "Cold start: no promoted model to replace.")
+    if not parent.compatible:
+        return PromotionDecision(
+            True,
+            f"Parent {parent.key} is incompatible; promoting the new candidate.",
+        )
+    if candidate_eval is None or parent_eval is None:
+        return PromotionDecision(False, "Missing registry-val scores; not promoting.")
+    gate = evaluate_serve_gate_metrics(parent_eval, candidate_eval)
+    return PromotionDecision(bool(gate["passes_serve_gate"]), serve_gate_reason(gate))
 
 
 def _fmt(value: float | None) -> str:
@@ -370,7 +397,15 @@ class ModelTraining:
     ) -> tuple[Any, dict[str, float]]:
         from chess_teacher.pipelines.neural_network.board_encoder import HybridBoardTrainer
 
-        return HybridBoardTrainer().fit(datums, weights_path=weights_path)
+        # Personal FT uses Option B boost (2.0). Platform keeps env / default 2.0
+        # style boost unless BASELINE_STYLE_DISAGREE_BOOST overrides.
+        if self.user_id is not None:
+            trainer = HybridBoardTrainer(
+                style_disagree_boost=DEFAULT_USER_STYLE_DISAGREE_BOOST,
+            )
+        else:
+            trainer = HybridBoardTrainer()
+        return trainer.fit(datums, weights_path=weights_path)
 
     def save(self, model: Any, path: Path) -> None:
         from chess_teacher.pipelines.neural_network.board_encoder import HybridBoardTrainer
@@ -453,6 +488,12 @@ class ModelTraining:
         parent: ModelHandle | None,
         parent_eval: EvalMetrics | None,
     ) -> PromotionDecision:
+        if self.user_id is not None:
+            return _personal_serve_gate_decision(
+                candidate_eval=candidate_eval,
+                parent=parent,
+                parent_eval=parent_eval,
+            )
         return _promotion_decision(
             candidate_eval=candidate_eval,
             parent=parent,

@@ -98,5 +98,7 @@ def test_user_promotion_scores_two_keras_files(
     out = capsys.readouterr().out
     assert "offline user promotion compare" in out
     assert "disagree_t1=" in out
-    assert "no_promote=true" in out
-    assert "primary=top1_sf_disagree" in out
+    assert "serve_gate=" in out
+    assert "recommend=" in out
+    assert "no_db_promote=true" in out
+    assert "primary=serve_gate" in out

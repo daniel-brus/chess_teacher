@@ -44,6 +44,7 @@ def _metrics(
     agree: float | None = None,
     disagree: float | None = None,
     disagree_top3: float | None = None,
+    pawn_gap: float = 0.0,
 ) -> EvalMetrics:
     return EvalMetrics(
         top1_overall=top1,
@@ -58,6 +59,7 @@ def _metrics(
         n_sf_agree=4,
         n_sf_disagree=4,
         sf_disagree_frac=0.5,
+        sf_delta_mean_pawns=pawn_gap,
     )
 
 
@@ -382,12 +384,39 @@ def test_promotion_blocks_a_disagree_drop() -> None:
 def test_promotion_accepts_held_overall_and_disagree_for_either_scope() -> None:
     parent = ModelHandle(key="v1", weights_uri="s3://x", compatible=True, kind="baseline")
     kwargs = {
-        "candidate_eval": _metrics(top1=0.50, agree=0.60, disagree=0.21),
+        "candidate_eval": _metrics(top1=0.50, agree=0.60, disagree=0.21, pawn_gap=-0.20),
         "parent": parent,
-        "parent_eval": _metrics(top1=0.48, agree=0.90, disagree=0.20),
+        "parent_eval": _metrics(top1=0.48, agree=0.90, disagree=0.20, pawn_gap=-0.18),
     }
     assert ModelTraining().decide_promotion(**kwargs).should_promote is True
+    # Personal serve gate: disagree +1pt, overall up, pawn regress 0.02 → pass.
     assert ModelTraining("user-1").decide_promotion(**kwargs).should_promote is True
+
+
+def test_personal_serve_gate_allows_small_overall_drop_platform_does_not() -> None:
+    """Option B: personal may drop ≤1 top-1 pt if disagree/pawn gates hold."""
+    parent = ModelHandle(key="v1", weights_uri="s3://x", compatible=True, kind="baseline")
+    kwargs = {
+        "candidate_eval": _metrics(top1=0.377, agree=0.70, disagree=0.190, pawn_gap=-0.38),
+        "parent": parent,
+        "parent_eval": _metrics(top1=0.385, agree=0.74, disagree=0.177, pawn_gap=-0.20),
+    }
+    assert ModelTraining().decide_promotion(**kwargs).should_promote is False
+    personal = ModelTraining("user-1").decide_promotion(**kwargs)
+    assert personal.should_promote is True
+    assert "serve gate pass" in personal.reason
+
+
+def test_personal_serve_gate_rejects_boost4_style_regress() -> None:
+    parent = ModelHandle(key="v1", weights_uri="s3://x", compatible=True, kind="baseline")
+    kwargs = {
+        "candidate_eval": _metrics(top1=0.357, agree=0.63, disagree=0.198, pawn_gap=-0.61),
+        "parent": parent,
+        "parent_eval": _metrics(top1=0.385, agree=0.74, disagree=0.177, pawn_gap=-0.20),
+    }
+    decision = ModelTraining("user-1").decide_promotion(**kwargs)
+    assert decision.should_promote is False
+    assert "serve gate fail" in decision.reason
 
 
 def _weights_row(

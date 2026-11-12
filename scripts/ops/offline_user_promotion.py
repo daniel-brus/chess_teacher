@@ -4,6 +4,10 @@ Does not train and does not write ``ml.baseline_models``. Compare an existing
 user ``.keras`` to an existing baseline ``.keras`` (the 3a parent, or any other
 local hybrid weights). Val is that account's registry val only.
 
+Applies the Phase 5 Option B **serve gate** and prints PASS/FAIL + recommend
+``serve_child`` or ``serve_parent``. Exit ``0`` always on a completed compare;
+gate failure is reported in the text (same as before for ops sibling safety).
+
 Run (dev)::
 
     doppler run --project chess-teacher --config dev_local -- ^
@@ -11,11 +15,6 @@ Run (dev)::
       --account-id <uuid> ^
       --user-weights storage/tmp/phase3a/user.keras ^
       --baseline-weights storage/tmp/phase3a/hybrid_parent.keras
-
-Optional::
-
-    --split-version baseline-v1
-    --val-limit 10000
 """
 
 from __future__ import annotations
@@ -25,11 +24,15 @@ from pathlib import Path
 
 from chess_teacher.pipelines.neural_network.board_encoder import load_hybrid_board_keras
 from chess_teacher.pipelines.neural_network.eval_metrics import (
-    evaluate_datums,
     format_eval_delta,
     format_eval_metrics,
 )
+from chess_teacher.pipelines.neural_network.hybrid_val_score import score_hybrid_datums
 from chess_teacher.pipelines.neural_network.offline_eval import load_account_registry_bucket_datums
+from chess_teacher.pipelines.neural_network.serve_gate import (
+    evaluate_serve_gate_metrics,
+    serve_gate_reason,
+)
 from chess_teacher.pipelines.neural_network.splits import DEFAULT_SPLIT_SALT, SplitBucket
 from chess_teacher.pipelines.neural_network.tf_runtime import ensure_tensorflow_logging
 from chess_teacher.utils.db.client import get_db_client
@@ -82,18 +85,28 @@ def run_offline_user_promotion(
 
     logger.info("Scoring user weights=%s on val n=%s…", user_path, len(val))
     user_model = load_hybrid_board_keras(user_path, compile_model=False)
-    user_metrics = evaluate_datums(user_model, val)
+    user_metrics, user_ll = score_hybrid_datums(user_model, val)
 
     logger.info("Scoring baseline weights=%s on val n=%s…", baseline_path, len(val))
     baseline_model = load_hybrid_board_keras(baseline_path, compile_model=False)
-    baseline_metrics = evaluate_datums(baseline_model, val)
+    baseline_metrics, baseline_ll = score_hybrid_datums(baseline_model, val)
+
+    gate = evaluate_serve_gate_metrics(
+        baseline_metrics,
+        user_metrics,
+        parent_ll=baseline_ll,
+        child_ll=user_ll,
+    )
+    recommend = "serve_child" if gate.get("passes_serve_gate") else "serve_parent"
 
     print("\n=== offline user promotion compare (no DB write) ===")
     print(f"account_id={aid!r} split_version={split_version!r} val_n={len(val)}")
     print(f"user_weights={user_path}")
     print(f"baseline_weights={baseline_path}")
     print(format_eval_metrics("user", user_metrics))
+    print(f"user_val_log_loss={user_ll:.6f}")
     print(format_eval_metrics("baseline", baseline_metrics))
+    print(f"baseline_val_log_loss={baseline_ll:.6f}")
     print(
         format_eval_delta(
             user_metrics,
@@ -102,7 +115,17 @@ def run_offline_user_promotion(
             baseline_name="baseline",
         )
     )
-    print("primary=top1_sf_disagree  agree=report_only  no_promote=true")
+    print(
+        f"serve_gate={'PASS' if gate.get('passes_serve_gate') else 'FAIL'} "
+        f"recommend={recommend} reason={serve_gate_reason(gate)!r}"
+    )
+    print(
+        f"gate_deltas d_top1={gate.get('d_top1', float('nan')):+.4f} "
+        f"d_disagree={gate.get('d_disagree', float('nan')):+.4f} "
+        f"d_ll={gate.get('d_ll', float('nan')):+.4f} "
+        f"pawn_reg={gate.get('pawn_gap_regress', float('nan')):+.4f}"
+    )
+    print("primary=serve_gate  agree=report_only  no_db_promote=true")
     return 0
 
 
