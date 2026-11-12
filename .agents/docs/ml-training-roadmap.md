@@ -1,10 +1,10 @@
 # ML training roadmap — baseline + personalized bots
 
-**Status:** Phases 1–5 play selection are on `develop`. Phase 4 wires one baseline train-and-promote into the nightly job and one personal train-and-promote into the daily user pipeline. `AssignGameSplitsStep` is the last step of preprocessing. E16 and E18 are still open.
+**Status:** Phases 1–5 play selection are on `develop`. Phase 4 wires one baseline train-and-promote into the nightly job and one personal train-and-promote into the daily user pipeline. `AssignGameSplitsStep` is the last step of preprocessing. E16 and E18 are still open. **Maia board path CLOSED** (shallow hybrid wins). **Next:** Phase 5 Slice A — hybrid update rule.
 
 **Audience:** humans and coding agents working on `src/chess_teacher/pipelines/neural_network/`
 
-**Last updated:** 2026-09-03 (rev: 2b experiment outcome tables; merge-ready)
+**Last updated:** 2026-11-04 (Maia closed; Phase 5 update-rule kickoff)
 
 ---
 
@@ -596,18 +596,35 @@ Test set: manual / release-tag evaluation only — never promotion or epoch tuni
 
 ---
 
-## Phase 5 — Product polish
+## Phase 5 — Product polish + hybrid update quality
 
-**Play selection (this phase):**
+**Play selection (done on `develop`):**
 
 - The Play page **Personal bot** category lists this user's promoted and archived personal models (candidate-style weights only). Candidates stay off the page.
 - When that user has no promoted personal model, the same category offers the current platform production baseline and says so. That is the fallback, not a second training path.
 - Personal and baseline opponents share the temperature slider, the neural loading status, and the candidate panel.
 - The nightly job may run several baseline train-and-promote rounds. `BASELINE_NIGHTLY_ROUNDS` defaults to **1** (also set on the nightly CronJob). Round 1 always runs. A later round runs only while unprocessed registry-train moves stay at or above the minimum. A failed round stops the loop.
 
+**Maia board path (closed):** residual trunk, spatial-only, and dual-head mixture all lost mid-size / full A/Bs vs shallow hybrid. Detail: `.agents/docs/maia-style-action-plan.md`. Do not reopen without new evidence.
+
+**Active kickoff:** `.agents/docs/ml-phase5-hybrid-update-rule.md`
+
+| Slice | Work | Status |
+|-------|------|--------|
+| **A** | Warm-start update rule (Adam ~1e-4, best val, replay) | **REJECTED** — keep `1e-3` last-epoch warm |
+| **B** | Baseline disagree-boost ablate 2 vs 1 | **done** — prefer platform boost 1.0; keep high boost on user FT |
+| **C** | Personal head (freeze shallow trunk; pin named parent) | **REJECTED** — keep full-layer user FT |
+| **D** | Serve parent vs personal FT (user boost + serve gate) | **done** — boost 2 PASS; boost 4 FAIL |
+| **E** | Inference logit blend parent↔child (boost-4 child) | **done** — α=0.5 PASS (parked) |
+| **Product** | Option B: FT@boost2 + serve gate | **shipped** |
+
+Chosen path: personal boost **2** + serve gate; never pure boost-4. Blend
+parked. See phase5 note.
+
 **Still later:**
 
-- Inference blend by game count: `(1-alpha)·baseline + alpha·user`
+- Game-count schedule for blend α (optional polish)
+- Platform DEFAULT boost → 1.0 (Slice B)
 - “Recent opening” messaging when recency + opening **weights** apply (still registry splits)
 - E16 (no val/test leakage in orchestrated batches) and E18 (platform catch-up matches the offline sibling round by round)
 
@@ -666,10 +683,16 @@ When asked to implement part of this roadmap:
 1. **Terminal-only** — `backfill_game_splits.py` then `offline_baseline_train_eval.py` ✅
 2. **Phase 2a** — epoch sweep + promotion sibling + `DEFAULT_EPOCHS=20` (justified pick) ✅
 3. **Phase 2b** — tools + 10k experiments ✅ (keep 128/64; feat v4 skipped)
-4. **Phase 2c** — board encoder + training signal ✅ (hybrid preferred; default loss `sf_mix` α=0; sandbox cleanup later). Detail: `.agents/docs/ml-phase2c-board-encoder.md`
+4. **Phase 2c** — board encoder + training signal ✅ (hybrid preferred; default loss `sf_mix` α=0). Detail: `.agents/docs/ml-phase2c-board-encoder.md`
 5. **Phase 3** — user tools + user ops siblings + notebook ✅. Kickoff: `.agents/docs/ml-phase3-user-finetune.md`
 6. **Phase 4** — nightly baseline train/promote and daily personal train/promote are on `develop`. Split assignment is the last preprocessing step. E16 and E18 are open.
-7. **Phase 5** — play selection: personal model, or the platform baseline as a labeled fallback. Nightly baseline round budget defaults to 1. Blend and recent-opening copy stay later. ← **you are here**
+7. **Maia board A/Bs** — spatial / residual trunk / dual-head — all **REJECTED**. Keep shallow. Detail: `.agents/docs/maia-style-action-plan.md` ✅ closed
+8. **Phase 5 Slice A** — hybrid update rule ABCD — **REJECTED** (keep warm `1e-3`). Kickoff: `.agents/docs/ml-phase5-hybrid-update-rule.md`
+9. **Phase 5 Slice B** — disagree-boost 2 vs 1 — **done** (platform: prefer 1.0; user FT keeps high boost)
+10. **Phase 5 Slice C** — personal head freeze trunk — **REJECTED** (keep full-layer FT)
+11. **Phase 5 Slice D** — serve parent vs personal FT — **done** (boost 2 PASS; boost 4 FAIL)
+12. **Phase 5 Slice E** — inference logit blend — **done** (α=0.5 PASS; parked)
+13. **Product Option B** — FT@boost2 + personal serve gate — **shipped** ← **you are here**
 
 Each phase should close the **experimental questions** (E1–E18) listed above for that scope.
 

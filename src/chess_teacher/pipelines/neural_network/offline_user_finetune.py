@@ -27,6 +27,9 @@ from chess_teacher.pipelines.neural_network.offline_eval import (
     load_balanced_account_registry_bucket_datums,
     load_registry_bucket_datums,
 )
+from chess_teacher.pipelines.neural_network.ply_weights import (
+    DEFAULT_USER_STYLE_DISAGREE_BOOST,
+)
 from chess_teacher.pipelines.neural_network.splits import (
     DEFAULT_SPLIT_SALT,
     SplitBucket,
@@ -39,9 +42,17 @@ logger = get_logger()
 
 # Roadmap Phase 3a min-data gate: skip / serve baseline below this.
 MIN_USER_TRAIN_MOVES = 300
-DEFAULT_USER_STYLE_DISAGREE_BOOST = 4.0
 # Packing stacks (n, 128, 55) float32 ≈ n * 28 KiB; ~100k fit on 8GB host, OOM at ~200k.
 DEFAULT_FIT_CHUNK_SIZE = 40_000
+
+# Re-export for CLIs / ops that historically imported the boost from here.
+__all__ = (
+    "DEFAULT_FIT_CHUNK_SIZE",
+    "DEFAULT_USER_STYLE_DISAGREE_BOOST",
+    "MIN_USER_TRAIN_MOVES",
+    "main",
+    "run_offline_user_finetune_eval",
+)
 
 
 def _fit_hybrid_in_chunks(
