@@ -6,14 +6,23 @@ production row. The older row has had more training rounds, so the comparison
 is not a fair start for the new architecture.
 
 This operation is a deliberate ops step. It is not run from the trainer: a
-failed weight load must not archive production on its own. It archives every
-baseline and personal row that is not the current hybrid scheme, clears the
-parent-baseline pointer when that row is one of them, resets both training
-queues, and clears ``personal_queue_baseline``. Archived models stay playable.
-MLflow artifacts are not deleted.
+failed weight load must not archive production on its own.
 
-Run it once when the served architecture changes. A later run archives nothing
-new, but it does replay the queues again.
+Default mode archives every baseline and personal row that is **not** the
+current hybrid scheme (``encoder_hybrid_board`` = 1 in eval metrics), clears
+the parent-baseline pointer when that row is one of them, resets both training
+queues, and clears ``personal_queue_baseline``.
+
+``archive_all=True`` (CLI ``--all``) is the nuclear reset: archive **every**
+non-archived baseline and personal row (including hybrid), clear **any**
+parent-baseline pointer, reset queues, and clear personal queue baselines.
+Use when the served graph is rotten even though metrics claim hybrid.
+
+Archived models stay playable. MLflow artifacts are not deleted.
+
+Run it once when the served architecture changes, or with ``archive_all`` for
+a full soft reset. A later default run archives nothing new if only hybrids
+remain, but it does replay the queues again.
 """
 
 from __future__ import annotations
@@ -74,6 +83,7 @@ class ModelTreeReset:
     changes: tuple[ModelTreeRowChange, ...]
     queue_rows: int
     cleared_scopes: tuple[str, ...]
+    archive_all: bool = False
 
 
 def format_model_tree_reset(result: ModelTreeReset, *, applied: bool) -> str:
@@ -82,8 +92,10 @@ def format_model_tree_reset(result: ModelTreeReset, *, applied: bool) -> str:
     baselines = [change for change in archived if change.kind == "baseline"]
     personals = [change for change in archived if change.kind == "personal"]
     archive_verb = "Archived" if applied else "Would archive"
+    mode = "all models (nuclear)" if result.archive_all else "non-hybrid models"
     lines = [
-        f"{archive_verb} {len(baselines)} baseline model(s) and {len(personals)} personal model(s)."
+        f"Mode: {mode}.",
+        f"{archive_verb} {len(baselines)} baseline model(s) and {len(personals)} personal model(s).",
     ]
     for change in result.changes:
         if change.kind == "baseline":
@@ -112,18 +124,23 @@ def start_new_model_tree(
     db_client: DatabaseClient,
     *,
     dry_run: bool = False,
+    archive_all: bool = False,
 ) -> ModelTreeReset:
-    """Archive non-hybrid models and replay both training queues.
+    """Archive models and replay both training queues.
 
-    Hybrid rows (``encoder_hybrid_board`` = 1 in eval metrics) stay in place,
-    including a hybrid parent baseline. Every other non-archived row becomes
-    archived. A non-hybrid parent-baseline flag is cleared even when that row
-    was already archived, so the next hybrid cold start has no model to beat.
+    Default (``archive_all=False``): hybrid rows (``encoder_hybrid_board`` = 1
+    in eval metrics) stay in place, including a hybrid parent baseline. Every
+    other non-archived row becomes archived. A non-hybrid parent-baseline flag
+    is cleared even when that row was already archived, so the next hybrid cold
+    start has no model to beat.
+
+    Nuclear (``archive_all=True``): archive every non-archived baseline and
+    personal row (hybrid included) and clear any parent-baseline pointer.
     """
     changes: list[ModelTreeRowChange] = []
 
     for baseline in BaselineModel.fetch_all_ordered(db_client):
-        if eval_metrics_are_hybrid_board(baseline.eval_metrics):
+        if not archive_all and eval_metrics_are_hybrid_board(baseline.eval_metrics):
             continue
         needs_archive = baseline.status != BaselineModelStatus.ARCHIVED
         needs_clear = baseline.is_parent_baseline
@@ -154,7 +171,7 @@ def start_new_model_tree(
         )
 
     for personal in PersonalModel.fetch_all_from_db(db_client, order_by='"trained_at" DESC'):
-        if eval_metrics_are_hybrid_board(personal.eval_metrics):
+        if not archive_all and eval_metrics_are_hybrid_board(personal.eval_metrics):
             continue
         if personal.status == BaselineModelStatus.ARCHIVED:
             continue
@@ -194,10 +211,12 @@ def start_new_model_tree(
         changes=tuple(changes),
         queue_rows=queue_rows,
         cleared_scopes=tuple(cleared_scopes),
+        archive_all=archive_all,
     )
     logger.info(
-        "Model tree reset dry_run=%s archived=%s queue_rows=%s cleared_scopes=%s",
+        "Model tree reset dry_run=%s archive_all=%s archived=%s queue_rows=%s cleared_scopes=%s",
         dry_run,
+        archive_all,
         len(changes),
         queue_rows,
         len(cleared_scopes),
