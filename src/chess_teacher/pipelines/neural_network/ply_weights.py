@@ -47,6 +47,8 @@ DEFAULT_RECENCY_BOOST = 2.0
 DEFAULT_RECENCY_LAMBDA = 0.02
 # User-CLI baseline-disagree hard mask. Trainer default stays 1.0 (off).
 USER_BASELINE_DISAGREE_BOOST = 4.0
+# Personal FT style-disagree boost (Phase 5 Option B — Slice D mid).
+DEFAULT_USER_STYLE_DISAGREE_BOOST = 2.0
 # Must match candidate_eval packing for evaluation / delta_vs_best.
 _EVAL_FEAT_TANH_SCALE = 5.0
 _DELTA_VS_BEST_KEY = "delta_vs_best"

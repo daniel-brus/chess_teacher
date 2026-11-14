@@ -64,6 +64,14 @@ from chess_teacher.utils.process_utils import snapshot_host_pressure
 logger = get_logger()
 ensure_tensorflow_logging()
 
+# Shallow board trunk: freeze these on personal-head finetunes (Phase 5 Slice C).
+BOARD_TRUNK_LAYER_NAMES: tuple[str, ...] = (
+    "board_conv1",
+    "board_conv2",
+    "board_gap",
+    "board_emb",
+)
+
 
 def _import_keras():
     ensure_tensorflow_logging()
@@ -71,6 +79,19 @@ def _import_keras():
 
     ensure_tensorflow_logging()
     return keras
+
+
+def freeze_board_trunk_layers(model: Any) -> list[str]:
+    """Set ``trainable=False`` on shallow board trunk layers. Call before compile."""
+    frozen: list[str] = []
+    for name in BOARD_TRUNK_LAYER_NAMES:
+        try:
+            layer = model.get_layer(name)
+        except ValueError as exc:
+            raise ValueError(f"freeze board trunk: missing layer {name!r}") from exc
+        layer.trainable = False
+        frozen.append(name)
+    return frozen
 
 
 def load_hybrid_board_keras(
@@ -160,6 +181,9 @@ class HybridBoardTrainer:
     DEFAULT_HIDDEN = BaselineTrainer.DEFAULT_HIDDEN
     DEFAULT_SCORE_HIDDEN = BaselineTrainer.DEFAULT_SCORE_HIDDEN
     DEFAULT_CONV_FILTERS = 64
+    DEFAULT_LEARNING_RATE = 1e-3
+    DEFAULT_WARM_LEARNING_RATE = 1e-4
+    DEFAULT_WARM_WARMUP_EPOCHS = 1
 
     def __init__(
         self,
@@ -179,7 +203,18 @@ class HybridBoardTrainer:
         loss_kind: LossKind = DEFAULT_LOSS_KIND,
         soft_temperature_pawns: float = DEFAULT_SOFT_TEMPERATURE_PAWNS,
         sf_mix_alpha: float = DEFAULT_SF_MIX_ALPHA,
+        learning_rate: float = DEFAULT_LEARNING_RATE,
+        warm_learning_rate: float = DEFAULT_WARM_LEARNING_RATE,
+        warm_warmup_epochs: int = DEFAULT_WARM_WARMUP_EPOCHS,
+        select_best_val: bool = False,
+        freeze_board_trunk: bool = False,
     ) -> None:
+        if float(learning_rate) <= 0.0:
+            raise ValueError(f"learning_rate must be > 0, got {learning_rate}")
+        if float(warm_learning_rate) <= 0.0:
+            raise ValueError(f"warm_learning_rate must be > 0, got {warm_learning_rate}")
+        if int(warm_warmup_epochs) < 0:
+            raise ValueError(f"warm_warmup_epochs must be >= 0, got {warm_warmup_epochs}")
         self.epochs = epochs
         self.batch_size = batch_size
         self.hidden = hidden
@@ -203,6 +238,11 @@ class HybridBoardTrainer:
         self.loss_kind: LossKind = str(loss_kind)  # type: ignore[assignment]
         self.soft_temperature_pawns = float(soft_temperature_pawns)
         self.sf_mix_alpha = float(sf_mix_alpha)
+        self.learning_rate = float(learning_rate)
+        self.warm_learning_rate = float(warm_learning_rate)
+        self.warm_warmup_epochs = int(warm_warmup_epochs)
+        self.select_best_val = bool(select_best_val)
+        self.freeze_board_trunk = bool(freeze_board_trunk)
 
     def _loss_fn(self) -> Any:
         return resolve_candidate_loss(
@@ -210,6 +250,59 @@ class HybridBoardTrainer:
             max_candidates=self.max_candidates,
             sf_mix_alpha=self.sf_mix_alpha,
         )
+
+    def resolve_learning_rate(self, *, cold_start: bool) -> float:
+        """Peak Adam LR for this fit (warmup may ramp up to this on warm starts)."""
+        if cold_start:
+            return float(self.learning_rate)
+        return float(self.warm_learning_rate)
+
+    def _compile_model(self, model: Any, *, learning_rate: float) -> Any:
+        keras = _import_keras()
+        model.compile(
+            optimizer=keras.optimizers.Adam(learning_rate),
+            loss=self._loss_fn(),
+            metrics=[
+                masked_candidate_top_k(1, self.max_candidates),
+                masked_candidate_top_k(3, self.max_candidates),
+            ],
+        )
+        return model
+
+    def _set_optimizer_lr(self, model: Any, learning_rate: float) -> None:
+        opt = model.optimizer
+        lr_var = getattr(opt, "learning_rate", None)
+        if lr_var is None:
+            return
+        try:
+            from tensorflow import keras  # type: ignore[import-untyped]
+
+            ensure_tensorflow_logging()
+            # Keras 3 Variable path.
+            if hasattr(lr_var, "assign"):
+                lr_var.assign(float(learning_rate))
+            else:
+                keras.backend.set_value(lr_var, float(learning_rate))
+        except Exception:
+            try:
+                opt.learning_rate = float(learning_rate)
+            except Exception:
+                logger.warning("Could not set optimizer learning_rate=%s", learning_rate)
+
+    def _epoch_learning_rate(
+        self,
+        *,
+        cold_start: bool,
+        peak_lr: float,
+        epoch_index: int,
+    ) -> float:
+        """Linear warmup over the first ``warm_warmup_epochs`` warm epochs."""
+        if cold_start or self.warm_warmup_epochs <= 0:
+            return float(peak_lr)
+        warmup = self.warm_warmup_epochs
+        if epoch_index >= warmup:
+            return float(peak_lr)
+        return float(peak_lr) * float(epoch_index + 1) / float(warmup)
 
     def build(self, state_dim: int) -> Any:
         keras = _import_keras()
@@ -263,15 +356,7 @@ class HybridBoardTrainer:
             outputs=logits,
             name="baseline_hybrid_board",
         )
-        model.compile(
-            optimizer=keras.optimizers.Adam(1e-3),
-            loss=self._loss_fn(),
-            metrics=[
-                masked_candidate_top_k(1, self.max_candidates),
-                masked_candidate_top_k(3, self.max_candidates),
-            ],
-        )
-        return model
+        return self._compile_model(model, learning_rate=self.learning_rate)
 
     def resolve_epochs(self, *, cold_start: bool) -> int:
         """Epochs for this fit. An explicit ``epochs`` value wins either way."""
@@ -323,18 +408,8 @@ class HybridBoardTrainer:
                     "Parent weights not hybrid board+state compatible "
                     f"(output_shape={getattr(model, 'output_shape', None)})"
                 )
-            from tensorflow import keras  # type: ignore[import-untyped]
-
-            ensure_tensorflow_logging()
-            model.compile(
-                optimizer=keras.optimizers.Adam(1e-3),
-                loss=self._loss_fn(),
-                metrics=[
-                    masked_candidate_top_k(1, self.max_candidates),
-                    masked_candidate_top_k(3, self.max_candidates),
-                ],
-            )
-            return model, False
+            # Compile at warm LR; fit may ramp via warmup. Fresh Adam = moment reset.
+            return self._compile_model(model, learning_rate=self.warm_learning_rate), False
         if weights_path is not None and weights_path.is_file():
             logger.info("Loading hybrid board weights from %s", weights_path)
             try:
@@ -355,18 +430,7 @@ class HybridBoardTrainer:
             ):
                 logger.warning("Parent weights not hybrid board+state compatible; cold-starting")
                 return self.build(state_dim), True
-            from tensorflow import keras  # type: ignore[import-untyped]
-
-            ensure_tensorflow_logging()
-            model.compile(
-                optimizer=keras.optimizers.Adam(1e-3),
-                loss=self._loss_fn(),
-                metrics=[
-                    masked_candidate_top_k(1, self.max_candidates),
-                    masked_candidate_top_k(3, self.max_candidates),
-                ],
-            )
-            return model, False
+            return self._compile_model(model, learning_rate=self.warm_learning_rate), False
         logger.info(
             "Cold-start hybrid board+state model state_dim=%s conv_filters=%s "
             "max_candidates=%s feat_dim=%s",
@@ -387,9 +451,12 @@ class HybridBoardTrainer:
         end_time_by_game_id: Mapping[str, datetime] | None = None,
         now: datetime | None = None,
         require_parent_weights: bool = False,
+        val_datums: list[TrainingDatum] | None = None,
     ) -> tuple[Any, dict[str, float]]:
         if not datums:
             raise ValueError("HybridBoardTrainer.fit requires a non-empty batch")
+        if self.select_best_val and not val_datums:
+            raise ValueError("select_best_val=True requires non-empty val_datums")
 
         logger.info(
             "Hybrid board+state encoder: scanning candidates for %s datums "
@@ -499,11 +566,22 @@ class HybridBoardTrainer:
                     weights_path=weights_path,
                     require_compatible_parent=require_parent_weights,
                 )
+            if self.freeze_board_trunk:
+                if cold_started:
+                    raise ValueError("freeze_board_trunk=True requires parent weights (warm start)")
+                frozen = freeze_board_trunk_layers(model)
+                logger.info("Froze board trunk layers=%s before compile", frozen)
             epochs = self.resolve_epochs(cold_start=cold_started)
+            peak_lr = self.resolve_learning_rate(cold_start=cold_started)
+            # Recompile so cold path uses cold LR even if build used default, and
+            # warm path always gets a fresh Adam (moment reset on parent load).
+            # Freeze must land before compile so Adam sees the reduced var set.
+            self._compile_model(model, learning_rate=peak_lr)
             fit_started = snapshot_host_pressure()
             logger.info(
                 "Starting hybrid Keras fit samples=%s epochs=%s cold_start=%s batch_size=%s "
-                "conv_filters=%s style_disagree_boost=%s scale_pawns=%s "
+                "conv_filters=%s lr=%s warm_warmup_epochs=%s select_best_val=%s "
+                "freeze_board_trunk=%s style_disagree_boost=%s scale_pawns=%s "
                 "forced_scale_pawns=%s disagree_frac=%.3f mean_strength=%.3f "
                 "parent=%s %s",
                 n_kept,
@@ -511,6 +589,10 @@ class HybridBoardTrainer:
                 cold_started,
                 min(self.batch_size, n_kept),
                 self.conv_filters,
+                peak_lr,
+                self.warm_warmup_epochs if not cold_started else 0,
+                self.select_best_val,
+                self.freeze_board_trunk,
                 self.style_disagree_boost,
                 self.style_disagree_scale,
                 self.forced_scale_pawns,
@@ -535,7 +617,11 @@ class HybridBoardTrainer:
             # a tight host stops before the kernel OOM-kills the pod.
             completed = 0
             history = None
-            for _epoch_index in range(epochs):
+            best_val_loss: float | None = None
+            best_epoch = 0
+            best_weights: list[Any] | None = None
+            val_loss_by_epoch: list[float] = []
+            for epoch_index in range(epochs):
                 if not fit_host_has_memory():
                     if completed == 0:
                         raise FitMemoryError(
@@ -548,6 +634,12 @@ class HybridBoardTrainer:
                         epochs,
                     )
                     break
+                epoch_lr = self._epoch_learning_rate(
+                    cold_start=cold_started,
+                    peak_lr=peak_lr,
+                    epoch_index=epoch_index,
+                )
+                self._set_optimizer_lr(model, epoch_lr)
                 dataset, _n_ds, _bs_used = candidate_batch_dataset(
                     batch_paths,
                     sample_weight=sample_w,
@@ -573,14 +665,39 @@ class HybridBoardTrainer:
                     if value
                 }
                 logger.info(
-                    "Hybrid Keras epoch %s/%s metrics=%s",
+                    "Hybrid Keras epoch %s/%s lr=%.6g metrics=%s",
                     completed,
                     epochs,
+                    epoch_lr,
                     epoch_logs,
                 )
+                if self.select_best_val and val_datums:
+                    from chess_teacher.pipelines.neural_network.hybrid_val_score import (
+                        score_hybrid_val_log_loss,
+                    )
+
+                    val_loss = score_hybrid_val_log_loss(model, val_datums)
+                    val_loss_by_epoch.append(float(val_loss))
+                    logger.info(
+                        "Hybrid val log_loss after epoch %s/%s = %.6f",
+                        completed,
+                        epochs,
+                        val_loss,
+                    )
+                    if best_val_loss is None or val_loss < best_val_loss:
+                        best_val_loss = float(val_loss)
+                        best_epoch = completed
+                        best_weights = [w.copy() for w in model.get_weights()]
                 del dataset
                 dataset = None
                 gc.collect()
+            if best_weights is not None:
+                model.set_weights(best_weights)
+                logger.info(
+                    "Restored best-val hybrid weights epoch=%s val_log_loss=%.6f",
+                    best_epoch,
+                    best_val_loss,
+                )
             del sample_w
             gc.collect()
         finally:
@@ -611,6 +728,13 @@ class HybridBoardTrainer:
         metrics["sf_disagree_frac"] = disagree_frac
         metrics["sf_disagree_mean_strength"] = mean_strength
         metrics["epochs"] = float(completed)
+        metrics["learning_rate"] = float(peak_lr)
+        metrics["warm_warmup_epochs"] = float(0 if cold_started else self.warm_warmup_epochs)
+        metrics["select_best_val"] = 1.0 if self.select_best_val else 0.0
+        metrics["freeze_board_trunk"] = 1.0 if self.freeze_board_trunk else 0.0
+        if best_val_loss is not None:
+            metrics["best_val_log_loss"] = float(best_val_loss)
+            metrics["best_val_epoch"] = float(best_epoch)
         metrics["sf_mix_alpha"] = float(self.sf_mix_alpha)
         if self.forced_scale_pawns is not None:
             metrics["forced_scale_pawns"] = float(self.forced_scale_pawns)
