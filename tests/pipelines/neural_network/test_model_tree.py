@@ -210,49 +210,128 @@ def test_dry_run_reports_without_writing(monkeypatch) -> None:
     assert "Would clear personal_queue_baseline on baseline." in report
 
 
+def test_start_archives_all_including_hybrid(monkeypatch) -> None:
+    hybrid_prod = _baseline("v3", BaselineModelStatus.PRODUCTION, hybrid=True, parent=True)
+    hybrid_personal = _personal("user-a", "v2", BaselineModelStatus.PRODUCTION, hybrid=True)
+    flat_personal = _personal("user-a", "v1", BaselineModelStatus.CANDIDATE)
+    saved: list[object] = []
+
+    monkeypatch.setattr(BaselineModel, "fetch_all_ordered", lambda db: [hybrid_prod])
+    monkeypatch.setattr(
+        PersonalModel,
+        "fetch_all_from_db",
+        lambda db, **kwargs: [hybrid_personal, flat_personal],
+    )
+    monkeypatch.setattr(TrainingState, "fetch_all_from_db", lambda db, **kwargs: [])
+    monkeypatch.setattr(
+        BaselineModel,
+        "save_to_db",
+        lambda self, db, **kwargs: saved.append(self),
+    )
+    monkeypatch.setattr(
+        PersonalModel,
+        "save_to_db",
+        lambda self, db, **kwargs: saved.append(self),
+    )
+    monkeypatch.setattr(
+        "chess_teacher.pipelines.neural_network.model_tree.reset_training_queues",
+        lambda db, dry_run=False: 3,
+    )
+
+    result = start_new_model_tree(object(), archive_all=True)
+
+    assert result.archive_all is True
+    assert result.queue_rows == 3
+    assert {(c.kind, c.version, c.cleared_parent_baseline) for c in result.changes} == {
+        ("baseline", "v3", True),
+        ("personal", "v2", False),
+        ("personal", "v1", False),
+    }
+    assert any(isinstance(row, BaselineModel) and row.version == "v3" for row in saved)
+    assert all(
+        not isinstance(row, BaselineModel) or row.is_parent_baseline is False for row in saved
+    )
+
+
 def test_cli_dry_run_does_not_apply(monkeypatch, capsys) -> None:
     db = object()
-    calls: list[bool] = []
+    calls: list[tuple[bool, bool]] = []
 
     class _Result:
         changes = ()
         queue_rows = 2
         cleared_scopes = ()
+        archive_all = False
 
     monkeypatch.setattr("scripts.ops.start_model_tree.get_db_client", lambda: db)
 
-    def _start(client, dry_run=False):
+    def _start(client, dry_run=False, archive_all=False):
         assert client is db
-        calls.append(dry_run)
+        calls.append((dry_run, archive_all))
         return _Result()
 
     monkeypatch.setattr("scripts.ops.start_model_tree.start_new_model_tree", _start)
 
     assert main(["--dry-run"]) == 0
 
-    assert calls == [True]
+    assert calls == [(True, False)]
     assert "2 train rows" in capsys.readouterr().out
 
 
-def test_cli_yes_applies_after_preview(monkeypatch, capsys) -> None:
-    calls: list[bool] = []
+def test_cli_all_yes_applies_nuclear(monkeypatch, capsys) -> None:
+    calls: list[tuple[bool, bool]] = []
+    cache_cleared: list[bool] = []
 
     class _Result:
         changes = ()
         queue_rows = 0
         cleared_scopes = ()
+        archive_all = True
 
     monkeypatch.setattr("scripts.ops.start_model_tree.get_db_client", lambda: object())
 
-    def _start(client, dry_run=False):
-        calls.append(dry_run)
+    def _start(client, dry_run=False, archive_all=False):
+        calls.append((dry_run, archive_all))
         return _Result()
 
     monkeypatch.setattr("scripts.ops.start_model_tree.start_new_model_tree", _start)
+    monkeypatch.setattr(
+        "scripts.ops.start_model_tree.invalidate_baseline_presets_cache",
+        lambda: cache_cleared.append(True),
+    )
+
+    assert main(["--all", "--yes"]) == 0
+
+    assert calls == [(True, True), (False, True)]
+    assert cache_cleared == [True]
+    out = capsys.readouterr().out
+    assert "Mode: all models (nuclear)" in out
+
+
+def test_cli_yes_applies_after_preview(monkeypatch, capsys) -> None:
+    calls: list[tuple[bool, bool]] = []
+
+    class _Result:
+        changes = ()
+        queue_rows = 0
+        cleared_scopes = ()
+        archive_all = False
+
+    monkeypatch.setattr("scripts.ops.start_model_tree.get_db_client", lambda: object())
+
+    def _start(client, dry_run=False, archive_all=False):
+        calls.append((dry_run, archive_all))
+        return _Result()
+
+    monkeypatch.setattr("scripts.ops.start_model_tree.start_new_model_tree", _start)
+    monkeypatch.setattr(
+        "scripts.ops.start_model_tree.invalidate_baseline_presets_cache",
+        lambda: None,
+    )
 
     assert main(["--yes"]) == 0
 
-    assert calls == [True, False]
+    assert calls == [(True, False), (False, False)]
     out = capsys.readouterr().out
     assert "Would reset" in out
     assert "Reset both training queues" in out
@@ -267,11 +346,12 @@ def test_cli_refuses_without_yes_when_stdin_is_not_a_tty(monkeypatch) -> None:
         changes = ()
         queue_rows = 0
         cleared_scopes = ()
+        archive_all = False
 
     monkeypatch.setattr("scripts.ops.start_model_tree.get_db_client", lambda: object())
     monkeypatch.setattr(
         "scripts.ops.start_model_tree.start_new_model_tree",
-        lambda client, dry_run=False: _Result(),
+        lambda client, dry_run=False, archive_all=False: _Result(),
     )
     monkeypatch.setattr("scripts.ops.start_model_tree.sys.stdin", _Stdin())
 
