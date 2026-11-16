@@ -12,6 +12,7 @@ from chess_teacher.pipelines.neural_network.models import (
     BaselineModel,
     BaselineModelStatus,
     PersonalModel,
+    TrainingState,
 )
 from chess_teacher.pipelines.neural_network.training_progress import (
     MetricKind,
@@ -31,7 +32,7 @@ from chess_teacher.pipelines.neural_network.training_scores import (
     training_score_from_eval,
 )
 from streamlit_utils.training_chart import build_score_chart
-from streamlit_utils.training_lineage import lineage_markup
+from streamlit_utils.training_lineage import lineage_mermaid
 
 
 def _when(hour: int) -> datetime:
@@ -234,15 +235,21 @@ def test_lineage_puts_the_personal_chain_beside_its_baseline() -> None:
     assert [row.baseline.version for row in layout.trunk] == ["v2", "v1"]
     assert [node.version for node in layout.trunk[0].branch] == ["v1", "v2"]
     assert "Parent" in layout.trunk[0].baseline.meta
+    assert layout.trunk[0].baseline.is_parent is True
     assert layout.trunk[0].branch[0].title == "You v1"
     assert layout.trunk[0].branch[0].meta == "Replaced · from baseline v2"
     assert layout.trunk[0].branch[1].meta == "Promoted · from v1"
     assert [node.version for node in layout.unattached] == ["v9"]
-    markup = lineage_markup(layout)
-    assert "You v2" in markup
-    assert "Your models with no baseline parent" in markup
-    assert "promoted" in markup
-    assert "<script" not in markup
+    diagram = lineage_mermaid(layout)
+    assert diagram.startswith("flowchart LR")
+    assert "baseline_track" in diagram
+    assert "yours_track" in diagram
+    assert "You v1" in diagram
+    assert "You v2" in diagram
+    assert "promotedParent" in diagram or "parent" in diagram
+    assert "b_v2 -.->" in diagram
+    assert diagram.index("b_v1") < diagram.index("b_v2")
+    assert "<script" not in diagram
 
 
 def test_dual_axis_chart_keeps_accuracy_and_pawns_independent() -> None:
@@ -286,8 +293,44 @@ def test_load_keeps_only_this_user_and_known_models(monkeypatch) -> None:
         "fetch_all_from_db",
         lambda _db, **_kwargs: [*progress.scores, other, orphan],
     )
+    monkeypatch.setattr(
+        TrainingState,
+        "for_baseline",
+        lambda _db: TrainingState(scope="baseline"),
+    )
     loaded = load_training_progress(MagicMock(), "user-1")
     assert {score.model_id for score in loaded.scores} == {
         score.model_id for score in progress.scores
     }
     assert len(loaded.personals) == 3
+    assert loaded.model_tree_started_at is None
+
+
+def test_load_hides_models_before_nuclear_cutoff(monkeypatch) -> None:
+    progress = _progress()
+    cutoff = _when(3)
+    monkeypatch.setattr(
+        BaselineModel,
+        "fetch_all_ordered",
+        lambda _db: list(progress.baselines),
+    )
+    monkeypatch.setattr(
+        PersonalModel,
+        "rows_for_user",
+        lambda _db, user_id: list(progress.personals),
+    )
+    monkeypatch.setattr(
+        TrainingScore,
+        "fetch_all_from_db",
+        lambda _db, **_kwargs: list(progress.scores),
+    )
+    monkeypatch.setattr(
+        TrainingState,
+        "for_baseline",
+        lambda _db: TrainingState(scope="baseline", model_tree_started_at=cutoff),
+    )
+    loaded = load_training_progress(MagicMock(), "user-1")
+    assert {model.version for model in loaded.baselines} == {"v2"}
+    assert {model.version for model in loaded.personals} == {"v1", "v2"}
+    assert {score.model_id for score in loaded.scores} == {"base-v2", "me-v1", "me-v2"}
+    assert loaded.model_tree_started_at == cutoff

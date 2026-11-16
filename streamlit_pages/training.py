@@ -10,17 +10,13 @@ from chess_teacher.pipelines.neural_network.training_progress import (
     SUBJECT_OPTIONS,
     WEIGHT_OPTIONS,
     SeriesSelection,
-    chart_points,
-    lineage_layout,
     load_training_progress,
-    score_table_records,
 )
 from chess_teacher.utils.db.client import get_db_client
 from streamlit_utils.login import require_authenticated_user
 from streamlit_utils.page_config import configure_page
 from streamlit_utils.page_logging import log_page_view
-from streamlit_utils.training_chart import build_score_chart
-from streamlit_utils.training_lineage import render_lineage
+from streamlit_utils.training_viz import format_cutoff_caption, render_training_body
 
 
 def _labels(options: tuple[tuple[object, str], ...], selected: frozenset[object]) -> list[str]:
@@ -85,52 +81,13 @@ st.caption(
 )
 
 progress = load_training_progress(db_client, user.user_id)
+cutoff_note = format_cutoff_caption(progress.model_tree_started_at)
+if cutoff_note:
+    st.caption(cutoff_note)
+
 if not progress.baselines and not progress.personals:
     st.info("No training models yet.")
     st.stop()
 
-st.subheader("Scores")
 selection = _selection_from_widgets()
-points = chart_points(progress, selection)
-chart = build_score_chart(points)
-if chart is None:
-    st.info("No scores for the selected lines.")
-else:
-    has_accuracy = any(point.axis.value == "accuracy" for point in points)
-    has_pawns = any(point.axis.value == "pawns" for point in points)
-    if has_accuracy and has_pawns:
-        st.caption(
-            "Solid lines are accuracy, on the left. Dashed lines are the pawn gap, on the right."
-        )
-    st.altair_chart(chart, width="stretch")
-
-st.subheader("Score table")
-records = score_table_records(progress)
-if records:
-    st.caption(
-        "Every stored score for the baseline and your models. The toggles above apply to the graph."
-    )
-    number = st.column_config.NumberColumn
-    column_config: dict[str, object] = {
-        "Scored": st.column_config.DatetimeColumn("Scored"),
-        "n": number("n", format="%d"),
-        "n agree": number("n agree", format="%d"),
-        "n disagree": number("n disagree", format="%d"),
-    }
-    count_columns = {"Scored", "Model", "Status", "Parent baseline", "n", "n agree", "n disagree"}
-    for column in records[0]:
-        if column not in count_columns:
-            column_config[column] = number(column, format="%.3f")
-    st.dataframe(records, hide_index=True, width="stretch", column_config=column_config)
-else:
-    st.info("No validation scores stored yet.")
-
-st.subheader("Lineage")
-st.caption(
-    "The trunk is the baseline. Your models sit beside the baseline they were trained from. "
-    "Promoted is the model currently served. Replaced was served and then swapped out. "
-    "Parent is the baseline later personal runs warm-start from."
-)
-if not progress.personals:
-    st.caption("You do not have a personal model yet.")
-render_lineage(lineage_layout(progress))
+render_training_body(progress, selection)
