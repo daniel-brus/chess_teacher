@@ -52,7 +52,8 @@ st.title("Run the pipeline")
 _PIPELINE_RESULT_KEY = "pipeline_result"
 
 accounts = user.get_linked_accounts(db_client)
-namespace = get_env_variable("K8S_NAMESPACE") if accounts else ""
+# Pods get this from the ConfigMap; laptop Streamlit (Doppler) does not.
+namespace = get_env_variable("K8S_NAMESPACE", "chess-teacher") if accounts else ""
 user_jobs = list_user_pipeline_jobs(namespace=namespace, user_id=user.user_id) if accounts else []
 active_job = next(
     (job for job in user_jobs if pipeline_job_state(job)[0] in {"pending", "running"}),

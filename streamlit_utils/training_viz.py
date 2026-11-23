@@ -22,7 +22,7 @@ def render_training_body(
     progress: TrainingProgress,
     selection: SeriesSelection,
 ) -> None:
-    """Score chart, Mermaid lineage, then score table."""
+    """Score chart, lineage diagram, then score table."""
     points = chart_points(progress, selection)
     layout = lineage_layout(progress)
 
@@ -41,9 +41,9 @@ def render_training_body(
 
     st.subheader("Lineage")
     st.caption(
-        "Mermaid dual tracks in process order (oldest → newest, left → right): "
-        "Baseline on top, Yours below. Dotted links show which baseline a personal run came from. "
-        "Green = promoted. Gold border = parent baseline."
+        "Two tracks (Baseline | Yours), newest toward the top. "
+        "Dotted horizontal = personal trained directly on that baseline. "
+        "Solid arrows = weight parent → child."
     )
     if not progress.personals:
         st.caption("You do not have a personal model yet.")
