@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock
 
 from chess_teacher.pipelines.neural_network.candidate_eval import MAX_CANDIDATES, MOVE_FEAT_DIM
@@ -15,11 +15,14 @@ from chess_teacher.pipelines.neural_network.models import (
     TrainingState,
 )
 from chess_teacher.pipelines.neural_network.training_progress import (
+    LineageLayout,
+    LineageNode,
     MetricKind,
     SeriesSelection,
     SliceKind,
     SubjectKind,
     TrainingProgress,
+    TrunkRow,
     WeightKind,
     chart_points,
     lineage_layout,
@@ -32,7 +35,12 @@ from chess_teacher.pipelines.neural_network.training_scores import (
     training_score_from_eval,
 )
 from streamlit_utils.training_chart import build_score_chart
-from streamlit_utils.training_lineage import lineage_mermaid
+from streamlit_utils.training_lineage import (
+    _DEFAULT_MAX_EVENTS,
+    _layout_boxes,
+    _place_chronological,
+    lineage_edges,
+)
 
 
 def _when(hour: int) -> datetime:
@@ -240,16 +248,140 @@ def test_lineage_puts_the_personal_chain_beside_its_baseline() -> None:
     assert layout.trunk[0].branch[0].meta == "Replaced · from baseline v2"
     assert layout.trunk[0].branch[1].meta == "Promoted · from v1"
     assert [node.version for node in layout.unattached] == ["v9"]
-    diagram = lineage_mermaid(layout)
-    assert diagram.startswith("flowchart LR")
-    assert "baseline_track" in diagram
-    assert "yours_track" in diagram
-    assert "You v1" in diagram
-    assert "You v2" in diagram
-    assert "promotedParent" in diagram or "parent" in diagram
-    assert "b_v2 -.->" in diagram
-    assert diagram.index("b_v1") < diagram.index("b_v2")
-    assert "<script" not in diagram
+    edges = lineage_edges(layout)
+    baseline_solid = {
+        (edge.source, edge.target)
+        for edge in edges
+        if edge.style == "solid" and edge.source_kind == "baseline"
+    }
+    personal_solid = {
+        (edge.source, edge.target)
+        for edge in edges
+        if edge.style == "solid" and edge.source_kind == "personal"
+    }
+    dotted = {(edge.source, edge.target) for edge in edges if edge.style == "dotted"}
+    assert baseline_solid == {("v1", "v2")}
+    assert personal_solid == {("v1", "v2")}
+    # Only the arm root gets the dotted baseline link.
+    assert dotted == {("v2", "v1")}
+
+
+def _dual_track_layout() -> LineageLayout:
+    """Two baseline→personal forks plus one personal child (weight parentage)."""
+    t0 = datetime(2026, 11, 10, 12, 0, tzinfo=UTC)
+
+    def at(hours: int) -> datetime:
+        return t0 + timedelta(hours=hours)
+
+    def baseline(
+        version: str,
+        hours: int,
+        *,
+        status: str,
+        parent: bool,
+        parent_version: str | None,
+    ) -> LineageNode:
+        return LineageNode(
+            title=version,
+            meta="",
+            status_key=status,
+            trained_at=at(hours),
+            version=version,
+            parent_version=parent_version,
+            parent_kind=None,
+            is_parent=parent,
+        )
+
+    def personal(
+        version: str,
+        hours: int,
+        *,
+        status: str,
+        parent_version: str | None,
+        parent_kind: str | None,
+    ) -> LineageNode:
+        return LineageNode(
+            title=f"You {version}",
+            meta="",
+            status_key=status,
+            trained_at=at(hours),
+            version=version,
+            parent_version=parent_version,
+            parent_kind=parent_kind,
+            is_parent=False,
+        )
+
+    return LineageLayout(
+        trunk=(
+            TrunkRow(
+                baseline=baseline(
+                    "v122", 60, status="promoted", parent=True, parent_version="v121"
+                ),
+                branch=(
+                    personal(
+                        "v3",
+                        72,
+                        status="promoted",
+                        parent_version="v2",
+                        parent_kind="personal",
+                    ),
+                    personal(
+                        "v2",
+                        66,
+                        status="replaced",
+                        parent_version="v122",
+                        parent_kind="baseline",
+                    ),
+                ),
+            ),
+            TrunkRow(
+                baseline=baseline(
+                    "v121", 36, status="replaced", parent=False, parent_version="v120"
+                ),
+                branch=(
+                    personal(
+                        "v1",
+                        42,
+                        status="replaced",
+                        parent_version="v121",
+                        parent_kind="baseline",
+                    ),
+                ),
+            ),
+            TrunkRow(
+                baseline=baseline("v120", 0, status="replaced", parent=False, parent_version=None),
+                branch=(),
+            ),
+        ),
+        unattached=(),
+    )
+
+
+def test_lineage_dual_track_weight_parentage_edges() -> None:
+    edges = lineage_edges(_dual_track_layout())
+    dotted = {(edge.source, edge.target) for edge in edges if edge.style == "dotted"}
+    personal_solid = {
+        (edge.source, edge.target)
+        for edge in edges
+        if edge.style == "solid" and edge.source_kind == "personal"
+    }
+    assert dotted == {("v121", "v1"), ("v122", "v2")}
+    assert personal_solid == {("v2", "v3")}
+    assert ("v1", "v2") not in personal_solid
+
+
+def test_lineage_layout_is_two_tracks_with_shared_fork_rows() -> None:
+    placed, _total = _place_chronological(_dual_track_layout(), max_events=_DEFAULT_MAX_EVENTS)
+    boxes = _layout_boxes(placed)
+    xs = {round(box.x, 1) for box in boxes.values()}
+    assert len(xs) == 2
+    # Direct baseline→personal forks share a row.
+    assert boxes["baseline:v121"].y == boxes["personal:v1"].y
+    assert boxes["baseline:v122"].y == boxes["personal:v2"].y
+    # Newer fork above older fork.
+    assert boxes["baseline:v122"].y < boxes["baseline:v121"].y
+    # Personal child stays on the Yours track (same x as its arm root).
+    assert boxes["personal:v3"].x == boxes["personal:v2"].x
 
 
 def test_dual_axis_chart_keeps_accuracy_and_pawns_independent() -> None:
