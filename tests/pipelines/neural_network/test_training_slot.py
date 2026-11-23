@@ -79,6 +79,7 @@ def _step(
     clock: dict[str, float],
     sleeps: list[float],
     wait_seconds: float = 60,
+    memory_wait_seconds: float = 600,
     poll_seconds: float = 30,
 ) -> WaitForTrainingSlotStep:
     def _memory() -> bool:
@@ -96,6 +97,7 @@ def _step(
         monotonic=lambda: clock["t"],
         poll_seconds=poll_seconds,
         wait_seconds=wait_seconds,
+        memory_wait_seconds=memory_wait_seconds,
     )
 
 
@@ -119,7 +121,7 @@ def test_free_slot_and_memory_acquire_without_a_cleanup_hook() -> None:
     slot = _Slot()
     context = _context()
     sleeps: list[float] = []
-    step = _step(scheme, slot, memory=[True], clock={"t": 0}, sleeps=sleeps)
+    step = _step(scheme, slot, memory=[True, True], clock={"t": 0}, sleeps=sleeps)
     step.run(MagicMock(), context)  # type: ignore[arg-type]
     assert sleeps == []
     assert slot.holder == "run-1"
@@ -136,7 +138,7 @@ def test_release_step_drops_the_holder() -> None:
     assert slot.release_calls == 1
 
 
-def test_low_memory_releases_the_slot_and_tries_again() -> None:
+def test_low_memory_defers_without_taking_the_slot_then_acquires() -> None:
     scheme = _Scheme()
     slot = _Slot()
     context = _context()
@@ -144,14 +146,38 @@ def test_low_memory_releases_the_slot_and_tries_again() -> None:
     step = _step(
         scheme,
         slot,
-        memory=[False, True],
+        memory=[False, True, True],
         clock={"t": 0.0},
         sleeps=sleeps,
     )
     step.run(MagicMock(), context)  # type: ignore[arg-type]
     assert sleeps == [30]
     assert slot.holder == "run-1"
-    assert slot.release_calls == 1
+    assert slot.release_calls == 0
+    assert slot.acquire_calls == 1
+
+
+def test_memory_wait_cap_skips_before_slot_wait() -> None:
+    scheme = _Scheme()
+    slot = _Slot()
+    context = _context()
+    sleeps: list[float] = []
+    step = _step(
+        scheme,
+        slot,
+        memory=[False, False, False],
+        clock={"t": 0.0},
+        sleeps=sleeps,
+        wait_seconds=600,
+        memory_wait_seconds=45,
+        poll_seconds=30,
+    )
+    step.run(MagicMock(), context)  # type: ignore[arg-type]
+    assert sleeps == [30, 15]
+    assert scheme.checked == 1
+    assert context.extras[SKIP_KEY] is True
+    assert slot.holder is None
+    assert slot.acquire_calls == 0
 
 
 def test_busy_slot_waits_until_it_is_free() -> None:
@@ -159,7 +185,13 @@ def test_busy_slot_waits_until_it_is_free() -> None:
     slot = _Slot(answers=[False, True])
     context = _context()
     sleeps: list[float] = []
-    step = _step(scheme, slot, memory=[True], clock={"t": 0.0}, sleeps=sleeps)
+    step = _step(
+        scheme,
+        slot,
+        memory=[True, True, True],
+        clock={"t": 0.0},
+        sleeps=sleeps,
+    )
     step.run(MagicMock(), context)  # type: ignore[arg-type]
     assert sleeps == [30]
     assert slot.holder == "run-1"

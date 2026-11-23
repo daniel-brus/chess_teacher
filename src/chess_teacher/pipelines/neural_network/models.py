@@ -370,6 +370,7 @@ class TrainingState(TableDataClass):
     last_trained_data_cutoff: datetime | None = None
     last_min_data_check_at: datetime | None = None
     personal_queue_baseline: str | None = None
+    model_tree_started_at: datetime | None = None
 
     @classmethod
     def get_yaml_path(cls) -> Path:
@@ -414,6 +415,9 @@ class TrainingState(TableDataClass):
 
     def with_personal_queue_baseline(self, version: str) -> TrainingState:
         return replace(self, personal_queue_baseline=version)
+
+    def with_model_tree_started_at(self, started_at: datetime) -> TrainingState:
+        return replace(self, model_tree_started_at=started_at)
 
 
 @dataclass(frozen=True)

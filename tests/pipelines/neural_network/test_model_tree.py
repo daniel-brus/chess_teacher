@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from chess_teacher.pipelines.neural_network.model_tree import (
     eval_metrics_are_hybrid_board,
     format_model_tree_reset,
+    stamp_model_tree_started_at,
     start_new_model_tree,
 )
 from chess_teacher.pipelines.neural_network.models import (
@@ -215,6 +216,7 @@ def test_start_archives_all_including_hybrid(monkeypatch) -> None:
     hybrid_personal = _personal("user-a", "v2", BaselineModelStatus.PRODUCTION, hybrid=True)
     flat_personal = _personal("user-a", "v1", BaselineModelStatus.CANDIDATE)
     saved: list[object] = []
+    stamp_at = datetime(2026, 11, 15, 12, tzinfo=UTC)
 
     monkeypatch.setattr(BaselineModel, "fetch_all_ordered", lambda db: [hybrid_prod])
     monkeypatch.setattr(
@@ -224,12 +226,26 @@ def test_start_archives_all_including_hybrid(monkeypatch) -> None:
     )
     monkeypatch.setattr(TrainingState, "fetch_all_from_db", lambda db, **kwargs: [])
     monkeypatch.setattr(
+        TrainingState,
+        "for_baseline",
+        lambda db: TrainingState(scope="baseline"),
+    )
+    monkeypatch.setattr(
+        "chess_teacher.pipelines.neural_network.model_tree.get_current_datetime",
+        lambda: stamp_at,
+    )
+    monkeypatch.setattr(
         BaselineModel,
         "save_to_db",
         lambda self, db, **kwargs: saved.append(self),
     )
     monkeypatch.setattr(
         PersonalModel,
+        "save_to_db",
+        lambda self, db, **kwargs: saved.append(self),
+    )
+    monkeypatch.setattr(
+        TrainingState,
         "save_to_db",
         lambda self, db, **kwargs: saved.append(self),
     )
@@ -242,6 +258,7 @@ def test_start_archives_all_including_hybrid(monkeypatch) -> None:
 
     assert result.archive_all is True
     assert result.queue_rows == 3
+    assert result.model_tree_started_at == stamp_at
     assert {(c.kind, c.version, c.cleared_parent_baseline) for c in result.changes} == {
         ("baseline", "v3", True),
         ("personal", "v2", False),
@@ -251,6 +268,11 @@ def test_start_archives_all_including_hybrid(monkeypatch) -> None:
     assert all(
         not isinstance(row, BaselineModel) or row.is_parent_baseline is False for row in saved
     )
+    stamped = [row for row in saved if isinstance(row, TrainingState)]
+    assert len(stamped) == 1
+    assert stamped[0].model_tree_started_at == stamp_at
+    report = format_model_tree_reset(result, applied=True)
+    assert "Stamped model_tree_started_at=" in report
 
 
 def test_cli_dry_run_does_not_apply(monkeypatch, capsys) -> None:
@@ -262,6 +284,7 @@ def test_cli_dry_run_does_not_apply(monkeypatch, capsys) -> None:
         queue_rows = 2
         cleared_scopes = ()
         archive_all = False
+        model_tree_started_at = None
 
     monkeypatch.setattr("scripts.ops.start_model_tree.get_db_client", lambda: db)
 
@@ -281,12 +304,14 @@ def test_cli_dry_run_does_not_apply(monkeypatch, capsys) -> None:
 def test_cli_all_yes_applies_nuclear(monkeypatch, capsys) -> None:
     calls: list[tuple[bool, bool]] = []
     cache_cleared: list[bool] = []
+    stamp_at = datetime(2026, 11, 15, 12, tzinfo=UTC)
 
     class _Result:
         changes = ()
         queue_rows = 0
         cleared_scopes = ()
         archive_all = True
+        model_tree_started_at = stamp_at
 
     monkeypatch.setattr("scripts.ops.start_model_tree.get_db_client", lambda: object())
 
@@ -306,6 +331,7 @@ def test_cli_all_yes_applies_nuclear(monkeypatch, capsys) -> None:
     assert cache_cleared == [True]
     out = capsys.readouterr().out
     assert "Mode: all models (nuclear)" in out
+    assert "model_tree_started_at=" in out
 
 
 def test_cli_yes_applies_after_preview(monkeypatch, capsys) -> None:
@@ -316,6 +342,7 @@ def test_cli_yes_applies_after_preview(monkeypatch, capsys) -> None:
         queue_rows = 0
         cleared_scopes = ()
         archive_all = False
+        model_tree_started_at = None
 
     monkeypatch.setattr("scripts.ops.start_model_tree.get_db_client", lambda: object())
 
@@ -337,6 +364,51 @@ def test_cli_yes_applies_after_preview(monkeypatch, capsys) -> None:
     assert "Reset both training queues" in out
 
 
+def test_cli_stamp_lineage_cutoff(monkeypatch, capsys) -> None:
+    calls: list[bool] = []
+    stamp_at = datetime(2026, 11, 14, 8, tzinfo=UTC)
+
+    monkeypatch.setattr("scripts.ops.start_model_tree.get_db_client", lambda: object())
+
+    def _stamp(db, *, started_at=None, dry_run=False):
+        calls.append(dry_run)
+        return stamp_at
+
+    monkeypatch.setattr("scripts.ops.start_model_tree.stamp_model_tree_started_at", _stamp)
+
+    assert main(["--stamp-lineage-cutoff", "--yes"]) == 0
+    assert calls == [True, False]
+    assert "Stamped model_tree_started_at=" in capsys.readouterr().out
+
+
+def test_stamp_uses_earliest_live_baseline(monkeypatch) -> None:
+    older = _baseline("v1", BaselineModelStatus.ARCHIVED)
+    live = _baseline("v2", BaselineModelStatus.PRODUCTION)
+    live = BaselineModel(
+        id=live.id,
+        version=live.version,
+        trained_at=datetime(2026, 11, 14, 9, tzinfo=UTC),
+        status=live.status,
+        model_uri=live.model_uri,
+        eval_metrics=live.eval_metrics,
+    )
+    saved: list[TrainingState] = []
+    monkeypatch.setattr(BaselineModel, "fetch_all_ordered", lambda db: [older, live])
+    monkeypatch.setattr(
+        TrainingState,
+        "for_baseline",
+        lambda db: TrainingState(scope="baseline"),
+    )
+    monkeypatch.setattr(
+        TrainingState,
+        "save_to_db",
+        lambda self, db, **kwargs: saved.append(self),
+    )
+    stamped = stamp_model_tree_started_at(object())
+    assert stamped == live.trained_at
+    assert saved[0].model_tree_started_at == live.trained_at
+
+
 def test_cli_refuses_without_yes_when_stdin_is_not_a_tty(monkeypatch) -> None:
     class _Stdin:
         def isatty(self) -> bool:
@@ -347,6 +419,7 @@ def test_cli_refuses_without_yes_when_stdin_is_not_a_tty(monkeypatch) -> None:
         queue_rows = 0
         cleared_scopes = ()
         archive_all = False
+        model_tree_started_at = None
 
     monkeypatch.setattr("scripts.ops.start_model_tree.get_db_client", lambda: object())
     monkeypatch.setattr(

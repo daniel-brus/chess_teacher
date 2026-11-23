@@ -1,8 +1,8 @@
 """Pipeline steps shared by every training scheme.
 
-Preparation stays out of the TensorFlow steps so a failed fit or score retries
-that attempt without re-querying. Eval datums are loaded once per run and
-reused for the candidate and the served model.
+Queue gating runs first; the train batch loads only after the global slot and
+host memory clear. Eval datums load once per run and are reused for the
+candidate and the served model.
 """
 
 from __future__ import annotations
@@ -21,6 +21,7 @@ from chess_teacher.pipelines.neural_network.training_scheme import (
     TrainingScheme,
 )
 from chess_teacher.pipelines.neural_network.training_slot import (
+    TRAINING_SLOT_MEMORY_WAIT_LIMIT,
     TRAINING_SLOT_POLL_SECONDS,
     TRAINING_SLOT_WAIT_LIMIT,
     DbTrainingSlot,
@@ -61,8 +62,12 @@ def _model_id(handle: ModelHandle) -> str:
 class WaitForTrainingSlotStep(PipelineStep):
     """Wait until this run holds the global training slot and the host has memory.
 
-    This sits immediately before the TensorFlow steps. ``ReleaseTrainingSlot`` drops
-    the slot once that child has exited, including when the fit or the score failed.
+    Runs before the train batch is loaded so a starved pod does not pin tensors
+    for hours. ``ReleaseTrainingSlot`` drops the slot once the TensorFlow child
+    has exited, including when the fit or the score failed.
+
+    A busy slot may wait up to ``wait_seconds``. Low MemAvailable uses the
+    shorter ``memory_wait_seconds`` budget so overlapping crons die fast.
     """
 
     def __init__(
@@ -75,6 +80,7 @@ class WaitForTrainingSlotStep(PipelineStep):
         monotonic: Callable[[], float] = time.monotonic,
         poll_seconds: float = TRAINING_SLOT_POLL_SECONDS,
         wait_seconds: float = TRAINING_SLOT_WAIT_LIMIT.total_seconds(),
+        memory_wait_seconds: float = TRAINING_SLOT_MEMORY_WAIT_LIMIT.total_seconds(),
     ) -> None:
         super().__init__(name="WaitForTrainingSlot", max_retries=0)
         self._scheme = scheme
@@ -84,6 +90,7 @@ class WaitForTrainingSlotStep(PipelineStep):
         self._monotonic = monotonic
         self._poll_seconds = poll_seconds
         self._wait_seconds = wait_seconds
+        self._memory_wait_seconds = memory_wait_seconds
 
     def run(self, db_client: DatabaseClient, context: PipelineContext) -> None:
         if _skipped(context):
@@ -105,12 +112,21 @@ class WaitForTrainingSlotStep(PipelineStep):
 
         slot = self._slot or DbTrainingSlot(db_client)
         started = self._monotonic()
+        memory_waited = 0.0
         while True:
-            if slot.try_acquire(run_id, now=get_current_datetime()):
+            memory_blocked = False
+            if not self._memory_available():
+                memory_blocked = True
+                logger.info(
+                    "Training slot deferred: MemAvailable is below the training minimum. run_id=%s",
+                    run_id,
+                )
+            elif slot.try_acquire(run_id, now=get_current_datetime()):
                 if self._memory_available():
                     logger.info("Training slot acquired run_id=%s", run_id)
                     return
                 slot.release(run_id)
+                memory_blocked = True
                 logger.info(
                     "Training slot released: MemAvailable is below the training minimum. run_id=%s",
                     run_id,
@@ -119,6 +135,18 @@ class WaitForTrainingSlotStep(PipelineStep):
                 logger.info("Training slot busy run_id=%s", run_id)
 
             elapsed = self._monotonic() - started
+            if memory_blocked and memory_waited >= self._memory_wait_seconds:
+                self._scheme.note_checked(db_client)
+                logger.warning(
+                    "Training memory wait exceeded %.0fs; skipping this training round. run_id=%s",
+                    self._memory_wait_seconds,
+                    run_id,
+                )
+                context.extras[SKIP_KEY] = True
+                context.progress_warning(
+                    "Host memory stayed too low for training; skipping this round."
+                )
+                return
             if elapsed >= self._wait_seconds:
                 self._scheme.note_checked(db_client)
                 logger.warning(
@@ -132,9 +160,20 @@ class WaitForTrainingSlotStep(PipelineStep):
                 )
                 return
 
-            delay = min(self._poll_seconds, self._wait_seconds - elapsed)
-            context.progress_update("Waiting for another training run to finish...")
+            remaining_slot = self._wait_seconds - elapsed
+            remaining_mem = (
+                self._memory_wait_seconds - memory_waited if memory_blocked else remaining_slot
+            )
+            delay = min(self._poll_seconds, remaining_slot, remaining_mem)
+            if delay <= 0:
+                continue
+            if memory_blocked:
+                context.progress_update("Waiting for enough host memory to train...")
+            else:
+                context.progress_update("Waiting for another training run to finish...")
             self._sleep(delay)
+            if memory_blocked:
+                memory_waited += delay
 
 
 class ReleaseTrainingSlotStep(PipelineStep):
@@ -160,7 +199,11 @@ class ReleaseTrainingSlotStep(PipelineStep):
 
 
 class PrepareTrainingStep(PipelineStep):
-    """Count pending moves, then load the parent, the served model, and the train batch."""
+    """Align the queue and decide whether this round has enough pending moves.
+
+    Does not load the train batch. That waits until ``LoadTrainingBatch`` after
+    the global slot and host memory are secured.
+    """
 
     def __init__(self, scheme: TrainingScheme) -> None:
         super().__init__(name="PrepareTraining")
@@ -182,19 +225,38 @@ class PrepareTrainingStep(PipelineStep):
             context.extras[SKIP_KEY] = True
             return
 
+        context.extras[SKIP_KEY] = False
+        logger.info("PrepareTraining pending=%s (batch deferred until slot)", pending)
+
+
+class LoadTrainingBatchStep(PipelineStep):
+    """Resolve the parent and load the train batch after the training slot is held."""
+
+    def __init__(self, scheme: TrainingScheme) -> None:
+        super().__init__(name="LoadTrainingBatch")
+        self._scheme = scheme
+
+    def run(self, db_client: DatabaseClient, context: PipelineContext) -> None:
+        if _skipped(context):
+            return
+
+        pending = int(context.extras.get("pending_count") or 0)
         parent = self._scheme.resolve_parent(db_client)
         datums, game_ids = self._scheme.load_train_batch(db_client)
         context.extras["parent"] = parent
         context.extras["train_datums"] = datums
         context.extras["train_game_ids"] = game_ids
         if not datums:
-            logger.info("PrepareTraining skip: pending=%s but the batch was empty.", pending)
+            logger.info(
+                "LoadTrainingBatch skip: pending=%s but the batch was empty.",
+                pending,
+            )
             context.extras[SKIP_KEY] = True
             return
 
         context.extras[SKIP_KEY] = False
         logger.info(
-            "PrepareTraining pending=%s batch=%s games=%s parent=%s",
+            "LoadTrainingBatch pending=%s batch=%s games=%s parent=%s",
             pending,
             len(datums),
             len(game_ids),
@@ -606,13 +668,14 @@ def build_training_scheme_steps(
     Train and score share one child interpreter. The runner starts it at TrainModel
     and exits it after the last step that holds that object. On a platform run
     that can adopt a parent baseline, that last step scores the baseline inside
-    the same child. The training slot wraps that window and is dropped on the
-    next step.
+    the same child. The training slot is taken before the train batch is loaded,
+    and wraps the TensorFlow window until ``ReleaseTrainingSlot``.
     """
     tensorflow = StepProcess("chess_teacher.pipelines.neural_network.tf_worker")
     steps: list[PipelineStep] = [
         PrepareTrainingStep(scheme),
         WaitForTrainingSlotStep(scheme),
+        LoadTrainingBatchStep(scheme),
         TrainModelStep(process=tensorflow),
         PrepareEvaluationStep(scheme),
         ScoreEvaluationStep(process=tensorflow),

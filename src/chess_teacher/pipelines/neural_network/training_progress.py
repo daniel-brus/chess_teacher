@@ -14,6 +14,7 @@ from chess_teacher.pipelines.neural_network.models import (
     BaselineModel,
     BaselineModelStatus,
     PersonalModel,
+    TrainingState,
 )
 from chess_teacher.pipelines.neural_network.training_scores import TrainingScore
 from chess_teacher.utils.db.client import DatabaseClient
@@ -141,6 +142,7 @@ class TrainingProgress:
     baselines: tuple[BaselineModel, ...]
     personals: tuple[PersonalModel, ...]
     scores: tuple[TrainingScore, ...]
+    model_tree_started_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -163,6 +165,7 @@ class LineageNode:
     version: str
     parent_version: str | None
     parent_kind: str | None
+    is_parent: bool = False
 
 
 @dataclass(frozen=True)
@@ -180,9 +183,17 @@ class LineageLayout:
 
 
 def load_training_progress(db_client: DatabaseClient, user_id: str) -> TrainingProgress:
-    """Baseline models, this user's personal models, and their score rows."""
+    """Baseline models, this user's personal models, and their score rows.
+
+    When ``TrainingState.model_tree_started_at`` is set (nuclear ``--all``),
+    models trained before that instant are omitted from scores and lineage.
+    """
+    cutoff = TrainingState.for_baseline(db_client).model_tree_started_at
     baselines = tuple(BaselineModel.fetch_all_ordered(db_client))
     personals = tuple(PersonalModel.rows_for_user(db_client, user_id))
+    if cutoff is not None:
+        baselines = tuple(model for model in baselines if model.trained_at >= cutoff)
+        personals = tuple(model for model in personals if model.trained_at >= cutoff)
     where = (
         f"{generate_ident_is_literal('user_id', None)} OR "
         f"{generate_ident_is_literal('user_id', user_id)}"
@@ -198,7 +209,12 @@ def load_training_progress(db_client: DatabaseClient, user_id: str) -> TrainingP
         for score in scores
         if score.model_id in known and (score.user_id is None or score.user_id == user_id)
     )
-    return TrainingProgress(baselines=baselines, personals=personals, scores=kept)
+    return TrainingProgress(
+        baselines=baselines,
+        personals=personals,
+        scores=kept,
+        model_tree_started_at=cutoff,
+    )
 
 
 def series_label(
@@ -382,6 +398,7 @@ def _baseline_node(model: BaselineModel) -> LineageNode:
         version=model.version,
         parent_version=model.parent_version,
         parent_kind=None,
+        is_parent=model.is_parent_baseline,
     )
 
 
@@ -401,6 +418,7 @@ def _personal_node(model: PersonalModel) -> LineageNode:
         version=model.version,
         parent_version=model.parent_version,
         parent_kind=model.parent_kind,
+        is_parent=False,
     )
 
 

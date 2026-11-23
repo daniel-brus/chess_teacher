@@ -15,20 +15,25 @@ queues, and clears ``personal_queue_baseline``.
 
 ``archive_all=True`` (CLI ``--all``) is the nuclear reset: archive **every**
 non-archived baseline and personal row (including hybrid), clear **any**
-parent-baseline pointer, reset queues, and clear personal queue baselines.
-Use when the served graph is rotten even though metrics claim hybrid.
+parent-baseline pointer, reset queues, clear personal queue baselines, and
+stamp ``TrainingState.model_tree_started_at`` so the Training page drops
+pre-cutoff lineage and scores.
 
 Archived models stay playable. MLflow artifacts are not deleted.
 
 Run it once when the served architecture changes, or with ``archive_all`` for
 a full soft reset. A later default run archives nothing new if only hybrids
 remain, but it does replay the queues again.
+
+``stamp_model_tree_started_at`` backfills the Training cutoff without
+archiving (e.g. after a nuclear that ran before this field existed).
 """
 
 from __future__ import annotations
 
 import json
 from dataclasses import dataclass, replace
+from datetime import datetime
 
 from chess_teacher.pipelines.neural_network.models import (
     BaselineModel,
@@ -38,6 +43,7 @@ from chess_teacher.pipelines.neural_network.models import (
 )
 from chess_teacher.pipelines.neural_network.training_queue_reset import reset_training_queues
 from chess_teacher.utils.db.client import DatabaseClient
+from chess_teacher.utils.general_utils import get_current_datetime
 from chess_teacher.utils.logging import get_logger
 
 logger = get_logger()
@@ -84,6 +90,7 @@ class ModelTreeReset:
     queue_rows: int
     cleared_scopes: tuple[str, ...]
     archive_all: bool = False
+    model_tree_started_at: datetime | None = None
 
 
 def format_model_tree_reset(result: ModelTreeReset, *, applied: bool) -> str:
@@ -117,7 +124,40 @@ def format_model_tree_reset(result: ModelTreeReset, *, applied: bool) -> str:
         lines.append(f"{scope_verb} personal_queue_baseline on {scopes}.")
     else:
         lines.append("No personal_queue_baseline values to clear.")
+    if result.archive_all:
+        stamp_verb = "Stamped" if applied else "Would stamp"
+        when = result.model_tree_started_at.isoformat() if result.model_tree_started_at else "now"
+        lines.append(
+            f"{stamp_verb} model_tree_started_at={when} (Training page hides older lineage)."
+        )
     return "\n".join(lines)
+
+
+def stamp_model_tree_started_at(
+    db_client: DatabaseClient,
+    *,
+    started_at: datetime | None = None,
+    dry_run: bool = False,
+) -> datetime:
+    """Set Training lineage cutoff without archiving.
+
+    Default ``started_at`` is the earliest non-archived baseline ``trained_at``,
+    or ``now`` when no live baseline exists. Use after a nuclear that ran
+    before this column existed.
+    """
+    if started_at is None:
+        live = [
+            row
+            for row in BaselineModel.fetch_all_ordered(db_client)
+            if row.status != BaselineModelStatus.ARCHIVED
+        ]
+        started_at = min(row.trained_at for row in live) if live else get_current_datetime()
+    if dry_run:
+        return started_at
+    state = TrainingState.for_baseline(db_client)
+    state.with_model_tree_started_at(started_at).save_to_db(db_client)
+    logger.info("Stamped model_tree_started_at=%s", started_at.isoformat())
+    return started_at
 
 
 def start_new_model_tree(
@@ -135,7 +175,8 @@ def start_new_model_tree(
     start has no model to beat.
 
     Nuclear (``archive_all=True``): archive every non-archived baseline and
-    personal row (hybrid included) and clear any parent-baseline pointer.
+    personal row (hybrid included), clear any parent-baseline pointer, and
+    stamp ``model_tree_started_at`` so Training drops pre-cutoff lineage.
     """
     changes: list[ModelTreeRowChange] = []
 
@@ -207,18 +248,27 @@ def start_new_model_tree(
         replace(state, personal_queue_baseline=None).save_to_db(db_client)
         logger.info("Cleared personal_queue_baseline scope=%s", state.scope)
 
+    started_at: datetime | None = None
+    if archive_all:
+        started_at = get_current_datetime()
+        if not dry_run:
+            stamp_model_tree_started_at(db_client, started_at=started_at)
+
     result = ModelTreeReset(
         changes=tuple(changes),
         queue_rows=queue_rows,
         cleared_scopes=tuple(cleared_scopes),
         archive_all=archive_all,
+        model_tree_started_at=started_at,
     )
     logger.info(
-        "Model tree reset dry_run=%s archive_all=%s archived=%s queue_rows=%s cleared_scopes=%s",
+        "Model tree reset dry_run=%s archive_all=%s archived=%s queue_rows=%s "
+        "cleared_scopes=%s model_tree_started_at=%s",
         dry_run,
         archive_all,
         len(changes),
         queue_rows,
         len(cleared_scopes),
+        started_at.isoformat() if started_at else None,
     )
     return result

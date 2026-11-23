@@ -143,6 +143,10 @@ tables:
         data_type: text
         nullable: true
         comment: Parent baseline version this user's personal queue was last aligned to. NULL means not aligned yet.
+      - name: model_tree_started_at
+        data_type: timestamptz
+        nullable: true
+        comment: Nuclear tree cutoff. Training page hides models trained before this instant. Set by start_model_tree --all.
 
   game_split_assignments:
     schema: ml
