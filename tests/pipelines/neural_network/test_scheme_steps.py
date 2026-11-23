@@ -21,6 +21,7 @@ from chess_teacher.pipelines.neural_network.scheme_steps import (
     AdoptParentBaselineStep,
     AdvanceTrainingCursorStep,
     ApplyPromotionStep,
+    LoadTrainingBatchStep,
     PrepareEvaluationStep,
     PrepareTrainingStep,
     ScoreEvaluationStep,
@@ -172,15 +173,18 @@ def test_prepare_skips_without_loading_when_pending_is_low() -> None:
     assert "train_datums" not in context.extras
 
 
-def test_prepare_loads_parent_and_batch() -> None:
+def test_prepare_defers_batch_until_load_step() -> None:
     scheme = _Scheme()
     context = PipelineContext()
     PrepareTrainingStep(scheme).run(MagicMock(), context)  # type: ignore[arg-type]
     assert context.extras[SKIP_KEY] is False
+    assert context.extras["pending_count"] == scheme.pending
+    assert "train_datums" not in context.extras
+    assert scheme.aligned == 1
+    LoadTrainingBatchStep(scheme).run(MagicMock(), context)  # type: ignore[arg-type]
     assert context.extras["parent"] is scheme.parent
     assert "reference" not in context.extras
     assert context.extras["train_game_ids"] == ["g1"]
-    assert scheme.aligned == 1
 
 
 class _RecordingProcess:
@@ -345,6 +349,7 @@ def test_both_scopes_build_the_same_step_classes() -> None:
     shared = [
         "PrepareTraining",
         "WaitForTrainingSlot",
+        "LoadTrainingBatch",
         "TrainModel",
         "PrepareEvaluation",
         "ScoreEvaluation",
@@ -357,18 +362,18 @@ def test_both_scopes_build_the_same_step_classes() -> None:
     ]
     assert [step.name for step in personal] == shared
     assert [step.name for step in baseline] == [
-        *shared[:5],
+        *shared[:6],
         "ScoreParentBaseline",
-        *shared[5:],
+        *shared[6:],
     ]
-    assert baseline[2].process is baseline[4].process
-    assert baseline[2].process is baseline[5].process
-    assert baseline[2].process is not None
-    assert baseline[3].process is None
-    assert personal[2].process is personal[4].process
-    assert personal[5].name == "ReleaseTrainingSlot"
-    assert personal[5].process is None
-    assert personal[2].process is not baseline[2].process
+    assert baseline[3].process is baseline[5].process
+    assert baseline[3].process is baseline[6].process
+    assert baseline[3].process is not None
+    assert baseline[4].process is None
+    assert personal[3].process is personal[5].process
+    assert personal[6].name == "ReleaseTrainingSlot"
+    assert personal[6].process is None
+    assert personal[3].process is not baseline[3].process
 
 
 def test_promotion_blocks_a_disagree_drop() -> None:
