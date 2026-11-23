@@ -26,6 +26,9 @@ GLOBAL_TRAINING_SLOT = "global"
 TRAINING_SLOT_STALE_AFTER = timedelta(hours=3)
 # Stop waiting before the 6-hour per-user pipeline lock expires.
 TRAINING_SLOT_WAIT_LIMIT = timedelta(hours=4)
+# When the slot is free but MemAvailable stays low, bail quickly so waiting
+# pods die and free RAM. The long wait above is for a busy slot only.
+TRAINING_SLOT_MEMORY_WAIT_LIMIT = timedelta(minutes=10)
 TRAINING_SLOT_POLL_SECONDS = 30.0
 
 # The wait runs after this pipeline is already resident, so MemAvailable is
