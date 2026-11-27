@@ -43,14 +43,20 @@ doppler run --project chess-teacher --config prod_agent_triage -- .venv/Scripts/
 
 ## Cloud Automations (Cursor)
 
-**Preferred:** one Cursor secret — a Doppler **service token** with access to `prod_agent_triage` only.
+**Use a separate secret name** so general Cloud Agents keep their existing `DOPPLER_TOKEN`:
 
-1. Doppler → Project `chess-teacher` → Access → Service Tokens → create token for config `prod_agent_triage` (read).
-2. In the Cursor Automation / Cloud Agent environment, set:
-   - `DOPPLER_TOKEN` = that service token
+1. Doppler → Project `chess-teacher` → Access → Service Tokens → create token for config **`prod_agent_triage`** (read).
+2. In the Cursor Cloud Agent **environment** secrets, set:
+   - `DOPPLER_TOKEN_TRIAGE` = that service token
+   (leave existing `DOPPLER_TOKEN` alone for other tasks)
 3. Cloud Agent snapshot installs the Doppler CLI via `scripts/dev/cloud_agent_infra_install.sh`.
-4. Automation prompts wrap helpers with:
-   `doppler run --project chess-teacher --config prod_agent_triage -- .venv/bin/python …`
+4. Automation prompts must map the name Doppler expects:
+
+```bash
+DOPPLER_TOKEN="$DOPPLER_TOKEN_TRIAGE" doppler run \
+  --project chess-teacher --config prod_agent_triage -- \
+  .venv/bin/python .agents/skills/chess-teacher-log-triage/scripts/triage_query.py --json …
+```
 
 Do **not** put full `prod` credentials in Cursor. Fallback (no Doppler CLI): paste `S3_*` + `TRIAGE_*` into Cursor env instead.
 

@@ -15,7 +15,7 @@ Durable control plane for triage Automations. **Helpers are deterministic — no
 
 Use config **`prod_agent_triage`** (Doppler requires the `prod_` prefix under the Production environment; this is the plan’s `agent_triage` config).
 
-See [DOPPLER.md](DOPPLER.md). **Cursor Automations:** set `DOPPLER_TOKEN` only (service token scoped to this config); Cloud Agent install includes the Doppler CLI.
+See [DOPPLER.md](DOPPLER.md). **Cursor Automations:** set `DOPPLER_TOKEN_TRIAGE` (service token → `prod_agent_triage`); prompts map it to `DOPPLER_TOKEN=…` for the CLI. Leave general `DOPPLER_TOKEN` unchanged.
 
 ```bash
 doppler run --project chess-teacher --config prod_agent_triage -- .venv/Scripts/python.exe .agents/skills/chess-teacher-log-triage/scripts/triage_query.py --json info
