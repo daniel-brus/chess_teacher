@@ -15,6 +15,13 @@ sudo apt-get install -y \
   redis-server \
   git
 
+# Doppler CLI — Cloud Automations can inject DOPPLER_TOKEN and use
+# `doppler run --project chess-teacher --config prod_agent_triage -- …`
+if ! command -v doppler >/dev/null 2>&1; then
+  curl -Ls --tlsv1.2 --proto "=https" --retry 3 https://cli.doppler.com/install.sh \
+    | sudo sh
+fi
+
 if ! command -v psql >/dev/null 2>&1 || ! psql --version | grep -q ' 17\.'; then
   sudo install -d /usr/share/postgresql-common/pgdg
   sudo curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
