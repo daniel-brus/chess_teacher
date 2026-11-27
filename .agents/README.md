@@ -11,6 +11,9 @@ Planning docs for agents:
 | Skill | Invoke |
 |-------|--------|
 | [chess-teacher-db](skills/chess-teacher-db/) | `/chess-teacher-db` |
+| [chess-teacher-log-triage](skills/chess-teacher-log-triage/) | `/chess-teacher-log-triage` (log→issue→PR helpers) |
+| [chess-teacher-logs](skills/chess-teacher-logs/) | `/chess-teacher-logs` |
+| [chess-teacher-storage](skills/chess-teacher-storage/) | `/chess-teacher-storage` |
 | [import-dag](skills/import-dag/) | `/import-dag` (also auto when moving modules / fixing imports) |
 
 Add new skills as `.agents/skills/<name>/SKILL.md`. Cursor discovers them automatically (reload window after adding).
