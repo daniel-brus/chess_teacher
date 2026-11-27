@@ -44,7 +44,11 @@ def _require_doppler() -> None:
         )
 
 
-def _doppler_get(key: str) -> str:
+def _deploy_secret(key: str) -> str:
+    """Prefer env (e.g. ``doppler run --config prod_agent_triage``); else Doppler ``ci``."""
+    from_env = os.environ.get(key, "").strip()
+    if from_env:
+        return from_env
     _require_doppler()
     result = subprocess.run(
         [
@@ -64,9 +68,21 @@ def _doppler_get(key: str) -> str:
     )
     if result.returncode != 0 or not result.stdout.strip():
         raise SystemExit(
-            f"Missing or unreadable Doppler secret '{key}' in config '{DOPPLER_CONFIG}'."
+            f"Missing '{key}': set env or Doppler config '{DOPPLER_CONFIG}' "
+            "(triage Cloud Agents: put DEPLOY_* in prod_agent_triage)."
         )
     return result.stdout.strip()
+
+
+def _doppler_get(key: str) -> str:
+    """Backward-compatible alias for deploy secrets."""
+    return _deploy_secret(key)
+
+
+def _has_deploy_creds() -> bool:
+    return all(
+        os.environ.get(k, "").strip() for k in ("DEPLOY_HOST", "DEPLOY_USER", "DEPLOY_SSH_KEY")
+    )
 
 
 def _require_ssh() -> None:
@@ -157,13 +173,14 @@ def _ssh_run(remote_command: str, *, timeout: int = 120) -> dict[str, Any]:
 
 
 def cmd_info(_: argparse.Namespace) -> None:
-    _require_doppler()
-    host = _doppler_get("DEPLOY_HOST")
-    user = _doppler_get("DEPLOY_USER")
+    host = _deploy_secret("DEPLOY_HOST")
+    user = _deploy_secret("DEPLOY_USER")
+    creds_source = "env" if _has_deploy_creds() else f"doppler:{DOPPLER_CONFIG}"
     _emit({
         "environment": os_environ_agent.environ.get("ENVIRONMENT"),
         "doppler_project": DOPPLER_PROJECT,
         "doppler_config": DOPPLER_CONFIG,
+        "creds_source": creds_source,
         "host": host,
         "user": user,
         "namespace": NAMESPACE,
@@ -194,6 +211,24 @@ def cmd_pods(_: argparse.Namespace) -> None:
 
 def cmd_deployments(_: argparse.Namespace) -> None:
     _emit(_ssh_run(f"kubectl get deployments -n {NAMESPACE} -o wide"))
+
+
+def cmd_image_tag(_: argparse.Namespace) -> None:
+    """Return the streamlit deployment container image (for triage provenance)."""
+    path = "{.spec.template.spec.containers[0].image}"
+    result = _ssh_run(
+        f"kubectl get deploy {STREAMLIT_DEPLOYMENT} -n {NAMESPACE} -o jsonpath='{path}'"
+    )
+    image = (result.get("stdout") or "").strip()
+    _emit({
+        **result,
+        "ok": result.get("exit_code") == 0 and bool(image),
+        "deployment": STREAMLIT_DEPLOYMENT,
+        "image": image or None,
+        "observed_ref": f"main@{image.split(':')[-1]}"
+        if image and ":" in image
+        else (f"main@{image}" if image else "main@unknown"),
+    })
 
 
 def cmd_services(_: argparse.Namespace) -> None:
@@ -438,6 +473,10 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("nodes", help="kubectl get nodes -o wide.")
     sub.add_parser("pods", help="kubectl get pods in chess-teacher namespace.")
     sub.add_parser("deployments", help="kubectl get deployments.")
+    sub.add_parser(
+        "image-tag",
+        help="streamlit deployment container image (triage provenance).",
+    )
     sub.add_parser("services", help="kubectl get services.")
     sub.add_parser("ingress", help="kubectl get ingress.")
     sub.add_parser("rollout-status", help="Read-only rollout status (no restart).")
@@ -511,6 +550,7 @@ def main() -> None:
         "nodes": cmd_nodes,
         "pods": cmd_pods,
         "deployments": cmd_deployments,
+        "image-tag": cmd_image_tag,
         "services": cmd_services,
         "ingress": cmd_ingress,
         "events": cmd_events,
