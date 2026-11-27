@@ -2,7 +2,8 @@
 
 ## Trigger
 
-GitHub issue **label added:** `agent-fix`
+GitHub issue label **`agent-fix`** → GHA workflow posts Cursor **webhook** (see [IMPLEMENT_WEBHOOK.md](IMPLEMENT_WEBHOOK.md)). Manual Test/curl also OK.
+
 Repo: `chess_teacher`
 Checkout branch: **`develop`**
 

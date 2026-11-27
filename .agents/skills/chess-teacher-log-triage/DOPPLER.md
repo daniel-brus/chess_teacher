@@ -16,6 +16,14 @@ Created under Doppler project **`chess-teacher`**, environment **Production**.
 
 Needed to read `logs/python/buffer/**` and read/write `agent/triage/**`.
 
+### VPS SSH (from `ci`)
+
+- `DEPLOY_HOST`
+- `DEPLOY_USER`
+- `DEPLOY_SSH_KEY`
+
+Needed for chess-teacher-vps (`ping`, `image-tag`, kubectl logs). Prefer env injection via `doppler run`; `vps_query.py` falls back to Doppler `ci` locally.
+
 ### Triage knobs
 
 | Secret | Default |
@@ -33,7 +41,7 @@ Needed to read `logs/python/buffer/**` and read/write `agent/triage/**`.
 
 ## Explicitly excluded
 
-Postgres, Redis, Streamlit OAuth, DockerHub, VPS deploy SSH (`DEPLOY_*`), `LOG_BUFFER_DIR`.
+Postgres, Redis, Streamlit OAuth, DockerHub, `LOG_BUFFER_DIR`.
 
 ## Local usage
 

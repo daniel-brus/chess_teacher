@@ -1,29 +1,36 @@
-# VPS source (optional / v2) — enabled path documented, not wired in v1 Automations
+# VPS source (enabled for Triage)
 
-Plan sources **v1 = S3 + GitHub Actions**. VPS kubectl logs are **optional**.
+Triage scans live kubectl logs via **chess-teacher-vps** when `DEPLOY_*` are available.
 
-Triage Automation prompts currently exclude VPS. Empty `agent/triage/state/vps.json` is initialized so enabling later is a prompt + secrets change only.
+## Credentials
 
-## Options
+`prod_agent_triage` includes `DEPLOY_HOST`, `DEPLOY_USER`, `DEPLOY_SSH_KEY` (copied from `ci`).
 
-1. **Cursor-hosted + SSH in `prod_agent_triage`**
-   ```bash
-   # copy from ci into prod_agent_triage when ready
-   doppler secrets set DEPLOY_HOST=... DEPLOY_USER=... DEPLOY_SSH_KEY=... \
-     --project chess-teacher --config prod_agent_triage
-   ```
-   Triage then uses `chess-teacher-vps` / `vps_query.py logs`.
+Cloud Agent: `DOPPLER_TOKEN_TRIAGE` → `doppler run --config prod_agent_triage` injects SSH + S3.
 
-2. **Self-hosted Cursor worker** (preferred if SSH keys must not leave your net)
-   Keep SSH on Doppler `ci` only on that machine; run Triage with self-hosted runtime for VPS scans.
+`vps_query.py` prefers **env** `DEPLOY_*`; falls back to Doppler `ci` for local interactive use.
 
-## Enable checklist
+## Commands Triage should use
 
-- [ ] Choose option 1 or 2
-- [ ] Confirm `state-load --source vps` works
-- [ ] Extend Triage Automation prompt: lock/scan VPS since watermark; label `from-vps`
-- [ ] On SSH failure: `source_ok=false`, do not advance VPS watermark, continue S3/GHA
+```bash
+DOPPLER_TOKEN="$DOPPLER_TOKEN_TRIAGE" doppler run --project chess-teacher --config prod_agent_triage -- \
+  .venv/bin/python .agents/skills/chess-teacher-vps/scripts/vps_query.py --json ping
 
-## Labels
+DOPPLER_TOKEN="$DOPPLER_TOKEN_TRIAGE" doppler run --project chess-teacher --config prod_agent_triage -- \
+  .venv/bin/python .agents/skills/chess-teacher-vps/scripts/vps_query.py --json image-tag
 
-`from-vps` (created by `ensure_labels.ps1`).
+DOPPLER_TOKEN="$DOPPLER_TOKEN_TRIAGE" doppler run --project chess-teacher --config prod_agent_triage -- \
+  .venv/bin/python .agents/skills/chess-teacher-vps/scripts/vps_query.py --json pods
+
+# Then logs for ERROR/crash pods (tail capped by TRIAGE_MAX_LOG_LINES spirit):
+DOPPLER_TOKEN="$DOPPLER_TOKEN_TRIAGE" doppler run --project chess-teacher --config prod_agent_triage -- \
+  .venv/bin/python .agents/skills/chess-teacher-vps/scripts/vps_query.py --json logs <pod> --tail 200
+```
+
+## Rules
+
+- Lock `--source vps` before scanning; release after.
+- On SSH/`ping` failure: `source_ok=false`, **do not** advance VPS watermark; continue S3/GHA.
+- Use `image-tag` for `provenance.observed_image_tag` / `observed_ref`.
+- Issues from VPS: label `from-vps` (+ `agent-fix` when acting).
+- Read-only only — never apply/restart via this path.
