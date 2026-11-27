@@ -66,7 +66,11 @@ Implement Automation (separate): on `agent-fix` → claim `in-progress` → PR t
 
 ## VPS source
 
-Deferred for v1. When enabling: add SSH secrets to `prod_agent_triage` **or** run that source on a self-hosted Cursor worker with Doppler `ci`. Documented in [VPS.md](VPS.md).
+Enabled. `prod_agent_triage` includes `DEPLOY_*`; Triage uses chess-teacher-vps (`ping` / `image-tag` / `pods` / `logs`). See [VPS.md](VPS.md).
+
+## Implement trigger
+
+Issue label `agent-fix` → GitHub Action posts to Cursor Implement webhook. See [IMPLEMENT_WEBHOOK.md](IMPLEMENT_WEBHOOK.md).
 
 ## Related skills
 

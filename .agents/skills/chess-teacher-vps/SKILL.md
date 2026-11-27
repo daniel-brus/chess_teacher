@@ -5,9 +5,10 @@ description: >-
   Whitelisted kubectl get/describe/logs, cluster-info, host df/free/uptime,
   and prod Postgres reads via kubectl exec into streamlit
   (scripts/tools/agent_db_query.py). Never apply, delete, restart, or
-  ad-hoc shell. SSH credentials from Doppler ci config. Use when the user
-  asks about production pods, deploy status, ingress, logs, VPS health, or
-  production database contents behind the firewall.
+  ad-hoc shell. SSH credentials from env DEPLOY_* (e.g. prod_agent_triage)
+  or Doppler ci. Use when the user asks about production pods, deploy status,
+  ingress, logs, VPS health, image-tag provenance, or production database
+  contents behind the firewall.
 ---
 
 # Chess Teacher VPS / Hetzner (read-only)
@@ -40,10 +41,11 @@ If the user needs a mutating change (restart pod, deploy, config edit), **stop a
 | Config | Role | Used by this skill? |
 |--------|------|---------------------|
 | `dev_local` | Local Compose + optional k3d staging | No — use kubectl locally for k3d |
-| `ci` | GitHub Actions + **SSH to VPS** (`DEPLOY_HOST`, `DEPLOY_USER`, `DEPLOY_SSH_KEY`) | **Yes** — script reads SSH from here |
+| `ci` | GitHub Actions + **SSH to VPS** (`DEPLOY_*`) | **Yes** — fallback when env unset |
+| `prod_agent_triage` | Triage Automations (S3 + `DEPLOY_*` copy) | **Yes** — Cloud Agents via `doppler run` |
 | `prod` | Runtime secrets on VPS (Postgres, S3, Redis URLs for the app) | No for SSH; DB queries use env already injected into the streamlit pod |
 
-The VPS script loads SSH credentials from Doppler **`ci`** automatically. Requires `doppler login` with access to project `chess-teacher`.
+Credential order: **env `DEPLOY_HOST` / `DEPLOY_USER` / `DEPLOY_SSH_KEY` first**, else Doppler **`ci`**. Triage Cloud Agents use `DOPPLER_TOKEN_TRIAGE` + `prod_agent_triage`.
 
 Runtime app config on the cluster comes from **`prod`** via `doppler run` during CD (`orchestration/k8s/apply.sh`). Do not dump prod secrets through this skill.
 
@@ -89,6 +91,7 @@ On Windows (PowerShell): `.venv\Scripts\python.exe` optional for host-only comma
 | `nodes` | `kubectl get nodes -o wide` |
 | `pods` | `kubectl get pods -n chess-teacher -o wide` |
 | `deployments` | `kubectl get deployments -n chess-teacher` |
+| `image-tag` | streamlit deployment container image (triage provenance) |
 | `services` | `kubectl get svc -n chess-teacher` |
 | `ingress` | `kubectl get ingress -n chess-teacher` |
 | `events [--tail N]` | Recent namespace events |

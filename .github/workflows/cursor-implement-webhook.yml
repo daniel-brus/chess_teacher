@@ -1,0 +1,44 @@
+# Fire Cursor Implement Automation when agent-fix is added to an issue.
+# Secrets (repo Settings → Secrets → Actions):
+#   CURSOR_IMPLEMENT_WEBHOOK_URL  — https://api2.cursor.sh/automations/webhook/...
+#   CURSOR_IMPLEMENT_WEBHOOK_SECRET — Bearer token from Automations (no "Bearer " prefix)
+name: Cursor Implement webhook
+
+on:
+  issues:
+    types: [labeled]
+
+permissions:
+  contents: read
+
+jobs:
+  trigger-implement:
+    if: github.event.label.name == 'agent-fix'
+    runs-on: ubuntu-latest
+    steps:
+      - name: POST Cursor Implement webhook
+        env:
+          WEBHOOK_URL: ${{ secrets.CURSOR_IMPLEMENT_WEBHOOK_URL }}
+          WEBHOOK_SECRET: ${{ secrets.CURSOR_IMPLEMENT_WEBHOOK_SECRET }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_URL: ${{ github.event.issue.html_url }}
+        run: |
+          set -euo pipefail
+          if [ -z "${WEBHOOK_URL:-}" ] || [ -z "${WEBHOOK_SECRET:-}" ]; then
+            echo "Missing CURSOR_IMPLEMENT_WEBHOOK_URL or CURSOR_IMPLEMENT_WEBHOOK_SECRET"
+            exit 1
+          fi
+          BODY=$(python3 -c 'import json,os; ctx=(
+            f"Implement GitHub issue #{os.environ[\"ISSUE_NUMBER\"]}: "
+            f"{os.environ[\"ISSUE_TITLE\"]}. "
+            f"URL: {os.environ[\"ISSUE_URL\"]}. "
+            "Label agent-fix was just added. Follow "
+            ".agents/skills/chess-teacher-log-triage/AUTOMATION_IMPLEMENT.md. "
+            "Claim agent-fix → in-progress, open PR to develop with Fixes #N, never merge."
+          ); print(json.dumps({"context": ctx, "issue_number": int(os.environ["ISSUE_NUMBER"])}))')
+          curl -fsS -X POST "$WEBHOOK_URL" \
+            -H "Authorization: Bearer ${WEBHOOK_SECRET}" \
+            -H "Content-Type: application/json" \
+            -d "$BODY"
+          echo "webhook ok"
